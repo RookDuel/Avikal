@@ -1,0 +1,6 @@
+include README_PACKAGE.md
+include requirements.txt
+include requirements-cli.txt
+include avikal.cmd
+recursive-include src/avikal_backend/wordlists *.txt
+recursive-include scripts *.mjs
