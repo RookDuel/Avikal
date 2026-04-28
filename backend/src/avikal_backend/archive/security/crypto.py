@@ -1,0 +1,488 @@
+"""
+Cryptographic operations for Avikal format.
+Handles AES-256-GCM encryption, key generation, checksums, and memory protection.
+
+Phase 1 & 2 Security Enhancements:
+- Argon2id KDF for password hardening
+- Random padding for size obfuscation
+- Memory protection (secure zeroing)
+- Memory-hard password derivation (GPU-resistant)
+- Key file support
+
+SPDX-License-Identifier: Apache-2.0
+Copyright (c) 2026 Atharva Sen Barai.
+"""
+
+import hashlib
+import logging
+import secrets
+import ctypes
+import os
+import socket
+import struct
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from ..runtime_logging import runtime_debug_print as print
+
+log = logging.getLogger("avikal.crypto")
+
+# Try to import PQC library (ML-KEM, formerly Kyber)
+try:
+    import pqcrypto.kem.ml_kem_1024 as kyber
+    PQC_AVAILABLE = True
+except ImportError:
+    PQC_AVAILABLE = False
+
+
+ARGON2_SALT_BYTES = 32
+ARGON2_OUTPUT_BYTES = 32
+ARGON2_ITERATIONS = 3
+ARGON2_LANES = 4
+ARGON2_MEMORY_COST_KIB = 262144  # 256 MiB
+
+
+def _normalize_secret_input(password: str, keyphrase: list = None) -> bytes:
+    """Combine password and keyphrase into a single canonical secret."""
+    combined_secret = password or ""
+    if keyphrase and isinstance(keyphrase, list):
+        from ...mnemonic.generator import normalize_mnemonic_words
+
+        canonical_keyphrase = normalize_mnemonic_words(keyphrase)
+        keyphrase_str = " ".join(canonical_keyphrase)
+        combined_secret = combined_secret + "|" + keyphrase_str if combined_secret else keyphrase_str
+
+    if not combined_secret:
+        raise ValueError("Password or keyphrase is required for protected archive mode")
+
+    return combined_secret.encode("utf-8")
+
+
+def has_user_secret(password: str | None, keyphrase: list | None = None) -> bool:
+    """Return True when archive protection should use user-supplied secrets."""
+    if password:
+        return True
+    if keyphrase and isinstance(keyphrase, list):
+        return any(str(word).strip() for word in keyphrase)
+    return False
+
+
+def derive_argon2id_key(password: str, keyphrase: list = None, salt: bytes = None) -> tuple[bytes, bytes]:
+    """Derive a 32-byte master key using Argon2id."""
+    if salt is None:
+        salt = secrets.token_bytes(ARGON2_SALT_BYTES)
+
+    if len(salt) != ARGON2_SALT_BYTES:
+        raise ValueError(f"salt must be {ARGON2_SALT_BYTES} bytes")
+
+    secret = _normalize_secret_input(password, keyphrase)
+
+    print(
+        "Deriving master key with Argon2id "
+        f"({ARGON2_MEMORY_COST_KIB // 1024} MiB, t={ARGON2_ITERATIONS}, p={ARGON2_LANES})..."
+    )
+    kdf = Argon2id(
+        salt=salt,
+        length=ARGON2_OUTPUT_BYTES,
+        iterations=ARGON2_ITERATIONS,
+        lanes=ARGON2_LANES,
+        memory_cost=ARGON2_MEMORY_COST_KIB,
+    )
+    return kdf.derive(secret), salt
+
+
+def derive_time_only_payload_key(time_key: bytes, salt: bytes) -> bytes:
+    """Derive a payload key for time-capsules that intentionally use no user secret."""
+    if len(time_key) != 32:
+        raise ValueError("time_key must be 32 bytes")
+    if len(salt) != 32:
+        raise ValueError("salt must be 32 bytes")
+
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"avikal_time_only_payload_v1",
+    )
+    return hkdf.derive(time_key)
+
+
+def _normalize_aad(aad: bytes | None) -> bytes:
+    if aad is None:
+        raise ValueError("AAD is required")
+    if not isinstance(aad, (bytes, bytearray)):
+        raise ValueError("AAD must be bytes")
+    return bytes(aad)
+
+
+def encrypt_payload(data: bytes, key: bytes, aad: bytes) -> bytes:
+    """
+    Encrypt data with AES-256-GCM.
+    
+    Args:
+        data: Compressed file data
+        key: 32-byte random AES key
+    
+    Returns:
+        [12B nonce][encrypted data][16B GCM tag]
+    """
+    if len(key) != 32:
+        raise ValueError("Key must be 32 bytes (256 bits)")
+    
+    aesgcm = AESGCM(key)
+    nonce = secrets.token_bytes(12)
+    ciphertext = aesgcm.encrypt(nonce, data, associated_data=_normalize_aad(aad))
+    return nonce + ciphertext
+
+
+def decrypt_payload(encrypted: bytes, key: bytes, aad: bytes) -> bytes:
+    """
+    Decrypt AES-256-GCM encrypted data.
+    
+    Args:
+        encrypted: [12B nonce][encrypted data][16B GCM tag]
+        key: 32-byte AES key
+    
+    Returns:
+        Decrypted data
+    """
+    if len(key) != 32:
+        raise ValueError("Key must be 32 bytes (256 bits)")
+    if len(encrypted) < 28:  # 12 + 16
+        raise ValueError("Encrypted data too short")
+    
+    nonce = encrypted[:12]
+    ciphertext = encrypted[12:]
+    
+    try:
+        aesgcm = AESGCM(key)
+        return aesgcm.decrypt(nonce, ciphertext, associated_data=_normalize_aad(aad))
+    except Exception:
+        raise ValueError("Decryption failed - data corrupted or wrong key")
+
+
+def compute_checksum(data: bytes) -> bytes:
+    """SHA-256 hash of original file."""
+    return hashlib.sha256(data).digest()
+
+
+def verify_checksum(data: bytes, expected_checksum: bytes) -> bool:
+    """Constant-time checksum verification."""
+    actual = compute_checksum(data)
+    return secrets.compare_digest(actual, expected_checksum)
+
+
+
+def secure_zero(data):
+    """
+    Securely zero out sensitive data in memory.
+    Prevents memory dumps from exposing keys/passwords.
+    
+    IMPORTANT: This is best-effort in Python. For true memory security:
+    - Disable swap: sudo swapoff -a
+    - Disable crash dumps: ulimit -c 0
+    - Disable hibernation
+    - Use memory-locked pages (requires root)
+    
+    Args:
+        data: bytes or bytearray to zero out
+    """
+    if data is None:
+        return
+    
+    try:
+        if isinstance(data, (bytes, bytearray)):
+            # Overwrite memory with zeros
+            length = len(data)
+            if length > 0:
+                # Create a mutable buffer
+                if isinstance(data, bytes):
+                    # For bytes, we can't modify in place, but we can try to overwrite the object
+                    try:
+                        # Attempt to overwrite memory (may not work due to Python's memory management)
+                        ctypes.memset(id(data) + 32, 0, length)  # +32 to skip Python object header
+                    except Exception as exc:
+                        log.debug("Best-effort zeroing for immutable bytes failed: %s", exc)
+                else:
+                    # For bytearray, we can modify in place
+                    for i in range(length):
+                        data[i] = 0
+                    
+                # Additional: Try to trigger garbage collection to clear copies
+                import gc
+                gc.collect()
+    except Exception as exc:
+        log.debug("secure_zero best-effort cleanup failed: %s", exc)
+
+
+def add_random_padding(data: bytes, min_padding: int = 1024, max_padding: int = 10240) -> tuple:
+    """
+    Add random padding to hide actual file size.
+    
+    Args:
+        data: Original data
+        min_padding: Minimum padding size in bytes (default 1KB)
+        max_padding: Maximum padding size in bytes (default 10KB)
+    
+    Returns:
+        Tuple of (padded_data, padding_size)
+    """
+    padding_size = secrets.randbelow(max_padding - min_padding + 1) + min_padding
+    padding = os.urandom(padding_size)
+    
+    # Add padding marker: [4 bytes: padding size][padding][original data]
+    padded = padding_size.to_bytes(4, 'big') + padding + data
+    
+    return padded, padding_size
+
+
+def remove_padding(padded_data: bytes) -> bytes:
+    """
+    Remove random padding from data.
+    
+    Args:
+        padded_data: Data with padding
+    
+    Returns:
+        Original data without padding
+    """
+    if len(padded_data) < 4:
+        raise ValueError("Invalid padded data")
+    
+    padding_size = int.from_bytes(padded_data[:4], 'big')
+    
+    if len(padded_data) < 4 + padding_size:
+        raise ValueError("Invalid padding size")
+    
+    return padded_data[4 + padding_size:]
+
+
+def get_ntp_time_strict() -> float:
+    """
+    Get current time from Google NTP server (time.google.com) ONLY.
+    No system time fallback - fails if no internet connection.
+    
+    Returns:
+        Unix timestamp from NTP server
+    
+    Raises:
+        ConnectionError: If unable to connect to NTP server
+        ValueError: If NTP response is invalid
+    """
+    ntp_server = "time.google.com"
+    ntp_port = 123
+    
+    try:
+        # Create NTP request packet
+        # Format: LI(2) + VN(3) + Mode(3) + Stratum(8) + Poll(8) + Precision(8) + ...
+        ntp_packet = bytearray(48)
+        ntp_packet[0] = 0x1B  # LI=0, VN=3, Mode=3 (client)
+        
+        # Connect to NTP server
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(10)  # 10 second timeout
+        
+        # Send request
+        sock.sendto(ntp_packet, (ntp_server, ntp_port))
+        
+        # Receive response
+        response, _ = sock.recvfrom(48)
+        sock.close()
+        
+        if len(response) != 48:
+            raise ValueError("Invalid NTP response length")
+        
+        # Extract timestamp from response (bytes 40-43 for seconds, 44-47 for fraction)
+        timestamp_seconds = struct.unpack("!I", response[40:44])[0]
+        timestamp_fraction = struct.unpack("!I", response[44:48])[0]
+        
+        # Convert NTP timestamp to Unix timestamp
+        # NTP epoch: 1900-01-01, Unix epoch: 1970-01-01
+        # Difference: 70 years = 2208988800 seconds
+        ntp_to_unix_offset = 2208988800
+        unix_timestamp = timestamp_seconds - ntp_to_unix_offset
+        unix_timestamp += timestamp_fraction / (2**32)  # Add fractional seconds
+        
+        return unix_timestamp
+        
+    except socket.timeout:
+        raise ConnectionError(f"Timeout connecting to NTP server {ntp_server}")
+    except socket.gaierror:
+        raise ConnectionError(f"Cannot resolve NTP server {ntp_server}")
+    except Exception as e:
+        raise ConnectionError(f"NTP request failed: {str(e)}")
+
+
+def generate_pqc_keypair():
+    """
+    Generate post-quantum cryptography keypair using ML-KEM-1024 (formerly Kyber-1024).
+    
+    Returns:
+        Tuple of (public_key, private_key) or None if PQC not available
+    """
+    if not PQC_AVAILABLE:
+        return None
+    
+    try:
+        public_key, private_key = kyber.generate_keypair()
+        return public_key, private_key
+    except Exception:
+        return None
+
+
+def pqc_encapsulate(public_key: bytes) -> tuple:
+    """
+    Encapsulate a shared secret using PQC public key.
+    
+    Args:
+        public_key: ML-KEM public key
+    
+    Returns:
+        Tuple of (ciphertext, shared_secret) or None if PQC not available
+    """
+    if not PQC_AVAILABLE or not public_key:
+        return None
+    
+    try:
+        ciphertext, shared_secret = kyber.encrypt(public_key)
+        return ciphertext, shared_secret
+    except Exception:
+        return None
+
+
+def pqc_decapsulate(private_key: bytes, ciphertext: bytes) -> bytes:
+    """
+    Decapsulate shared secret using PQC private key.
+    
+    Args:
+        private_key: ML-KEM private key
+        ciphertext: Encapsulated ciphertext
+    
+    Returns:
+        Shared secret or None if PQC not available
+    """
+    if not PQC_AVAILABLE or not private_key or not ciphertext:
+        return None
+    
+    try:
+        shared_secret = kyber.decrypt(private_key, ciphertext)
+        return shared_secret
+    except Exception:
+        return None
+
+
+def derive_hierarchical_keys(password: str, keyphrase: list = None, salt: bytes = None) -> tuple:
+    """
+    Derive hierarchical keys using Argon2id + HKDF expansion.
+
+    Args:
+        password: User password
+        keyphrase: 21-word Hindi mnemonic keyphrase (optional)
+        salt: Random salt (16 bytes)
+
+    Returns:
+        tuple: (master_key, payload_key, chess_key, salt)
+    """
+    master_key, salt = derive_argon2id_key(password=password, keyphrase=keyphrase, salt=salt)
+
+    # Fast HKDF expansion for multiple keys
+    print("Expanding to hierarchical keys...")
+
+    # Payload key (for main file encryption)
+    hkdf_payload = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"avikal_payload_v3",
+    )
+    payload_key = hkdf_payload.derive(master_key)
+
+    # Chess key (for metadata encryption)
+    hkdf_chess = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"avikal_chess_v3",
+    )
+    chess_key = hkdf_chess.derive(master_key)
+
+    return master_key, payload_key, chess_key, salt
+
+
+def derive_pqc_hybrid_payload_key(payload_key: bytes, pqc_shared_secret: bytes, salt: bytes) -> bytes:
+    """
+    Derive a payload key that depends on both classical and PQC material.
+
+    This helper is intended for the external keyfile mode where the PQC private
+    key lives outside the .avk container. The resulting key can replace the
+    normal payload key so protected payload encryption inherits PQC protection.
+    """
+    if len(payload_key) != 32:
+        raise ValueError("payload_key must be 32 bytes")
+    if not pqc_shared_secret:
+        raise ValueError("pqc_shared_secret is required")
+    if len(salt) != 32:
+        raise ValueError("salt must be 32 bytes")
+
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"avikal_payload_pqc_v1",
+    )
+    return hkdf.derive(payload_key + pqc_shared_secret)
+
+
+def combine_split_keys(user_key: bytes, time_key: bytes, salt: bytes) -> bytes:
+    """
+    Combine user_key and time_key to derive combined encryption key.
+    Used during decryption after retrieving time_key from server.
+    
+    Args:
+        user_key: 32-byte key derived from password
+        time_key: 32-byte random key from server
+        salt: Salt used during key derivation
+    
+    Returns:
+        64-byte combined key (32 for AES + 32 for ChaCha20)
+    """
+    if len(user_key) != 32:
+        raise ValueError("user_key must be 32 bytes")
+    if len(time_key) != 32:
+        raise ValueError("time_key must be 32 bytes")
+    if len(salt) != 32:
+        raise ValueError("salt must be 32 bytes")
+    
+    # Combine using HKDF (same as derive_split_keys)
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=64,
+        salt=salt,
+        info=b"avikal_split_key_v1",
+    )
+    combined_material = user_key + time_key
+    combined_key = hkdf.derive(combined_material)
+    
+    return combined_key
+
+
+def verify_time_key_hash(time_key: bytes, expected_hash: bytes) -> bool:
+    """
+    Verify that time_key matches expected hash.
+    Prevents fake servers from returning wrong time_key.
+    
+    Args:
+        time_key: 32-byte time key from server
+        expected_hash: 32-byte SHA-256 hash stored in metadata
+    
+    Returns:
+        True if hash matches, False otherwise
+    """
+    if len(time_key) != 32:
+        raise ValueError("time_key must be 32 bytes")
+    if len(expected_hash) != 32:
+        raise ValueError("expected_hash must be 32 bytes (SHA-256)")
+    
+    actual_hash = hashlib.sha256(time_key).digest()
+    return secrets.compare_digest(actual_hash, expected_hash)
