@@ -1,0 +1,19 @@
+fastapi==0.135.1
+uvicorn==0.42.0
+pydantic==2.12.5
+requests==2.33.1
+PyJWT==2.12.1
+python-multipart==0.0.22
+
+# Core encryption dependencies
+cryptography==46.0.7
+PyNaCl==1.6.2
+pycryptodome==3.23.0
+pqcrypto==0.4.0
+
+# Compression libraries (Windows compatible)
+brotli==1.2.0
+# zstandard - skip for now, will use alternative compression
+
+# Additional utilities
+psutil==7.2.2
