@@ -15,7 +15,7 @@
 <div align="center">
 
 <a href="https://github.com/RookDuel/Avikal">
-  <img src="./assets/logo.png" alt="RookDuel Avikal" width="140" style="border-radius: 18px;" />
+  <img src="./assets/logo.png" alt="RookDuel Avikal" width="140" />
 </a>
 
 <h1 align="center">RookDuel Avikal</h1>
