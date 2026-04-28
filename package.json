@@ -1,0 +1,122 @@
+{
+  "name": "avikal-desktop",
+  "version": "1.0.0",
+  "description": "RookDuel Avikal - Quantum-Resistant File Encryption",
+  "main": "electron/main.js",
+  "author": "Atharva Sen Barai",
+  "license": "Apache-2.0",
+  "homepage": "https://avikal.rookduel.tech",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:electron\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:electron": "wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .",
+    "build": "npm run build:frontend && npm run build:electron",
+    "build:frontend": "cd frontend && npm run build",
+    "build:runtime": "backend\\venv\\Scripts\\python.exe scripts\\prepare_backend_runtime.py",
+    "build:electron": "npm run build:runtime && electron-builder",
+    "start": "electron .",
+    "package": "npm run build:frontend && npm run build:runtime && electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^41.0.2",
+    "electron-builder": "^26.8.1",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "tech.rookduel.avikal",
+    "productName": "RookDuel Avikal",
+    "executableName": "RookDuel Avikal",
+    "artifactName": "Avikal Setup ${version}.${ext}",
+    "afterPack": "./scripts/afterPack.js",
+    "npmRebuild": false,
+    "asar": true,
+    "compression": "maximum",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!__pycache__",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!**/pytest-cache-files-*/**",
+          "!delete-backend/**",
+          "!new-backend/**",
+          "!docs/**",
+          "!tests/**",
+          "!.tmp_test_runs/**",
+          "!.pytest_cache/**",
+          "!logs/**",
+          "!venv/**"
+        ]
+      },
+      {
+        "from": ".app-build/backend-runtime",
+        "to": "backend-runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico",
+      "publisherName": "RookDuel",
+      "verifyUpdateCodeSignature": false,
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "build/windows-context-menu.nsh",
+      "shortcutName": "RookDuel Avikal",
+      "uninstallDisplayName": "RookDuel Avikal",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "displayLanguageSelector": false,
+      "runAfterFinish": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "assets/icon.png",
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "drand-client": "^1.4.2",
+    "tlock-js": "^0.9.0"
+  }
+}
