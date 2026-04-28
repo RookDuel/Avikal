@@ -458,9 +458,7 @@ Full contributor workflow: [CONTRIBUTING.md](./CONTRIBUTING.md)
 [![Avikal][avikal-site-shield]][avikal-site-url]
 [![Email][email-shield]][email-url]
 
-[![X][x-shield]][x-url]
-[![Instagram][instagram-shield]][instagram-url]
-[![YouTube][youtube-shield]][youtube-url]
+
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -536,9 +534,3 @@ Distributed under the Apache License 2.0. See [`LICENSE`](./LICENSE) for details
 [avikal-site-url]: https://avikal.rookduel.tech
 [email-shield]: https://img.shields.io/badge/Email-contact@rookduel.tech-238636?style=for-the-badge&logo=gmail&logoColor=white&labelColor=0d1117
 [email-url]: mailto:contact@rookduel.tech
-[x-shield]: https://img.shields.io/badge/Follow%20on%20X-%40RookDuel-000000?style=for-the-badge&logo=x&logoColor=white&labelColor=0d1117
-[x-url]: https://x.com/RookDuel
-[instagram-shield]: https://img.shields.io/badge/Instagram-%40RookDuel-E1306C?style=for-the-badge&logo=instagram&logoColor=white&labelColor=0d1117
-[instagram-url]: https://instagram.com/RookDuel
-[youtube-shield]: https://img.shields.io/badge/YouTube-RookDuel-FF0000?style=for-the-badge&logo=youtube&logoColor=white&labelColor=0d1117
-[youtube-url]: https://youtube.com/@RookDuel
