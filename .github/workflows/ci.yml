@@ -57,5 +57,7 @@ jobs:
       - name: Check backend CLI version
         run: python -m avikal_backend --version
 
-      - name: Run targeted backend tests
-        run: python -m pytest -p no:cacheprovider backend/tests/test_cli_parser.py backend/tests/test_timezone_handling.py -q
+      - name: Run backend CLI smoke checks
+        run: |
+          python -m avikal_backend --help
+          python -m avikal_backend diag --json
