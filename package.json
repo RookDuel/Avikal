@@ -117,5 +117,9 @@
   "dependencies": {
     "drand-client": "^1.4.2",
     "tlock-js": "^0.9.0"
+  },
+  "overrides": {
+    "@xmldom/xmldom": "0.8.13",
+    "follow-redirects": "1.16.0"
   }
 }
