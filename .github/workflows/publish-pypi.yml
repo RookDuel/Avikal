@@ -34,6 +34,20 @@ jobs:
         working-directory: backend
         run: python -m build
 
+      - name: Verify package metadata
+        run: python -m pip install twine && python -m twine check backend/dist/*
+
+      - name: Smoke test built wheel
+        shell: bash
+        run: |
+          python -m venv .venv-smoke
+          source .venv-smoke/bin/activate
+          python -m pip install --upgrade pip
+          pip install backend/dist/*.whl
+          avikal --help
+          python -m avikal_backend --help
+          avikal diag --json
+
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
