@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "avikal"
+dynamic = ["version", "dependencies"]
+description = "Standalone CLI package for Avikal secure archives."
+readme = "README_PACKAGE.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Atharva Sen Barai" }
+]
+keywords = [
+  "archive",
+  "encryption",
+  "cli",
+  "pqc",
+  "timelock",
+  "aavrit",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security :: Cryptography",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://avikal.rookduel.tech"
+Repository = "https://github.com/RookDuel/Avikal"
+Documentation = "https://github.com/RookDuel/Avikal/blob/main/CLI_USAGE.md"
+
+[project.scripts]
+avikal = "avikal_backend.cli.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["avikal_backend.api*"]
+
+[tool.setuptools.package-data]
+avikal_backend = [
+  "wordlists/*.txt",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "avikal_backend.version.__version__" }
+dependencies = { file = ["requirements-cli.txt"] }
