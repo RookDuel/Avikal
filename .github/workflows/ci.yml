@@ -49,17 +49,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
+          pip install -e backend
 
-      - name: Compile key backend modules
-        run: |
-          python -m py_compile backend/api_server.py
-          python -m py_compile backend/activity_audit.py
-          python -m py_compile backend/security_settings.py
+      - name: Compile backend package
+        run: python -m compileall backend/src/avikal_backend
 
-      - name: Check backend CLI
-        run: python -m core.main.cli --version
-        working-directory: backend
+      - name: Check backend CLI version
+        run: python -m avikal_backend --version
 
-      - name: Run backend doctor
-        run: python -m core.main.cli doctor --json
-        working-directory: backend
+      - name: Run targeted backend tests
+        run: python -m pytest -p no:cacheprovider backend/tests/test_cli_parser.py backend/tests/test_timezone_handling.py -q
