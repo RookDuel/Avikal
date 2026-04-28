@@ -82,9 +82,8 @@
         "nsis"
       ],
       "icon": "assets/icon.ico",
-      "publisherName": "RookDuel",
       "verifyUpdateCodeSignature": false,
-      "signAndEditExecutable": true
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
