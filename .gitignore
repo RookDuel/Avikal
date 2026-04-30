@@ -10,6 +10,9 @@ dist/
 frontend/dist/
 dist-ssr/
 
+# drand helper bundled runtime deps (generated; reproduced via npm install --prefix backend/scripts)
+backend/scripts/node_modules/
+
 # Local Python runtime and build staging
 .app-build/
 backend/venv/

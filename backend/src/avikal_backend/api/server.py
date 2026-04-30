@@ -81,6 +81,7 @@ _crypto_lock = threading.Lock()
 from .errors import (
     friendly_error,
     handle_requests_error,
+    preserve_time_lock_detail,
 )
 from .drand import run_drand_helper
 from .preview_sessions import PreviewSessionStore

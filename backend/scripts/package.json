@@ -1,0 +1,12 @@
+{
+  "name": "avikal-drand-helper",
+  "version": "1.0.0",
+  "description": "Self-contained Node.js dependencies for the drand timelock helper script.",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "avikal-desktop": "file:../..",
+    "drand-client": "^1.4.2",
+    "tlock-js": "^0.9.0"
+  }
+}
