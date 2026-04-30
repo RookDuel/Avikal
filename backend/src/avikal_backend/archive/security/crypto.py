@@ -16,9 +16,7 @@ Copyright (c) 2026 Atharva Sen Barai.
 import hashlib
 import logging
 import secrets
-import ctypes
 import os
-import socket
 import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
@@ -176,42 +174,32 @@ def verify_checksum(data: bytes, expected_checksum: bytes) -> bool:
 
 def secure_zero(data):
     """
-    Securely zero out sensitive data in memory.
-    Prevents memory dumps from exposing keys/passwords.
-    
-    IMPORTANT: This is best-effort in Python. For true memory security:
-    - Disable swap: sudo swapoff -a
-    - Disable crash dumps: ulimit -c 0
-    - Disable hibernation
-    - Use memory-locked pages (requires root)
-    
+    Best-effort in-place zeroing of sensitive key material.
+
+    For ``bytearray`` the buffer is zeroed in-place.  For immutable ``bytes``
+    objects Python's memory model does not allow in-place mutation, so the
+    function drops the caller's reference and requests a GC cycle — the
+    underlying memory will be reclaimed when no further references exist.
+
+    IMPORTANT: True memory security requires OS-level controls (locked pages,
+    disabled swap/hibernation). This helper is a best-effort defence-in-depth
+    measure only.
+
     Args:
-        data: bytes or bytearray to zero out
+        data: bytes or bytearray containing sensitive material.
     """
     if data is None:
         return
-    
     try:
-        if isinstance(data, (bytes, bytearray)):
-            # Overwrite memory with zeros
-            length = len(data)
-            if length > 0:
-                # Create a mutable buffer
-                if isinstance(data, bytes):
-                    # For bytes, we can't modify in place, but we can try to overwrite the object
-                    try:
-                        # Attempt to overwrite memory (may not work due to Python's memory management)
-                        ctypes.memset(id(data) + 32, 0, length)  # +32 to skip Python object header
-                    except Exception as exc:
-                        log.debug("Best-effort zeroing for immutable bytes failed: %s", exc)
-                else:
-                    # For bytearray, we can modify in place
-                    for i in range(length):
-                        data[i] = 0
-                    
-                # Additional: Try to trigger garbage collection to clear copies
-                import gc
-                gc.collect()
+        if isinstance(data, bytearray):
+            for i in range(len(data)):
+                data[i] = 0
+        # For immutable bytes: drop reference and request GC.
+        # ctypes.memset into a bytes object's interior is undefined behaviour
+        # in CPython (the offset into the object header is platform-dependent
+        # and can corrupt the heap).  We intentionally do not attempt it.
+        import gc
+        gc.collect()
     except Exception as exc:
         log.debug("secure_zero best-effort cleanup failed: %s", exc)
 
@@ -258,60 +246,6 @@ def remove_padding(padded_data: bytes) -> bytes:
     return padded_data[4 + padding_size:]
 
 
-def get_ntp_time_strict() -> float:
-    """
-    Get current time from Google NTP server (time.google.com) ONLY.
-    No system time fallback - fails if no internet connection.
-    
-    Returns:
-        Unix timestamp from NTP server
-    
-    Raises:
-        ConnectionError: If unable to connect to NTP server
-        ValueError: If NTP response is invalid
-    """
-    ntp_server = "time.google.com"
-    ntp_port = 123
-    
-    try:
-        # Create NTP request packet
-        # Format: LI(2) + VN(3) + Mode(3) + Stratum(8) + Poll(8) + Precision(8) + ...
-        ntp_packet = bytearray(48)
-        ntp_packet[0] = 0x1B  # LI=0, VN=3, Mode=3 (client)
-        
-        # Connect to NTP server
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(10)  # 10 second timeout
-        
-        # Send request
-        sock.sendto(ntp_packet, (ntp_server, ntp_port))
-        
-        # Receive response
-        response, _ = sock.recvfrom(48)
-        sock.close()
-        
-        if len(response) != 48:
-            raise ValueError("Invalid NTP response length")
-        
-        # Extract timestamp from response (bytes 40-43 for seconds, 44-47 for fraction)
-        timestamp_seconds = struct.unpack("!I", response[40:44])[0]
-        timestamp_fraction = struct.unpack("!I", response[44:48])[0]
-        
-        # Convert NTP timestamp to Unix timestamp
-        # NTP epoch: 1900-01-01, Unix epoch: 1970-01-01
-        # Difference: 70 years = 2208988800 seconds
-        ntp_to_unix_offset = 2208988800
-        unix_timestamp = timestamp_seconds - ntp_to_unix_offset
-        unix_timestamp += timestamp_fraction / (2**32)  # Add fractional seconds
-        
-        return unix_timestamp
-        
-    except socket.timeout:
-        raise ConnectionError(f"Timeout connecting to NTP server {ntp_server}")
-    except socket.gaierror:
-        raise ConnectionError(f"Cannot resolve NTP server {ntp_server}")
-    except Exception as e:
-        raise ConnectionError(f"NTP request failed: {str(e)}")
 
 
 def generate_pqc_keypair():

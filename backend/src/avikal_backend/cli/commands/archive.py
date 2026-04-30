@@ -136,7 +136,10 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
         input_path,
         password=args.password,
         keyphrase=keyphrase,
-        skip_timelock=False,
+        # skip_timelock=True here: this call is only for archive-type detection
+        # (single vs. multi-file). The time-lock is enforced inside the pipeline
+        # decoders that follow. Using False crashes the CLI on any locked archive.
+        skip_timelock=True,
     )
 
     if archive_kind == "multi_file":

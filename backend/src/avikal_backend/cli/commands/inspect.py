@@ -142,7 +142,7 @@ def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     metadata_summary = summarize_metadata(metadata) if metadata else None
-    single_name = metadata_summary.get("filename") if metadata_summary else Path(input_path).stem
+    single_name = (metadata_summary.get("filename") if metadata_summary else None) or Path(input_path).stem
     return {
         "ok": True,
         "mode": "contents",
