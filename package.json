@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "avikal-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "RookDuel Avikal - Quantum-Resistant File Encryption",
   "main": "electron/main.js",
   "author": "Atharva Sen Barai",

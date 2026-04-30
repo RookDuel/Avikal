@@ -17,8 +17,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from ..security.crypto import get_ntp_time_strict
-
 
 UTC = timezone.utc
 IST_OFFSET = timedelta(0)
@@ -32,30 +30,22 @@ def _ensure_utc_datetime(value: datetime) -> datetime:
 
 def _get_trusted_utc_now() -> datetime:
     """
-    Return trusted UTC time using the strongest available backend source.
-
-    Order:
-    1. strict UDP-based Google NTP
-    2. backend HTTP Date-header trusted time service
+    Return trusted UTC time from the backend NTP service (time.google.com HTTPS).
 
     Raises:
-        ConnectionError: if no trusted network time source is reachable
+        ConnectionError: if the NTP service is unreachable
     """
     try:
-        utc_timestamp = get_ntp_time_strict()
-        return datetime.fromtimestamp(utc_timestamp, tz=UTC)
-    except Exception as primary_error:
-        try:
-            from avikal_backend.services.ntp_service import get_ntp_datetime_utc
+        from avikal_backend.services.ntp_service import get_ntp_datetime_utc
 
-            return get_ntp_datetime_utc().astimezone(UTC)
-        except Exception as fallback_error:
-            raise ConnectionError(
-                "Failed to get trusted time from time.google.com via both UDP NTP "
-                f"and HTTPS Date-header fallback. Primary error: {primary_error}. "
-                f"Fallback error: {fallback_error}. Internet connection is required "
-                "for Avikal time-capsule security."
-            )
+        return get_ntp_datetime_utc().astimezone(UTC)
+    except Exception as exc:
+        raise ConnectionError(
+            f"Failed to get trusted time from time.google.com. "
+            f"Internet connection is required for Avikal time-capsule security. "
+            f"Error: {exc}"
+        ) from exc
+
 
 
 def get_trusted_now_ntp() -> datetime:
