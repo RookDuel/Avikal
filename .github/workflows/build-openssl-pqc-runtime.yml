@@ -1,0 +1,82 @@
+name: Build OpenSSL PQC Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      openssl_version:
+        description: "OpenSSL 3.5 LTS version to build"
+        required: true
+        default: "3.5.6"
+  push:
+    paths:
+      - ".github/workflows/build-openssl-pqc-runtime.yml"
+      - "scripts/build_openssl_runtime.ps1"
+      - "scripts/install_pqc_runtime.ps1"
+      - "backend/src/avikal_backend/archive/security/pqc_provider.py"
+      - "backend/tests/test_pqc_provider.py"
+
+jobs:
+  windows-runtime:
+    name: Windows x64 OpenSSL PQC Runtime
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    env:
+      OPENSSL_VERSION: ${{ inputs.openssl_version || '3.5.6' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        shell: powershell
+        run: |
+          choco install strawberryperl nasm -y --no-progress
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build OpenSSL runtime
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts\build_openssl_runtime.ps1 -Version $env:OPENSSL_VERSION
+
+      - name: Verify OpenSSL runtime
+        shell: powershell
+        run: |
+          $openssl = Resolve-Path runtime\pqc\bin\openssl.exe
+          & $openssl version
+          & $openssl list -kem-algorithms | Select-String "ML-KEM-1024"
+          & $openssl list -signature-algorithms | Select-String "ML-DSA"
+          & $openssl list -signature-algorithms | Select-String "SLH-DSA"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest
+
+      - name: Run PQC provider tests against bundled OpenSSL
+        env:
+          AVIKAL_OPENSSL_EXEC: ${{ github.workspace }}\runtime\pqc\bin\openssl.exe
+          PYTHONPATH: ${{ github.workspace }}\backend\src
+        run: python -m pytest backend/tests/test_pqc_provider.py -q
+
+      - name: Package runtime artifact
+        shell: powershell
+        run: |
+          $artifactName = "avikal-openssl-pqc-runtime-win-x64-openssl-$env:OPENSSL_VERSION"
+          Compress-Archive -LiteralPath runtime\pqc\* -DestinationPath "$artifactName.zip" -Force
+          Get-FileHash -LiteralPath "$artifactName.zip" -Algorithm SHA256 | Format-List
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: avikal-openssl-pqc-runtime-win-x64-openssl-${{ env.OPENSSL_VERSION }}
+          path: avikal-openssl-pqc-runtime-win-x64-openssl-${{ env.OPENSSL_VERSION }}.zip
+          if-no-files-found: error
+          retention-days: 30
