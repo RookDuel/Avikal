@@ -16,9 +16,11 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
-import tempfile
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +78,23 @@ def _backend_root() -> Path:
 
 def _project_root() -> Path:
     return _backend_root().parent
+
+
+def _pqc_temp_root() -> Path:
+    configured = os.environ.get("AVIKAL_PQC_TEMP_DIR")
+    root = Path(configured) if configured else _project_root() / ".tmp_pqc_provider"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+@contextmanager
+def _pqc_work_dir():
+    work_dir = _pqc_temp_root() / f"avikal-pqc-{uuid.uuid4().hex}"
+    work_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        yield work_dir
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _candidate_openssl_paths() -> list[Path]:
@@ -225,8 +244,8 @@ def _read_text(path: Path) -> str:
 def _generate_keypair(work_dir: Path, algorithm: str, stem: str) -> tuple[str, str]:
     private_path = work_dir / f"{stem}_private.pem"
     public_path = work_dir / f"{stem}_public.pem"
-    _run_openssl(["genpkey", "-algorithm", algorithm, "-out", str(private_path)], cwd=work_dir)
-    _run_openssl(["pkey", "-in", str(private_path), "-pubout", "-out", str(public_path)], cwd=work_dir)
+    _run_openssl(["genpkey", "-algorithm", algorithm, "-out", private_path.name], cwd=work_dir)
+    _run_openssl(["pkey", "-in", private_path.name, "-pubout", "-out", public_path.name], cwd=work_dir)
     return _read_text(private_path), _read_text(public_path)
 
 
@@ -248,11 +267,11 @@ def _sign_message(work_dir: Path, private_pem: str, message: bytes, stem: str) -
             "-sign",
             "-rawin",
             "-inkey",
-            str(private_path),
+            private_path.name,
             "-in",
-            str(message_path),
+            message_path.name,
             "-out",
-            str(signature_path),
+            signature_path.name,
         ],
         cwd=work_dir,
     )
@@ -273,11 +292,11 @@ def _verify_signature(work_dir: Path, public_pem: str, message: bytes, signature
             "-rawin",
             "-pubin",
             "-inkey",
-            str(public_path),
+            public_path.name,
             "-in",
-            str(message_path),
+            message_path.name,
             "-sigfile",
-            str(signature_path),
+            signature_path.name,
         ],
         cwd=work_dir,
     )
@@ -294,11 +313,11 @@ def _encapsulate_mlkem(work_dir: Path, public_pem: str) -> tuple[bytes, bytes]:
             "-encap",
             "-pubin",
             "-inkey",
-            str(public_path),
+            public_path.name,
             "-out",
-            str(ciphertext_path),
+            ciphertext_path.name,
             "-secret",
-            str(secret_path),
+            secret_path.name,
         ],
         cwd=work_dir,
     )
@@ -316,11 +335,11 @@ def _decapsulate_mlkem(work_dir: Path, private_pem: str, pqc_ciphertext: bytes) 
             "pkeyutl",
             "-decap",
             "-inkey",
-            str(private_path),
+            private_path.name,
             "-in",
-            str(ciphertext_path),
+            ciphertext_path.name,
             "-secret",
-            str(secret_path),
+            secret_path.name,
         ],
         cwd=work_dir,
     )
@@ -350,8 +369,7 @@ def create_pqc_archive_material(*, archive_filename: str) -> dict[str, Any]:
     if not status.get("available"):
         raise PQCProviderUnavailable(str(status.get("reason")))
 
-    with tempfile.TemporaryDirectory(prefix="avikal-pqc-") as temp_dir:
-        work_dir = Path(temp_dir)
+    with _pqc_work_dir() as work_dir:
         mlkem_private, mlkem_public = _generate_keypair(work_dir, ML_KEM_ALGORITHM, "mlkem")
         mldsa_private, mldsa_public = _generate_keypair(work_dir, ML_DSA_ALGORITHM, "mldsa")
         slhdsa_private, slhdsa_public = _generate_keypair(work_dir, SLH_DSA_ALGORITHM, "slhdsa")
@@ -446,8 +464,7 @@ def decapsulate_pqc_archive_material(
     public_keys = public_bundle["keys"]
     private_keys = private_bundle["keys"]
     binding = _public_binding(public_bundle)
-    with tempfile.TemporaryDirectory(prefix="avikal-pqc-") as temp_dir:
-        work_dir = Path(temp_dir)
+    with _pqc_work_dir() as work_dir:
         _verify_signature(
             work_dir,
             public_keys["ml_dsa_public_pem"],
