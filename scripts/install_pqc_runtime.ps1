@@ -45,7 +45,7 @@ try {
     $artifactRoot = $opensslCandidates[0].Directory.FullName
   }
 
-  Copy-Item -LiteralPath (Join-Path $artifactRoot "*") -Destination $RuntimeRoot -Recurse -Force
+  Copy-Item -Path (Join-Path $artifactRoot "*") -Destination $RuntimeRoot -Recurse -Force
 
   $opensslExe = Join-Path $RuntimeRoot "bin\openssl.exe"
   if (-not (Test-Path -LiteralPath $opensslExe)) {
