@@ -70,8 +70,9 @@ jobs:
         shell: powershell
         run: |
           $artifactName = "avikal-openssl-pqc-runtime-win-x64-openssl-$env:OPENSSL_VERSION"
-          Compress-Archive -LiteralPath runtime\pqc\* -DestinationPath "$artifactName.zip" -Force
-          Get-FileHash -LiteralPath "$artifactName.zip" -Algorithm SHA256 | Format-List
+          $artifactPath = Join-Path $PWD "$artifactName.zip"
+          Compress-Archive -Path runtime\pqc\* -DestinationPath $artifactPath -Force
+          Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256 | Format-List
 
       - name: Upload runtime artifact
         uses: actions/upload-artifact@v4
