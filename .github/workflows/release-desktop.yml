@@ -16,6 +16,8 @@ permissions:
 jobs:
   windows-installer:
     runs-on: windows-latest
+    env:
+      OPENSSL_VERSION: "3.5.6"
 
     steps:
       - name: Checkout
@@ -49,6 +51,21 @@ jobs:
           python -m venv backend\venv
           backend\venv\Scripts\python.exe -m pip install --upgrade pip
           backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+      - name: Install OpenSSL PQC runtime build tools
+        shell: powershell
+        run: |
+          choco install strawberryperl nasm -y --no-progress
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Ensure PQC runtime is available
+        shell: powershell
+        run: |
+          $runtimeManifest = Join-Path $PWD "runtime\pqc\avikal-openssl-runtime.json"
+          if (-not (Test-Path -LiteralPath $runtimeManifest)) {
+            powershell -ExecutionPolicy Bypass -File scripts\build_openssl_runtime.ps1 -Version $env:OPENSSL_VERSION
+          }
 
       - name: Install drand helper dependencies
         # Uses npm ci (not npm install) for reproducible installs from the lockfile.
