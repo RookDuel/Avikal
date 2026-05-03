@@ -129,8 +129,6 @@ jobs:
           name: avikal-windows-installer
           path: |
             dist/*.exe
-            dist/*.blockmap
-            dist/avikal-release-metadata.json
 
       - name: Upload installer to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -138,5 +136,3 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           files: |
             dist/*.exe
-            dist/*.blockmap
-            dist/avikal-release-metadata.json
