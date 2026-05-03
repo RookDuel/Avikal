@@ -16,8 +16,11 @@ from typing import List
 
 WORDLIST_ID = "avikal-hi-2048-v1"
 WORDLIST_FILENAME = "wordlist_hi_2048_v1.txt"
+ROMAN_WORDLIST_ID = "avikal-hi-roman-2048-v1"
+ROMAN_WORDLIST_FILENAME = "wordlist_hi_roman_2048_v1.txt"
 WORDLIST_SIZE = 2048
 _SPACE_RE = re.compile(r"\s+")
+_ROMAN_WORD_RE = re.compile(r"[a-z0-9'\-]+")
 
 
 def normalize_hindi_word(word: str) -> str:
@@ -39,9 +42,11 @@ class HindiWordList:
     """Manages the frozen Hindi 2048-word list for mnemonic generation."""
 
     wordlist_id = WORDLIST_ID
+    roman_wordlist_id = ROMAN_WORDLIST_ID
 
     def __init__(self):
         self.words = self._load_wordlist()
+        self.roman_words = self._load_roman_wordlist()
         self.word_to_index = {word: i for i, word in enumerate(self.words)}
 
     def _load_wordlist(self) -> List[str]:
@@ -64,6 +69,31 @@ class HindiWordList:
             raise ValueError("Canonical wordlist contains empty entries")
 
         return words
+
+    def _load_roman_wordlist(self) -> List[str]:
+        """Load romanized input helpers that map 1:1 to the canonical Hindi list."""
+        roman_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "wordlists",
+            ROMAN_WORDLIST_FILENAME,
+        )
+
+        with open(roman_path, "r", encoding="utf-8") as f:
+            roman_words = [
+                unicodedata.normalize("NFKC", line).strip().lower()
+                for line in f
+                if line.strip()
+            ]
+
+        if len(roman_words) != WORDLIST_SIZE:
+            raise ValueError(f"Invalid roman wordlist size: {len(roman_words)} != {WORDLIST_SIZE}")
+        if any(not word for word in roman_words):
+            raise ValueError("Roman wordlist contains empty entries")
+        if any(_ROMAN_WORD_RE.fullmatch(word) is None for word in roman_words):
+            raise ValueError("Roman wordlist contains unsupported characters")
+
+        return roman_words
 
     def get_word(self, index: int) -> str:
         """Get word by index (0-2047)."""
@@ -89,6 +119,13 @@ class HindiWordList:
     def get_all_words(self) -> List[str]:
         """Get all canonical words."""
         return self.words.copy()
+
+    def get_roman_pairs(self) -> List[dict]:
+        """Get romanized input helpers paired with canonical Hindi words."""
+        return [
+            {"index": index + 1, "hindi": hindi, "roman": roman}
+            for index, (hindi, roman) in enumerate(zip(self.words, self.roman_words))
+        ]
 
     def search_words(self, prefix: str) -> List[str]:
         """Search words by normalized prefix for autocomplete."""

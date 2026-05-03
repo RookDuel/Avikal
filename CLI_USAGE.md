@@ -76,6 +76,7 @@ On Windows, `pip` creates the `avikal` command automatically through the package
 | `inspect` | `info` | Read container and metadata details |
 | `contents` | `ls`, `list` | List logical files inside an archive |
 | `validate` | `check` | Verify archive structure and optional metadata access |
+| `rekey` | `rotate` | Rotate archive credentials without rewriting `payload.enc` |
 | `doctor` | `diag` | Check runtime health and optional Aavrit connectivity |
 
 ## Quick examples
@@ -83,7 +84,7 @@ On Windows, `pip` creates the `avikal` command automatically through the package
 ### Create a protected archive
 
 ```powershell
-avikal enc document.pdf -p "StrongPass#123"
+avikal enc document.pdf --password-prompt
 ```
 
 ### Create a multi-file archive
@@ -104,6 +105,7 @@ avikal enc document.pdf --keyphrase-file phrase.txt
 ```powershell
 avikal enc secret.docx -p "StrongPass#123" --pqc
 avikal enc secret.docx -p "StrongPass#123" --pqc --pqc-keyfile-output secret.avkkey
+avikal enc secret.docx --password-prompt --pqc
 ```
 
 ### Create a time-locked archive
@@ -118,6 +120,7 @@ The `--unlock` value is interpreted in your local timezone.
 
 ```powershell
 avikal dec locked.avk -d output -p "StrongPass#123"
+avikal dec locked.avk -d output --password-prompt
 avikal dec locked.avk -d output --keyphrase-file phrase.txt
 avikal dec locked.avk -d output -p "StrongPass#123" --pqc-keyfile locked.avkkey
 ```
@@ -128,6 +131,13 @@ avikal dec locked.avk -d output -p "StrongPass#123" --pqc-keyfile locked.avkkey
 avikal info locked.avk
 avikal ls locked.avk -p "StrongPass#123"
 avikal check locked.avk
+```
+
+### Rotate archive credentials
+
+```powershell
+avikal rekey locked.avk --old-password-prompt --new-password-prompt
+avikal rotate locked.avk --output rotated.avk --old-keyphrase-file old.txt --new-keyphrase-file new.txt
 ```
 
 ## `encode`
@@ -154,6 +164,8 @@ Use `encode` when you want to create a new `.avk` archive.
 | `--pick-output`, `-O` | Open the save dialog for the destination archive |
 | `--output`, `-o` | Explicit output `.avk` path |
 | `--password`, `-p` | Password-based protection |
+| `--password-prompt` | Prompt securely for the password instead of placing it in shell history |
+| `--password-stdin` | Read the password from the first line of standard input for scripts |
 | `--keyphrase` | Direct 21-word keyphrase input |
 | `--keyphrase-file`, `-K` | Read the keyphrase from a UTF-8 text file |
 | `--pqc` | Generate and require a companion `.avkkey` file |
@@ -166,8 +178,11 @@ Use `encode` when you want to create a new `.avk` archive.
 ### Important rules
 
 - Use either `--keyphrase` or `--keyphrase-file`, not both.
+- Prefer `--password-prompt` for manual use so the password is not stored in terminal history.
+- Use `--password-stdin` for automation when a separate secret manager feeds the password.
 - TimeCapsule creation requires both `--timecapsule` and `--unlock`.
 - PQC mode is layered protection. It adds a required `.avkkey` file to the normal archive credentials.
+  Current Quantum Keyfile archives use Avikal's fixed hybrid suite: ML-KEM-1024 + X25519, ML-DSA-87, SLH-DSA-SHA2-256s, AES-256-GCM, Argon2id, and HKDF.
 
 ## `decode`
 
@@ -182,6 +197,8 @@ Use `decode` when you want to recover files from an archive.
 | `--output-dir`, `-d` | Extraction directory |
 | `--pick-output-dir`, `-O` | Pick the extraction directory visually |
 | `--password`, `-p` | Password for decryption |
+| `--password-prompt` | Prompt securely for the password |
+| `--password-stdin` | Read the password from standard input for automation |
 | `--keyphrase` | Direct keyphrase input |
 | `--keyphrase-file`, `-K` | Keyphrase file path |
 | `--pqc-keyfile` | Companion `.avkkey` path |
@@ -231,6 +248,27 @@ avikal check locked.avk -p "StrongPass#123"
 avikal check locked.avk --keyphrase-file phrase.txt
 ```
 
+## `rekey`
+
+Use `rekey` when you want to rotate the password or keyphrase for a rekey-capable archive.
+
+New protected archives store a random payload data-encryption key wrapped inside `keychain.pgn`. Rekey opens the old keychain, re-wraps that payload key with the new credentials, and writes a fresh keychain while copying `payload.enc` byte-for-byte unchanged.
+
+### Main options
+
+| Option | Purpose |
+| --- | --- |
+| `input` | Source archive path |
+| `--output`, `-o` | Optional output `.avk`; omit for in-place rekey |
+| `--old-password`, `--old-password-prompt`, `--old-password-stdin` | Current password input modes |
+| `--new-password`, `--new-password-prompt`, `--new-password-stdin` | New password input modes |
+| `--old-keyphrase`, `--old-keyphrase-file` | Current keyphrase input modes |
+| `--new-keyphrase`, `--new-keyphrase-file` | New keyphrase input modes |
+| `--force` | Overwrite an existing `--output` file |
+| `--json` | Return machine-readable output |
+
+Current phase supports regular rekey-capable archives. PQC keyfile and provider TimeCapsule rekey are intentionally rejected until their external-key update flows are implemented end to end.
+
 ## `doctor`
 
 Use `doctor` when you want to verify that the CLI environment is healthy.
@@ -239,6 +277,7 @@ It checks:
 
 - Python/runtime information
 - required CLI package imports
+- OpenSSL Quantum Keyfile provider and hybrid KEM suite readiness
 - local filesystem write access
 - optional Aavrit endpoint reachability
 
@@ -298,5 +337,6 @@ avikal dec --help
 avikal info --help
 avikal ls --help
 avikal check --help
+avikal rekey --help
 avikal diag --help
 ```

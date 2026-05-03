@@ -3,7 +3,7 @@ import { Settings, X, Activity, Sun, Moon, Monitor, Download, type LucideIcon } 
 import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTheme } from '../contexts/ThemeContext'
-import { BACKEND_BASE_URL } from '../lib/backend'
+import { fetchBackend } from '../lib/backend'
 import { cn } from '../lib/utils'
 
 interface SecuritySettingsProps {
@@ -47,7 +47,7 @@ export default function SecuritySettings({ isOpen, onClose }: SecuritySettingsPr
   const loadSettings = async () => {
     try {
       setLoading(true)
-      const response = await fetch(`${BACKEND_BASE_URL}/api/security/settings`)
+      const response = await fetchBackend('/api/security/settings')
       const data = await response.json()
       
       if (data.success) {
@@ -70,7 +70,7 @@ export default function SecuritySettings({ isOpen, onClose }: SecuritySettingsPr
   const exportActivityLog = async () => {
     try {
       setExportingAuditLog(true)
-      const response = await fetch(`${BACKEND_BASE_URL}/api/security/activity-log/export`)
+      const response = await fetchBackend('/api/security/activity-log/export')
       const rawText = await response.text()
 
       let data: {
@@ -96,17 +96,13 @@ export default function SecuritySettings({ isOpen, onClose }: SecuritySettingsPr
       const filename = data.filename || 'avikal-activity-log.md'
       const entryCount = data.entry_count ?? 0
 
-      if (electron?.saveFile && electron.writeFile) {
-        const selectedPath = await electron.saveFile({
+      if (electron?.saveTextFile) {
+        const selectedPath = await electron.saveTextFile({
           defaultPath: filename,
           filters: [{ name: 'Markdown Files', extensions: ['md'] }],
+          content: data.markdown,
         })
         if (!selectedPath) return
-
-        const written = await electron.writeFile(selectedPath, data.markdown)
-        if (!written) {
-          throw new Error('Failed to write activity audit export file')
-        }
 
         toast.success(`Activity audit exported (${entryCount} entr${entryCount === 1 ? 'y' : 'ies'})`)
         return

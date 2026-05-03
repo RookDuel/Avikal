@@ -23,8 +23,49 @@ export interface ElectronDirectoryNode {
   path: string
   isDir: boolean
   size: number
+  truncated?: boolean
   children?: ElectronDirectoryNode[]
   error?: boolean
+}
+
+export interface ElectronSaveTextOptions {
+  defaultPath?: string
+  filters?: ElectronDialogFilter[]
+  content: string
+}
+
+export interface ElectronExportCopyOptions {
+  sourcePath: string
+  defaultPath?: string
+  filters?: ElectronDialogFilter[]
+}
+
+export interface ElectronExportFilesToDirectoryOptions {
+  title?: string
+  files: Array<{
+    sourcePath: string
+    relativePath: string
+  }>
+}
+
+export interface ElectronExportDirectoryResult {
+  destinationPath: string
+  copiedCount: number
+}
+
+export type BackendRuntimeState = 'idle' | 'starting' | 'ready' | 'error' | 'stopped'
+
+export interface BackendRuntimeStatus {
+  state: BackendRuntimeState
+  baseUrl: string
+  error: string | null
+  updatedAt: number
+}
+
+export interface BackendRequestConfig {
+  baseUrl: string
+  authHeader: string
+  authToken: string | null
 }
 
 declare global {
@@ -33,13 +74,16 @@ declare global {
     saveFile: (options?: ElectronSaveDialogOptions) => Promise<string | undefined>
     openDirectory: () => Promise<string | undefined>
     openFolders: () => Promise<string[]>
-    writeFile: (path: string, content: string) => Promise<boolean>
-    readFile: (path: string) => Promise<string>
-    copyFile: (sourcePath: string, destinationPath: string) => Promise<boolean>
     scanDirectory: (dirPath: string) => Promise<ElectronDirectoryNode>
+    saveTextFile?: (options: ElectronSaveTextOptions) => Promise<string | null>
+    exportFileCopy?: (options: ElectronExportCopyOptions) => Promise<string | null>
+    exportFilesToDirectory?: (options: ElectronExportFilesToDirectoryOptions) => Promise<ElectronExportDirectoryResult | null>
     openPath?: (path: string) => Promise<void>
     openExternal?: (url: string) => Promise<void>
     onBackendLog?: (callback: (message: string) => void) => () => void
+    getBackendStatus?: () => Promise<BackendRuntimeStatus>
+    getBackendRequestConfig?: () => Promise<BackendRequestConfig>
+    onBackendStatus?: (callback: (status: BackendRuntimeStatus) => void) => () => void
     minimizeWindow: () => Promise<void>
     maximizeWindow: () => Promise<void>
     closeWindow: () => Promise<void>

@@ -29,6 +29,7 @@ PAYLOAD_HEADER_SIZE = PAYLOAD_HEADER_STRUCT.size
 DEFAULT_STREAM_CHUNK_SIZE = 10 * 1024 * 1024
 GCM_NONCE_BYTES = 12
 GCM_TAG_BYTES = 16
+DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024 * 1024
 
 
 def _validate_key(key: bytes | None) -> bytes:
@@ -170,10 +171,17 @@ def stream_payload_to_file(
     aad: bytes,
     decrypt_key: bytes | None,
     expected_checksum: bytes,
+    expected_output_size: int | None = None,
+    max_output_size: int = DEFAULT_MAX_OUTPUT_BYTES,
     chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE,
     progress_callback=None,
 ) -> dict:
     """Decrypt/decompress a streamed payload into a temp file and atomically commit it."""
+    if expected_output_size is not None and expected_output_size < 0:
+        raise ValueError("Expected output size must be non-negative")
+    if max_output_size <= 0:
+        raise ValueError("Maximum output size must be positive")
+
     header_bytes = payload_stream.read(PAYLOAD_HEADER_SIZE)
     header = parse_payload_header(header_bytes)
     total_payload_size = getattr(payload_stream, "avikal_file_size", None)
@@ -218,9 +226,13 @@ def stream_payload_to_file(
             plaintext_chunk = decryptor.update(chunk) if decryptor else chunk
             decompressed_chunk = decompressor.decompress(plaintext_chunk)
             if decompressed_chunk:
+                next_size = original_size + len(decompressed_chunk)
+                output_limit = expected_output_size if expected_output_size is not None else max_output_size
+                if next_size > output_limit:
+                    raise ValueError("Payload expands beyond the allowed output size.")
                 temp_handle.write(decompressed_chunk)
                 checksum.update(decompressed_chunk)
-                original_size += len(decompressed_chunk)
+                original_size = next_size
             if progress_callback:
                 progress_callback(processed_bytes, total_payload_size)
 
@@ -232,22 +244,32 @@ def stream_payload_to_file(
             if final_plaintext:
                 decompressed_chunk = decompressor.decompress(final_plaintext)
                 if decompressed_chunk:
+                    next_size = original_size + len(decompressed_chunk)
+                    output_limit = expected_output_size if expected_output_size is not None else max_output_size
+                    if next_size > output_limit:
+                        raise ValueError("Payload expands beyond the allowed output size.")
                     temp_handle.write(decompressed_chunk)
                     checksum.update(decompressed_chunk)
-                    original_size += len(decompressed_chunk)
+                    original_size = next_size
             if progress_callback:
                 progress_callback(processed_bytes, total_payload_size)
 
         tail = decompressor.flush()
         if tail:
+            next_size = original_size + len(tail)
+            output_limit = expected_output_size if expected_output_size is not None else max_output_size
+            if next_size > output_limit:
+                raise ValueError("Payload expands beyond the allowed output size.")
             temp_handle.write(tail)
             checksum.update(tail)
-            original_size += len(tail)
+            original_size = next_size
 
         temp_handle.flush()
         temp_handle.close()
         temp_handle = None
 
+        if expected_output_size is not None and original_size != expected_output_size:
+            raise ValueError("Payload size verification failed. The archive may be corrupted.")
         if checksum.digest() != expected_checksum:
             raise ValueError("Payload checksum verification failed. The archive may be corrupted.")
 

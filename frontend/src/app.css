@@ -234,6 +234,199 @@
     background-color: var(--av-overlay);
     backdrop-filter: blur(10px);
   }
+
+  .security-keyphrase-card {
+    background: #ffffff;
+    border: 1px solid #dbe3ec;
+    box-shadow: 0 16px 34px rgb(15 23 42 / 0.1);
+  }
+
+  .dark .security-keyphrase-card {
+    background: rgb(5 5 5 / 0.92);
+    border-color: rgb(255 255 255 / 0.09);
+    box-shadow: 0 16px 34px rgb(0 0 0 / 0.35);
+  }
+
+  .security-keyphrase-header {
+    color: #64748b;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .dark .security-keyphrase-header {
+    color: #94a3b8;
+    border-bottom-color: rgb(255 255 255 / 0.08);
+  }
+
+  .security-keyphrase-badge {
+    background: #faf5ff;
+    border: 1px solid #e9d5ff;
+    color: #7e22ce;
+  }
+
+  .dark .security-keyphrase-badge {
+    background: rgb(168 85 247 / 0.12);
+    border-color: rgb(168 85 247 / 0.28);
+    color: #e9d5ff;
+  }
+
+  .security-keyphrase-chip {
+    background: #f8fafc;
+    border: 1px solid #dbe3ec;
+    color: #182438;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.9);
+  }
+
+  .security-keyphrase-chip:hover {
+    background: #ffffff;
+    border-color: #c084fc;
+  }
+
+  .dark .security-keyphrase-chip {
+    background: #101010;
+    border-color: #262626;
+    color: #f8fafc;
+    box-shadow: none;
+  }
+
+  .dark .security-keyphrase-chip:hover {
+    background: rgb(168 85 247 / 0.12);
+    border-color: rgb(168 85 247 / 0.34);
+  }
+
+  .security-keyphrase-index {
+    background: #ffffff;
+    border-right: 1px solid #dbe3ec;
+    color: #64748b;
+  }
+
+  .dark .security-keyphrase-index {
+    background: #0b0b0b;
+    border-right-color: #262626;
+    color: #94a3b8;
+  }
+
+  .security-keyphrase-actions {
+    border-top: 1px solid #e2e8f0;
+  }
+
+  .dark .security-keyphrase-actions {
+    border-top-color: rgb(255 255 255 / 0.08);
+  }
+
+  .security-keyphrase-copy {
+    background: #142033;
+    border: 1px solid #142033;
+    color: #ffffff;
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.1);
+  }
+
+  .security-keyphrase-copy:hover {
+    background: #1e293b;
+    border-color: #1e293b;
+  }
+
+  .dark .security-keyphrase-copy {
+    background: #f8fafc;
+    border-color: #f8fafc;
+    color: #020617;
+  }
+
+  .dark .security-keyphrase-copy:hover {
+    background: #e2e8f0;
+    border-color: #e2e8f0;
+  }
+
+  .security-keyphrase-secondary {
+    background: #ffffff;
+    border: 1px solid #dbe3ec;
+    color: #182438;
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+  }
+
+  .security-keyphrase-secondary:hover {
+    background: #fff1f2;
+    border-color: #fda4af;
+    color: #be123c;
+  }
+
+  .dark .security-keyphrase-secondary {
+    background: #101010;
+    border-color: #262626;
+    color: #f8fafc;
+    box-shadow: none;
+  }
+
+  .dark .security-keyphrase-secondary:hover {
+    background: rgb(239 68 68 / 0.1);
+    border-color: rgb(239 68 68 / 0.3);
+    color: #fca5a5;
+  }
+
+  .security-pqc-info {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    color: #182438;
+    box-shadow: 0 12px 26px rgb(245 158 11 / 0.1);
+  }
+
+  .dark .security-pqc-info {
+    background: rgb(120 53 15 / 0.18);
+    border-color: rgb(245 158 11 / 0.28);
+    color: #f8fafc;
+    box-shadow: none;
+  }
+
+  .security-pqc-icon {
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    color: #b45309;
+  }
+
+  .dark .security-pqc-icon {
+    background: rgb(0 0 0 / 0.2);
+    border-color: rgb(245 158 11 / 0.28);
+    color: #fcd34d;
+  }
+
+  .security-keyfile-destination {
+    background: #ffffff;
+    border: 1px solid #dbe3ec;
+    color: #182438;
+    box-shadow: 0 8px 18px rgb(15 23 42 / 0.06);
+  }
+
+  .dark .security-keyfile-destination {
+    background: rgb(255 255 255 / 0.04);
+    border-color: rgb(255 255 255 / 0.09);
+    color: #f8fafc;
+    box-shadow: none;
+  }
+
+  .security-keyfile-warning {
+    background: #ffffff;
+    border: 1px solid #facc15;
+    color: #334155;
+    box-shadow: 0 10px 22px rgb(245 158 11 / 0.12);
+  }
+
+  .dark .security-keyfile-warning {
+    background: rgb(245 158 11 / 0.12);
+    border-color: rgb(245 158 11 / 0.3);
+    color: #fde68a;
+    box-shadow: none;
+  }
+
+  .security-external-keyfile-card {
+    background: #ffffff;
+    border: 1px solid #dbe3ec;
+    box-shadow: 0 16px 34px rgb(15 23 42 / 0.1);
+  }
+
+  .dark .security-external-keyfile-card {
+    background: #101010;
+    border-color: #262626;
+    box-shadow: 0 16px 34px rgb(0 0 0 / 0.35);
+  }
   
   .drag-region {
     -webkit-app-region: drag;

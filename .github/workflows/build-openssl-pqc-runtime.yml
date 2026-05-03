@@ -46,6 +46,7 @@ jobs:
           $openssl = Resolve-Path runtime\pqc\bin\openssl.exe
           & $openssl version
           & $openssl list -kem-algorithms | Select-String "ML-KEM-1024"
+          & $openssl list -public-key-algorithms | Select-String "X25519"
           & $openssl list -signature-algorithms | Select-String "ML-DSA"
           & $openssl list -signature-algorithms | Select-String "SLH-DSA"
 

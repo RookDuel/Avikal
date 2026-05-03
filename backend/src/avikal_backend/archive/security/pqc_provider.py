@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import uuid
@@ -24,15 +25,23 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
 
 PQC_PROVIDER_NAME = "openssl"
-PQC_SUITE_VERSION = 2
-PQC_SUITE_ID = "avikal-pqc-openssl-triple-stack-v2"
+PQC_SUITE_VERSION = 1
+PQC_SUITE_ID = "avikal-pqc-openssl-hybrid-kem-triple-stack-v1"
 ML_KEM_ALGORITHM = "ML-KEM-1024"
+X25519_ALGORITHM = "X25519"
 ML_DSA_ALGORITHM = "ML-DSA-87"
 SLH_DSA_ALGORITHM = "SLH-DSA-SHA2-256s"
 OPENSSL_EXE_NAME = "openssl.exe"
 PQC_PROVIDER_TIMEOUT_SECONDS = 60
+HYBRID_CIPHERTEXT_MAGIC = b"AVKH"
+HYBRID_CIPHERTEXT_VERSION = 1
+MAX_MLKEM_CIPHERTEXT_BYTES = 2048
+MAX_X25519_PUBLIC_PEM_BYTES = 512
 
 PQC_SUITE = {
     "suite_id": PQC_SUITE_ID,
@@ -40,7 +49,10 @@ PQC_SUITE = {
     "provider": PQC_PROVIDER_NAME,
     "provider_minimum": "OpenSSL 3.5",
     "algorithms": {
-        "kem": ML_KEM_ALGORITHM,
+        "kem": f"{ML_KEM_ALGORITHM}+{X25519_ALGORITHM}",
+        "post_quantum_kem": ML_KEM_ALGORITHM,
+        "classical_kem": X25519_ALGORITHM,
+        "kem_combiner": "HKDF-SHA3-256",
         "authentication_signature": ML_DSA_ALGORITHM,
         "long_term_signature": SLH_DSA_ALGORITHM,
     },
@@ -346,6 +358,95 @@ def _decapsulate_mlkem(work_dir: Path, private_pem: str, pqc_ciphertext: bytes) 
     return secret_path.read_bytes()
 
 
+def _derive_x25519(work_dir: Path, private_pem: str, peer_public_pem: str, stem: str) -> bytes:
+    private_path = work_dir / f"{stem}_private.pem"
+    peer_public_path = work_dir / f"{stem}_peer_public.pem"
+    secret_path = work_dir / f"{stem}_shared_secret.bin"
+    _write_text(private_path, private_pem)
+    _write_text(peer_public_path, peer_public_pem)
+    _run_openssl(
+        [
+            "pkeyutl",
+            "-derive",
+            "-inkey",
+            private_path.name,
+            "-peerkey",
+            peer_public_path.name,
+            "-out",
+            secret_path.name,
+        ],
+        cwd=work_dir,
+    )
+    return secret_path.read_bytes()
+
+
+def _length_prefixed(*parts: bytes) -> bytes:
+    encoded = bytearray()
+    for part in parts:
+        if not isinstance(part, (bytes, bytearray)) or not part:
+            raise PQCProviderError("PQC hybrid KEM produced an empty shared secret")
+        encoded += struct.pack(">H", len(part))
+        encoded += bytes(part)
+    return bytes(encoded)
+
+
+def _combine_hybrid_kem_secrets(mlkem_secret: bytes, x25519_secret: bytes) -> bytes:
+    """Combine independent KEM secrets into one domain-separated suite secret."""
+    hkdf = HKDF(
+        algorithm=hashes.SHA3_256(),
+        length=32,
+        salt=None,
+        info=b"avikal_pqc_hybrid_kem_v1",
+    )
+    return hkdf.derive(_length_prefixed(mlkem_secret, x25519_secret))
+
+
+def _pack_hybrid_ciphertext(mlkem_ciphertext: bytes, x25519_ephemeral_public_pem: str) -> bytes:
+    if len(mlkem_ciphertext) == 0 or len(mlkem_ciphertext) > MAX_MLKEM_CIPHERTEXT_BYTES:
+        raise PQCProviderError("OpenSSL produced an invalid ML-KEM ciphertext")
+    public_bytes = x25519_ephemeral_public_pem.encode("utf-8")
+    if len(public_bytes) == 0 or len(public_bytes) > MAX_X25519_PUBLIC_PEM_BYTES:
+        raise PQCProviderError("OpenSSL produced an invalid X25519 ephemeral public key")
+    return (
+        HYBRID_CIPHERTEXT_MAGIC
+        + bytes([HYBRID_CIPHERTEXT_VERSION])
+        + struct.pack(">HH", len(mlkem_ciphertext), len(public_bytes))
+        + mlkem_ciphertext
+        + public_bytes
+    )
+
+
+def _unpack_hybrid_ciphertext(hybrid_ciphertext: bytes) -> tuple[bytes, str]:
+    if not isinstance(hybrid_ciphertext, (bytes, bytearray)):
+        raise ValueError("PQC ciphertext must be bytes")
+    hybrid_ciphertext = bytes(hybrid_ciphertext)
+    header_size = len(HYBRID_CIPHERTEXT_MAGIC) + 1 + 4
+    if len(hybrid_ciphertext) < header_size:
+        raise ValueError("PQC ciphertext is truncated")
+    if hybrid_ciphertext[:4] != HYBRID_CIPHERTEXT_MAGIC:
+        raise ValueError("Unsupported PQC hybrid ciphertext")
+    version = hybrid_ciphertext[4]
+    if version != HYBRID_CIPHERTEXT_VERSION:
+        raise ValueError("Unsupported PQC hybrid ciphertext version")
+    mlkem_length, public_length = struct.unpack(">HH", hybrid_ciphertext[5:9])
+    if mlkem_length == 0 or mlkem_length > MAX_MLKEM_CIPHERTEXT_BYTES:
+        raise ValueError("PQC ML-KEM ciphertext length is invalid")
+    if public_length == 0 or public_length > MAX_X25519_PUBLIC_PEM_BYTES:
+        raise ValueError("PQC X25519 public key length is invalid")
+    expected_length = header_size + mlkem_length + public_length
+    if len(hybrid_ciphertext) != expected_length:
+        raise ValueError("PQC hybrid ciphertext length is invalid")
+    mlkem_ciphertext = hybrid_ciphertext[header_size:header_size + mlkem_length]
+    public_start = header_size + mlkem_length
+    try:
+        x25519_public = hybrid_ciphertext[public_start:].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("PQC X25519 public key is not valid UTF-8") from exc
+    if "PUBLIC KEY" not in x25519_public:
+        raise ValueError("PQC X25519 public key is malformed")
+    return mlkem_ciphertext, x25519_public
+
+
 def compute_pqc_key_id(public_bundle: dict[str, Any], pqc_ciphertext: bytes) -> str:
     """Bind the archive to the public PQC suite material and KEM ciphertext."""
     if not isinstance(public_bundle, dict) or not public_bundle:
@@ -371,9 +472,23 @@ def create_pqc_archive_material(*, archive_filename: str) -> dict[str, Any]:
 
     with _pqc_work_dir() as work_dir:
         mlkem_private, mlkem_public = _generate_keypair(work_dir, ML_KEM_ALGORITHM, "mlkem")
+        x25519_private, x25519_public = _generate_keypair(work_dir, X25519_ALGORITHM, "x25519")
+        x25519_ephemeral_private, x25519_ephemeral_public = _generate_keypair(
+            work_dir,
+            X25519_ALGORITHM,
+            "x25519_ephemeral",
+        )
         mldsa_private, mldsa_public = _generate_keypair(work_dir, ML_DSA_ALGORITHM, "mldsa")
         slhdsa_private, slhdsa_public = _generate_keypair(work_dir, SLH_DSA_ALGORITHM, "slhdsa")
-        ciphertext, shared_secret = _encapsulate_mlkem(work_dir, mlkem_public)
+        mlkem_ciphertext, mlkem_shared_secret = _encapsulate_mlkem(work_dir, mlkem_public)
+        x25519_shared_secret = _derive_x25519(
+            work_dir,
+            x25519_ephemeral_private,
+            x25519_public,
+            "x25519_enc",
+        )
+        ciphertext = _pack_hybrid_ciphertext(mlkem_ciphertext, x25519_ephemeral_public)
+        shared_secret = _combine_hybrid_kem_secrets(mlkem_shared_secret, x25519_shared_secret)
 
         public_bundle: dict[str, Any] = {
             "suite_id": PQC_SUITE_ID,
@@ -384,6 +499,7 @@ def create_pqc_archive_material(*, archive_filename: str) -> dict[str, Any]:
             "algorithms": dict(PQC_SUITE["algorithms"]),
             "keys": {
                 "ml_kem_public_pem": mlkem_public,
+                "x25519_public_pem": x25519_public,
                 "ml_dsa_public_pem": mldsa_public,
                 "slh_dsa_public_pem": slhdsa_public,
             },
@@ -402,6 +518,7 @@ def create_pqc_archive_material(*, archive_filename: str) -> dict[str, Any]:
             "algorithms": dict(PQC_SUITE["algorithms"]),
             "keys": {
                 "ml_kem_private_pem": mlkem_private,
+                "x25519_private_pem": x25519_private,
                 "ml_dsa_private_pem": mldsa_private,
                 "slh_dsa_private_pem": slhdsa_private,
             },
@@ -425,7 +542,7 @@ def _validate_public_bundle(public_bundle: dict[str, Any]) -> None:
     signatures = public_bundle.get("signatures")
     if not isinstance(keys, dict) or not isinstance(signatures, dict):
         raise ValueError("Invalid PQC public bundle")
-    for field_name in ("ml_kem_public_pem", "ml_dsa_public_pem", "slh_dsa_public_pem"):
+    for field_name in ("ml_kem_public_pem", "x25519_public_pem", "ml_dsa_public_pem", "slh_dsa_public_pem"):
         if not isinstance(keys.get(field_name), str) or not keys[field_name].strip():
             raise ValueError("Invalid PQC public bundle")
     for field_name in ("ml_dsa_binding", "slh_dsa_binding"):
@@ -438,7 +555,7 @@ def _validate_private_bundle(private_bundle: dict[str, Any]) -> None:
     keys = private_bundle.get("keys")
     if not isinstance(keys, dict):
         raise ValueError("Invalid PQC private bundle")
-    for field_name in ("ml_kem_private_pem", "ml_dsa_private_pem", "slh_dsa_private_pem"):
+    for field_name in ("ml_kem_private_pem", "x25519_private_pem", "ml_dsa_private_pem", "slh_dsa_private_pem"):
         if not isinstance(keys.get(field_name), str) or not keys[field_name].strip():
             raise ValueError("Invalid PQC private bundle")
 
@@ -464,6 +581,7 @@ def decapsulate_pqc_archive_material(
     public_keys = public_bundle["keys"]
     private_keys = private_bundle["keys"]
     binding = _public_binding(public_bundle)
+    mlkem_ciphertext, x25519_ephemeral_public = _unpack_hybrid_ciphertext(pqc_ciphertext)
     with _pqc_work_dir() as work_dir:
         _verify_signature(
             work_dir,
@@ -479,4 +597,11 @@ def decapsulate_pqc_archive_material(
             _b64decode(public_bundle["signatures"]["slh_dsa_binding"], "slh_dsa_binding"),
             "slhdsa",
         )
-        return _decapsulate_mlkem(work_dir, private_keys["ml_kem_private_pem"], pqc_ciphertext)
+        mlkem_shared_secret = _decapsulate_mlkem(work_dir, private_keys["ml_kem_private_pem"], mlkem_ciphertext)
+        x25519_shared_secret = _derive_x25519(
+            work_dir,
+            private_keys["x25519_private_pem"],
+            x25519_ephemeral_public,
+            "x25519_dec",
+        )
+        return _combine_hybrid_kem_secrets(mlkem_shared_secret, x25519_shared_secret)

@@ -26,13 +26,6 @@ from ..runtime_logging import runtime_debug_print as print
 
 log = logging.getLogger("avikal.crypto")
 
-# Try to import PQC library (ML-KEM, formerly Kyber)
-try:
-    import pqcrypto.kem.ml_kem_1024 as kyber
-    PQC_AVAILABLE = True
-except ImportError:
-    PQC_AVAILABLE = False
-
 
 ARGON2_SALT_BYTES = 32
 ARGON2_OUTPUT_BYTES = 32
@@ -246,66 +239,6 @@ def remove_padding(padded_data: bytes) -> bytes:
     return padded_data[4 + padding_size:]
 
 
-
-
-def generate_pqc_keypair():
-    """
-    Generate post-quantum cryptography keypair using ML-KEM-1024 (formerly Kyber-1024).
-    
-    Returns:
-        Tuple of (public_key, private_key) or None if PQC not available
-    """
-    if not PQC_AVAILABLE:
-        return None
-    
-    try:
-        public_key, private_key = kyber.generate_keypair()
-        return public_key, private_key
-    except Exception:
-        return None
-
-
-def pqc_encapsulate(public_key: bytes) -> tuple:
-    """
-    Encapsulate a shared secret using PQC public key.
-    
-    Args:
-        public_key: ML-KEM public key
-    
-    Returns:
-        Tuple of (ciphertext, shared_secret) or None if PQC not available
-    """
-    if not PQC_AVAILABLE or not public_key:
-        return None
-    
-    try:
-        ciphertext, shared_secret = kyber.encrypt(public_key)
-        return ciphertext, shared_secret
-    except Exception:
-        return None
-
-
-def pqc_decapsulate(private_key: bytes, ciphertext: bytes) -> bytes:
-    """
-    Decapsulate shared secret using PQC private key.
-    
-    Args:
-        private_key: ML-KEM private key
-        ciphertext: Encapsulated ciphertext
-    
-    Returns:
-        Shared secret or None if PQC not available
-    """
-    if not PQC_AVAILABLE or not private_key or not ciphertext:
-        return None
-    
-    try:
-        shared_secret = kyber.decrypt(private_key, ciphertext)
-        return shared_secret
-    except Exception:
-        return None
-
-
 def derive_hierarchical_keys(password: str, keyphrase: list = None, salt: bytes = None) -> tuple:
     """
     Derive hierarchical keys using Argon2id + HKDF expansion.
@@ -328,7 +261,7 @@ def derive_hierarchical_keys(password: str, keyphrase: list = None, salt: bytes 
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
-        info=b"avikal_payload_v3",
+        info=b"avikal_payload_v1",
     )
     payload_key = hkdf_payload.derive(master_key)
 
@@ -337,7 +270,7 @@ def derive_hierarchical_keys(password: str, keyphrase: list = None, salt: bytes 
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
-        info=b"avikal_chess_v3",
+        info=b"avikal_chess_v1",
     )
     chess_key = hkdf_chess.derive(master_key)
 
@@ -348,9 +281,8 @@ def derive_pqc_hybrid_payload_key(payload_key: bytes, pqc_shared_secret: bytes, 
     """
     Derive a payload key that depends on both classical and PQC material.
 
-    This helper is intended for the external keyfile mode where the PQC private
-    key lives outside the .avk container. The resulting key can replace the
-    normal payload key so protected payload encryption inherits PQC protection.
+    PQC material is produced through the OpenSSL provider boundary and stored
+    outside the .avk container in the encrypted .avkkey bundle.
     """
     if len(payload_key) != 32:
         raise ValueError("payload_key must be 32 bytes")

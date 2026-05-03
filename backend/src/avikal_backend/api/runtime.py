@@ -7,8 +7,10 @@ import logging
 import logging.handlers
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
+import uuid
 
 
 @dataclass(frozen=True)
@@ -30,7 +32,19 @@ def _ensure_runtime_dirs(base_dir: Path) -> RuntimePaths:
     preview_root = base_dir / "preview_sessions"
     log_dir.mkdir(parents=True, exist_ok=True)
     preview_root.mkdir(parents=True, exist_ok=True)
+    _probe_preview_root_writable(preview_root)
     return RuntimePaths(log_dir, preview_root)
+
+
+def _probe_preview_root_writable(preview_root: Path) -> None:
+    """Verify the preview root can actually host per-session directories."""
+    probe_dir = preview_root / f".preview-probe-{uuid.uuid4().hex}"
+    probe_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        probe_file = probe_dir / "write.test"
+        probe_file.write_text("ok", encoding="utf-8")
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
 
 
 def initialise_runtime_paths() -> tuple[RuntimePaths, str | None]:

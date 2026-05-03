@@ -41,3 +41,6 @@ def test_openssl_pqc_provider_roundtrip_when_runtime_is_available():
     assert len(material["shared_secret"]) >= 32
     assert recovered == material["shared_secret"]
     assert material["key_id"] == compute_pqc_key_id(material["public_bundle"], material["ciphertext"])
+    assert material["suite"]["algorithms"]["kem"] == "ML-KEM-1024+X25519"
+    assert material["public_bundle"]["keys"]["x25519_public_pem"]
+    assert material["private_bundle"]["keys"]["x25519_private_pem"]

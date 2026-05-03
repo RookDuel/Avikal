@@ -14,6 +14,8 @@ VENV_ROOT = BACKEND_ROOT / "venv"
 PYVENV_CFG = VENV_ROOT / "pyvenv.cfg"
 REQUIREMENTS_FILE = BACKEND_ROOT / "requirements.txt"
 OUTPUT_ROOT = PROJECT_ROOT / ".app-build" / "backend-runtime"
+BACKEND_OUTPUT_ROOT = PROJECT_ROOT / ".app-build" / "backend"
+PQC_RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "pqc"
 
 NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 SITE_PACKAGES_NAME = "site-packages"
@@ -40,6 +42,31 @@ EXCLUDED_STDLIB_DIRS = {
     "tkinter",
     "turtledemo",
     "venv",
+}
+EXCLUDED_BACKEND_DIRS = {
+    ".pytest_cache",
+    ".tmp_pip",
+    ".tmp_test_runs",
+    "__pycache__",
+    "build",
+    "delete-backend",
+    "dist",
+    "docs",
+    "logs",
+    "new-backend",
+    "tests",
+    "venv",
+}
+EXCLUDED_BACKEND_FILES = {
+    "avikal.cmd",
+    "avikal.py",
+    "cli.py",
+    "CLI_REFERENCE.md",
+    "CLI_USAGE.md",
+    "MANIFEST.in",
+    "pyproject.toml",
+    "README_PACKAGE.md",
+    "requirements-cli.txt",
 }
 
 
@@ -145,6 +172,20 @@ def ignore_stdlib(_dir: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def ignore_backend_source(_dir: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for name in names:
+        lower_name = name.lower()
+        if (
+            lower_name in EXCLUDED_BACKEND_DIRS
+            or name in EXCLUDED_BACKEND_FILES
+            or lower_name.startswith("pytest-cache-files-")
+            or lower_name.endswith((".pyc", ".pyo"))
+        ):
+            ignored.add(name)
+    return ignored
+
+
 def copy_base_runtime(base_home: Path) -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -171,6 +212,10 @@ def copy_base_runtime(base_home: Path) -> None:
     (OUTPUT_ROOT / "Lib" / SITE_PACKAGES_NAME).mkdir(parents=True, exist_ok=True)
 
 
+def copy_backend_source() -> None:
+    shutil.copytree(BACKEND_ROOT, BACKEND_OUTPUT_ROOT, dirs_exist_ok=True, ignore=ignore_backend_source)
+
+
 def copy_selected_distributions(site_packages: Path, selected: list[metadata.Distribution]) -> list[str]:
     target_site_packages = OUTPUT_ROOT / "Lib" / SITE_PACKAGES_NAME
     copied_names: list[str] = []
@@ -195,6 +240,12 @@ def copy_selected_distributions(site_packages: Path, selected: list[metadata.Dis
     return sorted(copied_names, key=str.lower)
 
 
+def copy_pqc_runtime() -> None:
+    """Copy the bundled OpenSSL PQC runtime when it has been built."""
+    if PQC_RUNTIME_ROOT.exists():
+        shutil.copytree(PQC_RUNTIME_ROOT, OUTPUT_ROOT / "pqc", dirs_exist_ok=True)
+
+
 def write_manifest(base_home: Path, distributions: list[str]) -> None:
     manifest = {
         "python_home": str(base_home),
@@ -211,16 +262,21 @@ def main() -> None:
 
     if OUTPUT_ROOT.exists():
         shutil.rmtree(OUTPUT_ROOT)
+    if BACKEND_OUTPUT_ROOT.exists():
+        shutil.rmtree(BACKEND_OUTPUT_ROOT)
 
+    copy_backend_source()
     copy_base_runtime(base_home)
 
     dist_map = build_distribution_map(site_packages)
     root_distributions = parse_root_distributions()
     selected_distributions = resolve_distribution_closure(dist_map, root_distributions)
     copied_names = copy_selected_distributions(site_packages, selected_distributions)
+    copy_pqc_runtime()
     write_manifest(base_home, copied_names)
 
     print(f"Prepared production backend runtime at {OUTPUT_ROOT}")
+    print(f"Prepared production backend source at {BACKEND_OUTPUT_ROOT}")
     print(f"Copied {len(copied_names)} Python distributions")
 
 

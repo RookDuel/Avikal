@@ -22,9 +22,11 @@ from avikal_backend.services.ntp_service import (
     get_ntp_timestamp,
     get_clock_skew_warning,
 )
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from avikal_backend.audit.activity_audit import activity_audit
+from fastapi.responses import JSONResponse
 
 import uvicorn
 
@@ -50,27 +52,53 @@ if _file_logging_message:
 # Allow direct script execution from the src layout.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# Import core modules with error handling
-try:
-    from avikal_backend.archive.pipeline.decoder import extract_avk_file
-    from avikal_backend.archive.pipeline.encoder import create_avk_file, generate_key_b
-    from avikal_backend.mnemonic.generator import generate_mnemonic
-    log.info("Core modules imported successfully")
-except ImportError as e:
-    log.warning("Core modules not found: %s", e)
-    log.warning("Some encryption features may not work without core modules")
-    
-    # Create dummy functions for missing modules
-    def create_avk_file(*args, **kwargs):
-        raise HTTPException(status_code=500, detail="Core encryption module not available")
-    
-    def extract_avk_file(*args, **kwargs):
-        raise HTTPException(status_code=500, detail="Core decryption module not available")
-    
-    def generate_mnemonic(*args, **kwargs):
-        raise HTTPException(status_code=500, detail="Mnemonic generator not available")
+def create_avk_file(*args, **kwargs):
+    try:
+        from avikal_backend.archive.pipeline.encoder import create_avk_file as implementation
+    except ImportError as exc:
+        log.warning("Core encryption module not available: %s", exc)
+        raise HTTPException(status_code=500, detail="Core encryption module not available") from exc
+    return implementation(*args, **kwargs)
+
+
+def extract_avk_file(*args, **kwargs):
+    try:
+        from avikal_backend.archive.pipeline.decoder import extract_avk_file as implementation
+    except ImportError as exc:
+        log.warning("Core decryption module not available: %s", exc)
+        raise HTTPException(status_code=500, detail="Core decryption module not available") from exc
+    return implementation(*args, **kwargs)
+
+
+def generate_key_b(*args, **kwargs):
+    try:
+        from avikal_backend.archive.pipeline.encoder import generate_key_b as implementation
+    except ImportError as exc:
+        log.warning("Core key generation module not available: %s", exc)
+        raise HTTPException(status_code=500, detail="Core key generation module not available") from exc
+    return implementation(*args, **kwargs)
+
+
+def generate_mnemonic(*args, **kwargs):
+    try:
+        from avikal_backend.mnemonic.generator import generate_mnemonic as implementation
+    except ImportError as exc:
+        log.warning("Mnemonic generator not available: %s", exc)
+        raise HTTPException(status_code=500, detail="Mnemonic generator not available") from exc
+    return implementation(*args, **kwargs)
+
+
+def get_romanized_word_pairs(*args, **kwargs):
+    try:
+        from avikal_backend.mnemonic.generator import get_romanized_word_pairs as implementation
+    except ImportError as exc:
+        log.warning("Mnemonic wordlist helper not available: %s", exc)
+        raise HTTPException(status_code=500, detail="Mnemonic wordlist helper not available") from exc
+    return implementation(*args, **kwargs)
 
 app = FastAPI(title="RookDuel Avikal API", version="1.0.0")
+BACKEND_AUTH_HEADER = "X-Avikal-Backend-Token"
+_BACKEND_AUTH_TOKEN = os.getenv("AVIKAL_BACKEND_TOKEN", "").strip() or None
 
 # ---------------------------------------------------------------------------
 # Concurrency lock for encryption/decryption operations (Requirement 7.12)
@@ -101,13 +129,64 @@ from .aavrit_client import (
 )
 
 _preview_sessions = PreviewSessionStore(_PREVIEW_SESSION_ROOT, log)
-_cleanup_stale_preview_sessions = _preview_sessions.cleanup_stale
 _create_preview_session_dir = _preview_sessions.create
 _cleanup_preview_session = _preview_sessions.cleanup
 _cleanup_all_preview_sessions = _preview_sessions.cleanup_all
 
 
-_cleanup_stale_preview_sessions()
+def _flatten_validation_detail(detail) -> str:
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, dict):
+        message = detail.get("msg") or detail.get("message") or detail.get("detail")
+        location = detail.get("loc")
+        if isinstance(location, (list, tuple)):
+            location_parts = [str(part) for part in location if str(part) not in {"body", "query", "path"}]
+            location_text = ".".join(location_parts)
+            if message and location_text:
+                return f"{location_text}: {message}"
+        if isinstance(message, str) and message.strip():
+            return message
+        return str(detail)
+    if isinstance(detail, list):
+        parts = [_flatten_validation_detail(item) for item in detail]
+        parts = [part for part in parts if part]
+        return "; ".join(parts)
+    return str(detail)
+
+
+def _cleanup_stale_preview_sessions_in_background() -> None:
+    def worker() -> None:
+        _preview_sessions.cleanup_stale()
+
+    threading.Thread(
+        target=worker,
+        name="avikal-preview-session-cleanup",
+        daemon=True,
+    ).start()
+
+
+@app.on_event("startup")
+async def schedule_preview_session_cleanup() -> None:
+    _cleanup_stale_preview_sessions_in_background()
+    try:
+        from avikal_backend.services.ntp_service import prime_ntp_cache_async
+
+        prime_ntp_cache_async()
+    except Exception as exc:
+        log.debug("Trusted time warmup skipped: %s", exc)
+    try:
+        from .drand import prime_drand_helper_async
+
+        prime_drand_helper_async()
+    except Exception as exc:
+        log.debug("drand helper warmup skipped: %s", exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(_request: Request, exc: RequestValidationError):
+    detail = _flatten_validation_detail(exc.errors()) or "Invalid request."
+    return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": detail})
 
 # ---------------------------------------------------------------------------
 
@@ -125,6 +204,24 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_backend_token(request: Request, call_next):
+    if _BACKEND_AUTH_TOKEN is None:
+        return await call_next(request)
+
+    if request.method.upper() == "OPTIONS" or request.url.path == "/health":
+        return await call_next(request)
+
+    provided_token = request.headers.get(BACKEND_AUTH_HEADER)
+    if provided_token != _BACKEND_AUTH_TOKEN:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Backend request token is missing or invalid."},
+        )
+
+    return await call_next(request)
 
 # Global Aavrit session storage (in production, use secure storage)
 current_aavrit_session_token = None
@@ -238,6 +335,82 @@ def detect_timecapsule_provider(metadata: dict) -> str | None:
     return None
 
 
+def read_avk_public_route(avk_filepath: str) -> tuple[dict, dict]:
+    """Read only the public archive routing hints from keychain.pgn."""
+    from avikal_backend.archive.format.container import read_avk_header_and_keychain
+    from avikal_backend.archive.format.header import (
+        ARCHIVE_MODE_MULTI,
+        extract_public_route_tags_from_keychain_pgn,
+        parse_header_bytes,
+    )
+
+    header_bytes, keychain_pgn = read_avk_header_and_keychain(avk_filepath)
+    header_info = parse_header_bytes(header_bytes)
+    route_hints = extract_public_route_tags_from_keychain_pgn(keychain_pgn)
+    route_hints.update(
+        {
+            "provider": header_info.get("provider"),
+            "archive_type": "multi_file" if header_info.get("archive_mode") == ARCHIVE_MODE_MULTI else "single_file",
+            "aad": header_info.get("aad"),
+        }
+    )
+    return header_info, route_hints
+
+
+def validate_public_route_inputs(request: DecryptRequest, route_hints: dict) -> None:
+    """Fail fast on missing user inputs using only public non-secret route hints."""
+    missing: list[str] = []
+    if route_hints.get("requires_password") and not request.password:
+        missing.append("password")
+    if route_hints.get("requires_keyphrase") and not request.keyphrase:
+        missing.append("21-word keyphrase")
+    if route_hints.get("requires_pqc") and not request.pqc_keyfile:
+        missing.append(".avkkey")
+
+    if missing:
+        if missing == [".avkkey"]:
+            raise HTTPException(
+                status_code=400,
+                detail="This archive requires the matching .avkkey file before decryption can continue.",
+            )
+        if len(missing) == 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"This archive requires its {missing[0]} before decryption can continue.",
+            )
+        if missing == ["password", "21-word keyphrase"]:
+            raise HTTPException(
+                status_code=400,
+                detail="This archive requires both its password and 21-word keyphrase before decryption can continue.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=f"This archive requires {', '.join(missing)} before decryption can continue.",
+        )
+
+
+def validate_public_timecapsule_lock(route_hints: dict) -> None:
+    """Fail fast when trusted time proves the capsule is still locked."""
+    provider = route_hints.get("provider")
+    unlock_timestamp = route_hints.get("unlock_timestamp")
+    if provider not in {"drand", "aavrit"} or unlock_timestamp is None:
+        return
+
+    from avikal_backend.archive.security.time_lock import format_unlock_time, get_trusted_now
+
+    current_time = get_trusted_now()
+    unlock_time = datetime.fromtimestamp(int(unlock_timestamp), tz=timezone.utc)
+    if current_time < unlock_time:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"This capsule is still locked. Unlock becomes available at "
+                f"{format_unlock_time(int(unlock_timestamp))}. Current time: "
+                f"{current_time.strftime('%Y-%m-%d %H:%M UTC')}"
+            ),
+        )
+
+
 def require_aavrit_auth_if_needed(aavrit_url: str, session_token: str | None) -> dict:
     global current_aavrit_mode
 
@@ -300,11 +473,26 @@ def validate_unlock_datetime_against_ntp(unlock_dt: datetime) -> None:
         log.warning("Clock skew detected during timecapsule operation: %s", skew_warning)
 
 
+def enforce_system_clock_alignment(operation_label: str = "Time-capsule operations") -> None:
+    """Reject drand-sensitive flows when the local system clock is clearly out of sync."""
+    skew_warning = get_clock_skew_warning()
+    if not skew_warning:
+        return
+
+    log.warning("Blocking %s because of local clock skew: %s", operation_label, skew_warning)
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Your system clock appears out of sync with trusted network time. "
+            "Correct your Windows date and time settings, then try the drand time-capsule again."
+        ),
+    )
+
+
 def decrypt_timecapsule_with_key(request: DecryptRequest, metadata: dict, key_b: bytes, method_label: str):
     log.info("Decrypting with %s split-key architecture...", method_label)
     preview_session_id = None
     try:
-        from avikal_backend.archive.path_safety import resolve_safe_output_path
         from avikal_backend.archive.security.crypto import verify_time_key_hash
 
         expected_time_key_hash = metadata.get("time_key_hash")
@@ -325,85 +513,26 @@ def decrypt_timecapsule_with_key(request: DecryptRequest, metadata: dict, key_b:
                 keyphrase=keyphrase_list,
                 time_key=key_b,
                 pqc_keyfile_path=request.pqc_keyfile,
+                metadata_override=metadata,
             )
 
             output_filepath = result['output_directory']
             original_data_size = result['total_size']
             log.info("Successfully extracted %d files to %s", result['file_count'], output_filepath)
         else:
-            from avikal_backend.archive.format.container import open_avk_payload_stream
-            from avikal_backend.archive.pipeline.payload_streaming import stream_payload_to_file
+            from avikal_backend.archive.pipeline.decoder import extract_avk_file
 
-            keyphrase_list = request.keyphrase if request.keyphrase else None
-            master_key = None
-            payload_key = None
-            final_payload_key = None
-            pqc_private_key = metadata.get('pqc_private_key')
-            pqc_ciphertext = metadata.get('pqc_ciphertext')
-            pqc_shared_secret = None
-            try:
-                from avikal_backend.archive.security.crypto import derive_hierarchical_keys
-                from avikal_backend.archive.security.crypto import (
-                    combine_split_keys,
-                    derive_pqc_hybrid_payload_key,
-                    derive_time_only_payload_key,
-                    pqc_decapsulate,
-                    secure_zero,
-                )
-                salt = metadata.get('salt')
-                if metadata.get('encryption_method') == 'aes256gcm_stream_timekey':
-                    master_key = None
-                    payload_key = None
-                    final_payload_key = derive_time_only_payload_key(key_b, salt)
-                else:
-                    master_key, payload_key, _chess_key, salt = derive_hierarchical_keys(request.password, keyphrase_list, salt)
-                    key_a = payload_key
-                    log.info("Combining Key A (from password) and provider-held Key B...")
-                    combined_key = combine_split_keys(key_a, key_b, salt)
-                    final_payload_key = combined_key[:32]
-
-                if metadata.get('pqc_required'):
-                    from avikal_backend.archive.security.pqc_keyfile import read_pqc_keyfile
-
-                    pqc_key_bundle = read_pqc_keyfile(
-                        request.pqc_keyfile,
-                        password=request.password,
-                        keyphrase=keyphrase_list,
-                        expected_key_id=metadata.get('pqc_key_id'),
-                        expected_algorithm=metadata.get('pqc_algorithm'),
-                    )
-                    pqc_private_key = pqc_key_bundle["private_key"]
-                    pqc_shared_secret = pqc_decapsulate(pqc_private_key, pqc_ciphertext)
-                    if not pqc_shared_secret:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="PQC decapsulation failed. The keyfile does not match this archive or the archive is corrupted."
-                        )
-                    final_payload_key = derive_pqc_hybrid_payload_key(final_payload_key, pqc_shared_secret, salt)
-
-                with open_avk_payload_stream(request.input_file) as (header_bytes, _keychain_pgn, payload_stream):
-                    output_filepath = resolve_safe_output_path(preview_dir, metadata['filename'])
-                    stream_result = stream_payload_to_file(
-                        payload_stream=payload_stream,
-                        output_path=output_filepath,
-                        aad=header_bytes,
-                        decrypt_key=final_payload_key if metadata.get('encryption_method') != 'plaintext_archive' else None,
-                        expected_checksum=metadata['checksum'],
-                    )
-                original_data_size = stream_result["size"]
-                log.info("Successfully decrypted to %s", output_filepath)
-            finally:
-                if 'secure_zero' in locals():
-                    if master_key:
-                        secure_zero(master_key)
-                    if payload_key:
-                        secure_zero(payload_key)
-                    if final_payload_key:
-                        secure_zero(final_payload_key)
-                    if pqc_shared_secret:
-                        secure_zero(pqc_shared_secret)
-                    if pqc_private_key:
-                        secure_zero(pqc_private_key)
+            output_filepath = extract_avk_file(
+                avk_filepath=request.input_file,
+                output_directory=preview_dir,
+                password=request.password,
+                keyphrase=request.keyphrase,
+                pqc_keyfile_path=request.pqc_keyfile,
+                time_key=key_b,
+                metadata_override=metadata,
+            )
+            original_data_size = os.path.getsize(output_filepath)
+            log.info("Successfully decrypted to %s", output_filepath)
 
         try:
             ist_tz = timezone(timedelta(hours=5, minutes=30))
@@ -449,6 +578,16 @@ def decrypt_timecapsule_with_key(request: DecryptRequest, metadata: dict, key_b:
             "pgn_created_at_ist": pgn_created_at_ist,
             "pgn_source": "filesystem_mtime_ist"
         }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        if preview_session_id:
+            _cleanup_preview_session(preview_session_id)
+        raise HTTPException(status_code=400, detail=friendly_error(str(exc))) from exc
+    except Exception:
+        if preview_session_id:
+            _cleanup_preview_session(preview_session_id)
+        raise
     except HTTPException:
         if preview_session_id:
             _cleanup_preview_session(preview_session_id)
@@ -576,6 +715,7 @@ def create_timecapsule_via_drand(request: EncryptRequest, unlock_dt: datetime):
         )
         tracker.update("prepare", "Validating unlock time", 0.2, force=True)
         validate_unlock_datetime_against_ntp(unlock_dt)
+        enforce_system_clock_alignment("drand time-capsule creation")
         tracker.update("prepare", "Trusted time verified", 1.0)
 
         key_b = generate_key_b()
@@ -696,7 +836,14 @@ def create_regular_encryption(request: EncryptRequest, unlock_dt: datetime):
         log.error("Regular encryption failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=friendly_error(str(e)))
 
-def read_avk_metadata_only(avk_filepath: str, password: str = None, keyphrase: list = None) -> dict:
+def read_avk_metadata_only(
+    avk_filepath: str,
+    password: str = None,
+    keyphrase: list = None,
+    *,
+    header_bytes: bytes | None = None,
+    keychain_pgn: str | None = None,
+) -> dict:
     """
     Read only metadata from .avk file without decrypting the full payload.
     Used for provider-backed time-capsule flows without decrypting the full payload.
@@ -713,11 +860,12 @@ def read_avk_metadata_only(avk_filepath: str, password: str = None, keyphrase: l
     from avikal_backend.archive.format.header import parse_header_bytes, validate_metadata_against_header
     from avikal_backend.archive.chess_metadata import decode_chess_to_metadata_enhanced
     
-    try:
-        with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, _payload_stream):
-            pass
-    except Exception as e:
-        raise ValueError(f"Failed to open .avk file: {str(e)}")
+    if header_bytes is None or keychain_pgn is None:
+        try:
+            with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, _payload_stream):
+                pass
+        except Exception as e:
+            raise ValueError(f"Failed to open .avk file: {str(e)}")
     
     try:
         # Decode chess PGN to get metadata (skip timelock for metadata reading)
@@ -734,13 +882,19 @@ def read_avk_metadata_only(avk_filepath: str, password: str = None, keyphrase: l
         error_msg = str(e)
         if "password protected" in error_msg.lower():
             raise ValueError("This protected archive requires a password or keyphrase.")
-        elif "incorrect password" in error_msg.lower() or "incorrect keyphrase" in error_msg.lower():
+        elif (
+            "incorrect password" in error_msg.lower()
+            or "incorrect keyphrase" in error_msg.lower()
+            or "wrong key" in error_msg.lower()
+            or "decryption failed" in error_msg.lower()
+            or "chess metadata decryption failed" in error_msg.lower()
+        ):
             raise ValueError("Incorrect password or keyphrase.")
         else:
             raise ValueError(f"Metadata decoding failed: {error_msg}")
 
 
-def decrypt_timecapsule_via_aavrit(request: DecryptRequest, session_token: str | None):
+def decrypt_timecapsule_via_aavrit(request: DecryptRequest, session_token: str | None, metadata: dict | None = None):
     """Decrypt an Aavrit-backed time-capsule after reveal verification succeeds."""
     try:
         from avikal_backend.archive.pipeline.progress import ProgressTracker, bind_progress_tracker
@@ -750,10 +904,11 @@ def decrypt_timecapsule_via_aavrit(request: DecryptRequest, session_token: str |
         )
         tracker.update("prepare", "Reading archive metadata", 0.25, force=True)
         log.info("Reading metadata from %s", request.input_file)
-        try:
-            metadata = read_avk_metadata_only(request.input_file, request.password, request.keyphrase)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=friendly_error(str(e)))
+        if metadata is None:
+            try:
+                metadata = read_avk_metadata_only(request.input_file, request.password, request.keyphrase)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=friendly_error(str(e)))
 
         aavrit_meta = extract_aavrit_metadata(metadata)
         aavrit_url = normalize_aavrit_server_url(aavrit_meta["server_url"])
@@ -821,7 +976,7 @@ def decrypt_timecapsule_via_aavrit(request: DecryptRequest, session_token: str |
         raise HTTPException(status_code=500, detail=friendly_error(str(e)))
 
 
-def decrypt_timecapsule_via_drand(request: DecryptRequest):
+def decrypt_timecapsule_via_drand(request: DecryptRequest, metadata: dict | None = None):
     """Decrypt time-capsule using drand timelock release."""
     try:
         from avikal_backend.archive.pipeline.progress import ProgressTracker, bind_progress_tracker
@@ -831,10 +986,11 @@ def decrypt_timecapsule_via_drand(request: DecryptRequest):
         )
         tracker.update("prepare", "Reading archive metadata", 0.25, force=True)
         log.info("Reading metadata from %s", request.input_file)
-        try:
-            metadata = read_avk_metadata_only(request.input_file, request.password, request.keyphrase)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=friendly_error(str(e)))
+        if metadata is None:
+            try:
+                metadata = read_avk_metadata_only(request.input_file, request.password, request.keyphrase)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=friendly_error(str(e)))
 
         provider = detect_timecapsule_provider(metadata)
         if provider != "drand":
@@ -845,6 +1001,7 @@ def decrypt_timecapsule_via_drand(request: DecryptRequest):
         if not drand_ciphertext or not drand_round:
             raise HTTPException(status_code=400, detail="Invalid drand time-capsule metadata.")
 
+        enforce_system_clock_alignment("drand time-capsule decryption")
         tracker.update("provider", "Waiting for drand unlock shard", 0.4)
         helper_result = run_drand_helper({
             "action": "open",
@@ -875,9 +1032,11 @@ from .routes import router as api_router
 
 app.include_router(api_router)
 
-def start_server(host="127.0.0.1", port=5000):
+def start_server(host: str | None = None, port: int | None = None):
     """Start the API server"""
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    resolved_host = host or os.getenv("AVIKAL_BACKEND_HOST", "127.0.0.1")
+    resolved_port = port if port is not None else int(os.getenv("AVIKAL_BACKEND_PORT", "5000"))
+    uvicorn.run(app, host=resolved_host, port=resolved_port, log_level="info")
 
 if __name__ == "__main__":
     start_server()

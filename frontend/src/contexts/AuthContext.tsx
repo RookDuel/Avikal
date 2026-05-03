@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
-import { BACKEND_BASE_URL } from '../lib/backend'
+import { fetchBackend } from '../lib/backend'
 
 export interface User {
   id: string
@@ -183,7 +183,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers['X-Aavrit-Session'] = resolvedToken
         headers['X-Aavrit-Server-URL'] = resolvedUrl
 
-        const response = await fetch(`${BACKEND_BASE_URL}/api/auth/profile`, { headers })
+        const response = await fetchBackend('/api/auth/profile', { headers })
         if (!response.ok) {
           const errText = await response.text().catch(() => '(no body)')
           console.error(`[AuthContext] /api/auth/profile failed: HTTP ${response.status} - ${errText}`)
@@ -214,7 +214,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const connectServer = async (rawAavritUrl: string): Promise<AavritMode> => {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/auth/check-aavrit-server`, {
+    const response = await fetchBackend('/api/auth/check-aavrit-server', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ aavrit_url: rawAavritUrl.trim() }),
@@ -242,7 +242,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const login = async (credentials: LoginRequest): Promise<boolean> => {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/auth/login`, {
+    const response = await fetchBackend('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(credentials),
@@ -290,7 +290,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = async () => {
     try {
-      await fetch(`${BACKEND_BASE_URL}/api/auth/logout`, { method: 'POST' })
+      await fetchBackend('/api/auth/logout', { method: 'POST' })
     } catch (error) {
       console.error('Logout request failed:', error)
     }
@@ -313,7 +313,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return
       }
 
-      const serverCheck = await fetch(`${BACKEND_BASE_URL}/api/auth/check-aavrit-server`, {
+      const serverCheck = await fetchBackend('/api/auth/check-aavrit-server', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ aavrit_url: storedAavritUrl }),
@@ -366,7 +366,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const verifyAndSetSession = async (token: string, url?: string): Promise<boolean> => {
     try {
       const resolvedUrl = url ?? aavritServerUrl ?? loadAavritServerUrl() ?? undefined
-      const response = await fetch(`${BACKEND_BASE_URL}/api/auth/verify-session`, {
+      const response = await fetchBackend('/api/auth/verify-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_token: token, aavrit_url: resolvedUrl }),

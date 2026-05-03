@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from ...archive.chess_metadata import decode_chess_to_metadata_enhanced
-from ...archive.format.container import read_avk_container
+from ...archive.format.container import read_avk_header_and_keychain
 from ...archive.format.header import parse_header_bytes, validate_metadata_against_header
 from ...archive.pipeline.multi_file_decoder import inspect_multi_file_avk
 from ..formatters import build_container_summary, human_size, summarize_metadata
-from ..inputs import load_keyphrase, resolve_single_input
+from ..inputs import load_keyphrase, load_password, resolve_single_input
 
 
 def decode_archive_metadata(
@@ -26,7 +26,7 @@ def decode_archive_metadata(
     keyphrase: list[str] | None,
     skip_timelock: bool,
 ) -> dict[str, Any]:
-    header_bytes, keychain_pgn, _payload = read_avk_container(input_path)
+    header_bytes, keychain_pgn = read_avk_header_and_keychain(input_path)
     header_info = parse_header_bytes(header_bytes)
     metadata = decode_chess_to_metadata_enhanced(
         keychain_pgn,
@@ -63,7 +63,7 @@ def inspect_archive(args: argparse.Namespace) -> dict[str, Any]:
         title="Select Avikal archive to inspect",
         filetypes=[("Avikal archive", "*.avk"), ("All files", "*.*")],
     )
-    header_bytes, keychain_pgn, _payload = read_avk_container(input_path)
+    header_bytes, keychain_pgn = read_avk_header_and_keychain(input_path)
     header_info = parse_header_bytes(header_bytes)
     result = {
         "ok": True,
@@ -72,11 +72,12 @@ def inspect_archive(args: argparse.Namespace) -> dict[str, Any]:
         "metadata": None,
     }
 
+    password = load_password(args)
     keyphrase = load_keyphrase(args)
-    if args.password or keyphrase:
+    if password or keyphrase:
         metadata = decode_chess_to_metadata_enhanced(
             keychain_pgn,
-            password=args.password,
+            password=password,
             keyphrase=keyphrase,
             skip_timelock=args.skip_timelock,
             aad=header_bytes,
@@ -99,6 +100,7 @@ def validate_archive(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
+    password = load_password(args)
     keyphrase = load_keyphrase(args)
     input_path = resolve_single_input(
         args.input,
@@ -108,7 +110,7 @@ def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
     )
     archive_kind, metadata = detect_archive_kind(
         input_path,
-        password=args.password,
+        password=password,
         keyphrase=keyphrase,
         skip_timelock=args.skip_timelock,
     )
@@ -116,7 +118,7 @@ def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
     if archive_kind == "multi_file":
         manifest_result = inspect_multi_file_avk(
             avk_filepath=input_path,
-            password=args.password,
+            password=password,
             keyphrase=keyphrase,
             pqc_keyfile_path=args.pqc_keyfile,
         )

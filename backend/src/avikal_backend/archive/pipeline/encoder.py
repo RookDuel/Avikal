@@ -15,7 +15,8 @@ from datetime import datetime
 
 from ..format.header import (
     ARCHIVE_MODE_SINGLE,
-    HEADER_FILENAME,
+    attach_public_route_tags_to_keychain_pgn,
+    attach_header_to_keychain_pgn,
     build_header_bytes,
     provider_name_to_id,
 )
@@ -23,17 +24,20 @@ from ..security.crypto import (
     secure_zero,
     derive_pqc_hybrid_payload_key,
     derive_time_only_payload_key,
-    generate_pqc_keypair,
     has_user_secret,
-    pqc_encapsulate,
+)
+from ..security.key_wrap import (
+    PAYLOAD_KEY_WRAP_ALGORITHM,
+    generate_payload_key,
+    wrap_payload_key,
 )
 from ..chess_metadata import encode_metadata_to_chess_enhanced
 from ..security.pqc_keyfile import (
     PQC_KEYFILE_ALGORITHM,
-    compute_pqc_key_id,
     default_keyfile_path_for_archive,
     write_pqc_keyfile,
 )
+from ..security.pqc_provider import create_pqc_archive_material
 from ..security.time_lock import datetime_to_timestamp, format_unlock_time, get_trusted_now
 from .payload_streaming import stream_file_to_payload
 from .progress import get_progress_tracker
@@ -154,8 +158,8 @@ def create_avk_file_enhanced(
         from datetime import datetime, timezone
         unlock_datetime = datetime.now(timezone.utc)
     
-    pqc_public_key = None
-    pqc_private_key = None
+    pqc_public_bundle = None
+    pqc_private_bundle = None
     pqc_shared_secret = None
     pqc_ciphertext = None
     pqc_key_id = None
@@ -170,19 +174,12 @@ def create_avk_file_enhanced(
         if os.path.abspath(output_filepath) == pqc_keyfile_path:
             raise ValueError("PQC keyfile path must be different from the .avk output path")
 
-        keypair = generate_pqc_keypair()
-        if not keypair:
-            raise ValueError(
-                "PQC mode is unavailable. Install pqcrypto with ML-KEM-1024 support to enable it."
-            )
-        pqc_public_key, pqc_private_key = keypair
-
-        encapsulated = pqc_encapsulate(pqc_public_key)
-        if not encapsulated:
-            raise ValueError("PQC encapsulation failed. Unable to create external keyfile protection.")
-
-        pqc_ciphertext, pqc_shared_secret = encapsulated
-        pqc_key_id = compute_pqc_key_id(pqc_public_key, pqc_ciphertext)
+        pqc_material = create_pqc_archive_material(archive_filename=os.path.basename(output_filepath))
+        pqc_public_bundle = pqc_material["public_bundle"]
+        pqc_private_bundle = pqc_material["private_bundle"]
+        pqc_ciphertext = pqc_material["ciphertext"]
+        pqc_shared_secret = pqc_material["shared_secret"]
+        pqc_key_id = pqc_material["key_id"]
     
     original_size = os.path.getsize(input_filepath)
     tracker = get_progress_tracker()
@@ -204,6 +201,9 @@ def create_avk_file_enhanced(
 
     master_key = None
     payload_key = None
+    payload_encryption_key = None
+    wrapped_payload_key = None
+    payload_key_wrap_algorithm = None
     if user_secret_enabled:
         if tracker:
             tracker.update("prepare", "Deriving protection keys", 0.5)
@@ -221,6 +221,9 @@ def create_avk_file_enhanced(
             print("Applying external PQC keyfile protection to payload key...")
             payload_key = derive_pqc_hybrid_payload_key(payload_key, pqc_shared_secret, salt)
 
+        payload_encryption_key = generate_payload_key()
+        wrapped_payload_key = wrap_payload_key(payload_encryption_key, payload_key, header_bytes)
+        payload_key_wrap_algorithm = PAYLOAD_KEY_WRAP_ALGORITHM
         encryption_method = "aes256gcm_stream"
     elif use_timecapsule:
         if tracker:
@@ -229,6 +232,7 @@ def create_avk_file_enhanced(
             raise ValueError("Time-capsule archives without password or keyphrase require a provider time key")
         print("Deriving payload key from provider-held time key only...")
         payload_key = derive_time_only_payload_key(time_key, salt)
+        payload_encryption_key = payload_key
         encryption_method = "aes256gcm_stream_timekey"
     else:
         if tracker:
@@ -254,7 +258,7 @@ def create_avk_file_enhanced(
             input_path=input_filepath,
             payload_path=temp_payload_path,
             aad=header_bytes,
-            encrypt_key=payload_key if encryption_method != "plaintext_archive" else None,
+            encrypt_key=payload_encryption_key if encryption_method != "plaintext_archive" else None,
             progress_callback=(
                 (lambda processed, _total: tracker.update(
                     "payload",
@@ -301,10 +305,12 @@ def create_avk_file_enhanced(
             pqc_key_id=pqc_key_id,
             keyphrase_format_version=MNEMONIC_FORMAT_VERSION if keyphrase_protected else None,
             keyphrase_wordlist_id=WORDLIST_ID if keyphrase_protected else None,
-            archive_type="single_file" if timecapsule_provider == "aavrit" else None,
-            entry_count=1 if timecapsule_provider == "aavrit" else None,
-            total_original_size=original_size if timecapsule_provider == "aavrit" else None,
-            manifest_hash=original_checksum if timecapsule_provider == "aavrit" else None,
+            archive_type="single_file",
+            entry_count=1,
+            total_original_size=original_size,
+            manifest_hash=original_checksum,
+            payload_key_wrap_algorithm=payload_key_wrap_algorithm,
+            wrapped_payload_key=wrapped_payload_key,
         )
 
         # Step 6: Enhanced chess encoding with original design (password/keyphrase)
@@ -319,6 +325,16 @@ def create_avk_file_enhanced(
             variations_per_round,
             use_timecapsule,
             aad=header_bytes,
+        )
+        keychain_pgn = attach_header_to_keychain_pgn(keychain_pgn, header_bytes)
+        keychain_pgn = attach_public_route_tags_to_keychain_pgn(
+            keychain_pgn,
+            requires_password=bool(password),
+            requires_keyphrase=bool(keyphrase),
+            requires_pqc=bool(pqc_enabled),
+            unlock_timestamp=unlock_timestamp if use_timecapsule else None,
+            drand_round=drand_round,
+            keyphrase_wordlist_id=WORDLIST_ID if keyphrase_protected else None,
         )
         chess_encoding_time = time.time() - start_chess
         if tracker:
@@ -338,7 +354,6 @@ def create_avk_file_enhanced(
         temp_archive.close()
 
         with zipfile.ZipFile(temp_archive_path, 'w') as zf:
-            zf.writestr(HEADER_FILENAME, header_bytes, compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr('keychain.pgn', keychain_pgn, compress_type=zipfile.ZIP_DEFLATED)
             zf.write(temp_payload_path, arcname='payload.enc', compress_type=zipfile.ZIP_STORED)
 
@@ -347,8 +362,8 @@ def create_avk_file_enhanced(
                 pqc_keyfile_path,
                 password=password,
                 keyphrase=keyphrase,
-                private_key=pqc_private_key,
-                public_key=pqc_public_key,
+                private_bundle=pqc_private_bundle,
+                public_bundle=pqc_public_bundle,
                 pqc_ciphertext=pqc_ciphertext,
                 archive_filename=os.path.basename(output_filepath),
                 algorithm=PQC_KEYFILE_ALGORITHM,
@@ -377,12 +392,10 @@ def create_avk_file_enhanced(
         secure_zero(salt)
     if payload_key:
         secure_zero(payload_key)
+    if payload_encryption_key and payload_encryption_key is not payload_key:
+        secure_zero(payload_encryption_key)
     if pqc_shared_secret:
         secure_zero(pqc_shared_secret)
-    if pqc_private_key:
-        secure_zero(pqc_private_key)
-    if pqc_public_key:
-        secure_zero(pqc_public_key)
     if password:
         secure_zero(password.encode('utf-8'))
     
@@ -413,7 +426,7 @@ def create_avk_file_enhanced(
     if use_timecapsule:
         security_features.append("NTP Time Synchronization (time.google.com)")
     if pqc_enabled:
-        security_features.append("External PQC Keyfile (ML-KEM-1024)")
+        security_features.append("External Quantum Keyfile (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
     
     print(f"  Security: {', '.join(security_features)}")
 

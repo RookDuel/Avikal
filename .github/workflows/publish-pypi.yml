@@ -1,15 +1,19 @@
 name: Publish PyPI
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      confirm_publish:
+        description: "Type PUBLISH to confirm a live PyPI release"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   publish:
+    if: ${{ github.event.inputs.confirm_publish == 'PUBLISH' }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -28,25 +32,66 @@ jobs:
       - name: Install build tooling
         run: |
           python -m pip install --upgrade pip
-          pip install build
+          pip install build twine
 
       - name: Build package
         working-directory: backend
         run: python -m build
 
       - name: Verify package metadata
-        run: python -m pip install twine && python -m twine check backend/dist/*
+        run: python -m twine check backend/dist/*
 
       - name: Smoke test built wheel
         shell: bash
         run: |
+          set -euo pipefail
+          export TZ=UTC
           python -m venv .venv-smoke
           source .venv-smoke/bin/activate
           python -m pip install --upgrade pip
           pip install backend/dist/*.whl
           avikal --help
           python -m avikal_backend --help
-          avikal diag --json
+
+          DOCTOR_JSON="$(avikal diag --json)"
+          printf '%s\n' "$DOCTOR_JSON" | python -c "import json,sys; doc=json.load(sys.stdin); assert doc['checks']['imports']['requests']; assert doc['checks']['pqc_provider']['available'] is False"
+
+          WORKDIR="$(mktemp -d)"
+          export WORKDIR
+          mkdir -p "$WORKDIR/input" "$WORKDIR/output" "$WORKDIR/output-rekeyed"
+          printf 'Avikal CLI smoke test data\n' > "$WORKDIR/input/note.txt"
+          printf 'Second file for bundle\n' > "$WORKDIR/input/second.txt"
+
+          avikal enc "$WORKDIR/input/note.txt" "$WORKDIR/input/second.txt" -o "$WORKDIR/bundle.avk" -p 'SmokePass#7Qx' --json
+          avikal info "$WORKDIR/bundle.avk" -p 'SmokePass#7Qx' --json
+          avikal ls "$WORKDIR/bundle.avk" -p 'SmokePass#7Qx' --json
+          avikal check "$WORKDIR/bundle.avk" -p 'SmokePass#7Qx' --json
+          avikal dec "$WORKDIR/bundle.avk" -d "$WORKDIR/output" -p 'SmokePass#7Qx' --json
+
+          sha256sum "$WORKDIR/input/note.txt" "$WORKDIR/output/note.txt"
+          sha256sum "$WORKDIR/input/second.txt" "$WORKDIR/output/second.txt"
+          cmp "$WORKDIR/input/note.txt" "$WORKDIR/output/note.txt"
+          cmp "$WORKDIR/input/second.txt" "$WORKDIR/output/second.txt"
+
+          avikal rekey "$WORKDIR/bundle.avk" --old-password 'SmokePass#7Qx' --new-password 'RotorPass#8Vz' -o "$WORKDIR/bundle-rekeyed.avk" --force --json
+          avikal dec "$WORKDIR/bundle-rekeyed.avk" -d "$WORKDIR/output-rekeyed" -p 'RotorPass#8Vz' --json
+
+          FUTURE_UNLOCK="$(date -u -d '+10 minutes' '+%Y-%m-%d %H:%M')"
+          avikal enc "$WORKDIR/input/note.txt" -o "$WORKDIR/timelock.avk" -p 'TimeLock#9Qm' --timecapsule -u "$FUTURE_UNLOCK" --json
+
+          set +e
+          LOCK_OUTPUT="$(avikal dec "$WORKDIR/timelock.avk" -d "$WORKDIR/locked-out" -p 'TimeLock#9Qm' --json 2>&1)"
+          LOCK_STATUS=$?
+          PQC_OUTPUT="$(avikal enc "$WORKDIR/input/note.txt" -o "$WORKDIR/pqc.avk" -p 'Quantum#7Lm' --pqc --json 2>&1)"
+          PQC_STATUS=$?
+          set -e
+
+          test "$LOCK_STATUS" -ne 0
+          printf '%s\n' "$LOCK_OUTPUT" | grep -qi "locked until"
+          avikal info "$WORKDIR/timelock.avk" -p 'TimeLock#9Qm' --skip-timelock --json
+
+          test "$PQC_STATUS" -ne 0
+          printf '%s\n' "$PQC_OUTPUT" | grep -qi "OpenSSL PQC provider is unavailable"
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "avikal"
 dynamic = ["version", "dependencies"]
-description = "Standalone CLI package for Avikal secure archives."
-readme = "README_PACKAGE.md"
+description = "Avikal CLI and shared archive engine for secure .avk workflows."
+readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 authors = [
-  { name = "Atharva Sen Barai" }
+  { name = "RookDuel" }
 ]
 keywords = [
   "archive",
@@ -18,13 +18,11 @@ keywords = [
   "cli",
   "pqc",
   "timelock",
-  "aavrit",
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX",
   "Programming Language :: Python :: 3",
@@ -61,3 +59,7 @@ avikal_backend = [
 [tool.setuptools.dynamic]
 version = { attr = "avikal_backend.version.__version__" }
 dependencies = { file = ["requirements-cli.txt"] }
+
+[tool.pytest.ini_options]
+addopts = ["-p", "no:cacheprovider"]
+testpaths = ["tests"]

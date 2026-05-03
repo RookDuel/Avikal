@@ -1,11 +1,14 @@
-import { useState, useCallback, useMemo, useEffect } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Unlock, FolderOpen, FileText, Key, Shield, X, Eye, EyeOff, Download,
   Archive, Upload, Search, CheckCircle2, File, Folder,
-  ChevronRight, ChevronDown, RefreshCw, Fingerprint, Lock
+  ChevronRight, ChevronDown, RefreshCw, Fingerprint, Lock, StopCircle
 } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, cancelDecrypt } from '../lib/api'
+import type { KeyphraseWordPair } from '../lib/api'
+import { fetchBackend } from '../lib/backend'
+import { waitForBackendReady } from '../lib/backendStatus'
 import { formatEta, parseBackendProgressChunk } from '../lib/backendProgress'
 import { getErrorMessage } from '../lib/errors'
 import { getDroppedPaths } from '../lib/electron'
@@ -14,6 +17,9 @@ import { useAuth } from '../contexts/AuthContext'
 import { useProgress } from '../hooks/useProgress'
 import SecuritySettings from '../components/SecuritySettings'
 import AuthModal from '../components/AuthModal'
+import { useBackendRuntime } from '../hooks/useBackendRuntime'
+import BackendStartupNotice from '../components/BackendStartupNotice'
+import KeyphraseAssistInput, { splitKeyphraseWords } from '../components/KeyphraseAssistInput'
 
 // ── Result Tree Types ─────────────────────────────────────────────
 interface ExtractedFile {
@@ -51,6 +57,9 @@ interface ArchiveInspectHints {
   password_hint?: boolean | null
   keyphrase_hint?: boolean | null
   pqc_required?: boolean | null
+  unlock_timestamp?: number | null
+  drand_round?: number | null
+  keyphrase_wordlist_id?: string | null
 }
 
 function formatSize(bytes: number): string {
@@ -241,8 +250,10 @@ export default function Decrypt() {
   const [isDragging, setIsDragging] = useState(false)
   const [password, setPassword] = useState('')
   const [keyphrase, setKeyphrase] = useState('')
+  const [keyphraseWordPairs, setKeyphraseWordPairs] = useState<KeyphraseWordPair[]>([])
   const [pqcKeyfile, setPqcKeyfile] = useState('')
   const [loading, setLoading] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
   const [decryptionResult, setDecryptionResult] = useState<DecryptResponseEnvelope | null>(null)
   const [previewFile, setPreviewFile] = useState<ExtractedFile | null>(null)
   const [showSecuritySettings, setShowSecuritySettings] = useState(false)
@@ -250,7 +261,35 @@ export default function Decrypt() {
   const [searchQuery, setSearchQuery] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [archiveHints, setArchiveHints] = useState<ArchiveInspectHints | null>(null)
+  // Ref holds the preview session ID that may be created server-side during a decrypt
+  const activeSessionIdRef = useRef<string | null>(null)
   const progress = useProgress()
+  const backendRuntime = useBackendRuntime()
+  const canDecrypt = backendRuntime.isReady && file.length > 0 && !loading && !decryptionResult
+
+  const resetUnlockInputs = useCallback(() => {
+    setPassword('')
+    setKeyphrase('')
+    setPqcKeyfile('')
+    setShowPassword(false)
+  }, [])
+
+  useEffect(() => {
+    if (!backendRuntime.isReady || keyphraseWordPairs.length > 0) return
+
+    let cancelled = false
+    api.getKeyphraseRomanMap()
+      .then(result => {
+        if (!cancelled && result.success) setKeyphraseWordPairs(result.words)
+      })
+      .catch(() => {
+        if (!cancelled) toast.error('Keyphrase typing helper unavailable')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [backendRuntime.isReady, keyphraseWordPairs.length])
 
   useEffect(() => {
     const unsubscribe = window.electron?.onBackendLog?.((message) => {
@@ -281,17 +320,6 @@ export default function Decrypt() {
     }
   }, [])
 
-  const copyFile = async (sourcePath: string, destPath: string) => {
-    try {
-      const copied = await window.electron?.copyFile?.(sourcePath, destPath)
-      if (!copied) throw new Error('Failed to copy file')
-      return copied
-    } catch (error) {
-      console.error('File copy error:', error)
-      throw error
-    }
-  }
-
   const previewFileContent = async (fileObj: ExtractedFile) => {
     const ext = fileObj.filename.split('.').pop()?.toLowerCase()
     if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'txt', 'md', 'json', 'xml', 'csv'].includes(ext || '')) {
@@ -303,12 +331,15 @@ export default function Decrypt() {
 
   const handleSaveFile = async (fileObj: ExtractedFile) => {
     try {
-      const savePath = await window.electron?.saveFile?.({
+      if (!fileObj.path || !window.electron?.exportFileCopy) {
+        throw new Error('Desktop file export is unavailable')
+      }
+      const savePath = await window.electron.exportFileCopy({
+        sourcePath: fileObj.path,
         defaultPath: fileObj.filename.split(/[/\\]/).pop(),
         filters: [{ name: 'All Files', extensions: ['*'] }]
       })
-      if (savePath && fileObj.path) {
-        await copyFile(fileObj.path, savePath)
+      if (savePath) {
         toast.success('File saved successfully')
       }
     } catch {
@@ -329,7 +360,7 @@ export default function Decrypt() {
   const handleFileSelected = (paths: string[]) => {
     if (paths?.length > 0) {
       setFile([paths[0]])
-      setPqcKeyfile('')
+      resetUnlockInputs()
       setDecryptionResult(null)
       setArchiveHints(null)
     }
@@ -374,34 +405,79 @@ export default function Decrypt() {
     }
   }
 
+  const handleCancelDecrypt = useCallback(async () => {
+    if (!loading || isCancelling) return
+    setIsCancelling(true)
+    // 1. Abort the in-flight HTTP request immediately
+    cancelDecrypt()
+    // 2. Tell the backend to clean up any partial preview session dir
+    try {
+      await waitForBackendReady()
+      await fetchBackend('/api/decrypt/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: activeSessionIdRef.current }),
+      }, 10_000)
+    } catch {
+      // Backend cleanup is best-effort — the abort already fired
+    }
+    activeSessionIdRef.current = null
+    progress.reset()
+    setLoading(false)
+    setIsCancelling(false)
+    toast.info('Decryption stopped')
+  }, [loading, isCancelling, progress])
+
   const handleDecrypt = async () => {
+    if (!backendRuntime.isReady) {
+      toast.info(backendRuntime.detail)
+      return
+    }
     if (file.length === 0) {
       toast.error('Please select an encrypted file')
       return
     }
     try {
       setLoading(true)
+      setIsCancelling(false)
+      activeSessionIdRef.current = null
       progress.reset()
-      progress.update({ status: 'running', currentOperation: 'Reading file', percentage: null })
+      let initialOperation = 'Contacting secure engine...'
+      if (archiveHints?.provider === 'drand') {
+        initialOperation = archiveHints.pqc_required
+          ? 'Checking release time and required keys...'
+          : 'Checking release time and required protections...'
+      } else if (archiveHints?.provider === 'aavrit') {
+        initialOperation = 'Checking capsule access requirements...'
+      } else if (archiveHints?.pqc_required || archiveHints?.password_hint || archiveHints?.keyphrase_hint) {
+        initialOperation = 'Checking required protections...'
+      }
+      progress.update({ status: 'running', currentOperation: initialOperation, percentage: null })
 
       const result = await api.decrypt(
         {
           input_file: file[0],
-          output_dir: '',
           password: password || undefined,
-          keyphrase: keyphrase ? keyphrase.split(' ') : undefined,
+          keyphrase: keyphrase ? splitKeyphraseWords(keyphrase) : undefined,
           pqc_keyfile: pqcKeyfile || undefined,
         },
         sessionToken || undefined,
       )
 
       if (result.success) {
+        // Store the session ID so cancel can clean it up if needed
+        if (result.preview_session_id) {
+          activeSessionIdRef.current = result.preview_session_id
+        }
         const fileCount = result.result?.file_count || 1
         toast.success(fileCount > 1 ? `${fileCount} files ready for preview` : 'File ready for preview')
         setDecryptionResult(result)
+        resetUnlockInputs()
         progress.update({ status: 'completed', currentOperation: 'Preview ready', percentage: 100 })
       }
     } catch (error: unknown) {
+      // Cancelled by user — silent, no error toast
+      if ((error as Error & { cancelled?: boolean })?.cancelled) return
       const message = getErrorMessage(error, 'Decryption failed')
       const normalizedLockMessage = message.replace(/^Failed to open \.avk file:\s*/i, '').trim()
       if (
@@ -415,6 +491,10 @@ export default function Decrypt() {
         setShowAuthModal(true)
       } else if (message.includes('Authentication failed')) toast.error('Authentication failed. Please try again.')
       else if (message.includes('Session expired')) toast.error('Session expired. Please login again.')
+      else if (message.includes('requires the matching .avkkey file')) toast.error('This archive requires its matching .avkkey file before decryption can continue.')
+      else if (message.includes('requires both its password and 21-word keyphrase')) toast.error('This archive requires both its password and 21-word keyphrase before decryption can continue.')
+      else if (message.includes('requires its password before decryption can continue')) toast.error('This archive requires its password before decryption can continue.')
+      else if (message.includes('requires its 21-word keyphrase before decryption can continue')) toast.error('This archive requires its 21-word keyphrase before decryption can continue.')
       else if (message.includes('requires a password or keyphrase')) toast.error('This protected archive requires a password or keyphrase.')
       else if (message.includes('Incorrect password or keyphrase')) toast.error('Wrong password or keyphrase')
       else if (message.includes('Incorrect password')) toast.error('Wrong password or keyphrase')
@@ -427,27 +507,6 @@ export default function Decrypt() {
     }
   }
 
-  const handleImportKeyphrase = async () => {
-    try {
-      const electron = window.electron
-      const selected = await electron?.openFile({
-        properties: ['openFile'],
-        filters: [{ name: 'Text Files', extensions: ['txt'] }]
-      })
-      
-      if (selected && selected.length > 0) {
-        const content = await electron?.readFile(selected[0])
-        if (content) {
-          setKeyphrase(content.trim())
-          toast.success('Keyphrase imported successfully')
-        }
-      }
-    } catch (error) {
-      console.error('Error importing keyphrase:', error)
-      toast.error('Failed to import keyphrase')
-    }
-  }
-
   // Build tree from extracted files
   const extractedFiles = useMemo<ExtractedFile[]>(() => decryptionResult?.result?.files ?? [], [decryptionResult])
   const resultTree = useMemo(() => buildResultTree(extractedFiles), [extractedFiles])
@@ -455,16 +514,25 @@ export default function Decrypt() {
 
   const handleExtractAll = async () => {
     try {
-      const extractPath = await window.electron?.openDirectory?.()
-      if (extractPath && extractedFiles.length) {
-        let successCount = 0
-        for (const f of extractedFiles) {
-          if (f.path) {
-            await copyFile(f.path, `${extractPath}/${f.filename}`)
-            successCount++
-          }
-        }
-        toast.success(`${successCount} files extracted to ${extractPath}`)
+      if (!window.electron?.exportFilesToDirectory) {
+        throw new Error('Bulk extraction is unavailable')
+      }
+      const exportableFiles = extractedFiles
+        .filter((fileObj) => fileObj.path)
+        .map((fileObj) => ({
+          sourcePath: fileObj.path,
+          relativePath: fileObj.filename.replace(/\\/g, '/'),
+        }))
+      if (exportableFiles.length === 0) {
+        throw new Error('No extracted files are available to export')
+      }
+
+      const result = await window.electron.exportFilesToDirectory({
+        title: 'Choose extraction folder',
+        files: exportableFiles,
+      })
+      if (result) {
+        toast.success(`${result.copiedCount} files extracted to ${result.destinationPath}`)
       }
     } catch {
       toast.error('Failed to extract files')
@@ -477,9 +545,7 @@ export default function Decrypt() {
     setPreviewFile(null)
     setFile([])
     setSearchQuery('')
-    setPassword('')
-    setKeyphrase('')
-    setPqcKeyfile('')
+    resetUnlockInputs()
     setArchiveHints(null)
   }
 
@@ -546,9 +612,14 @@ export default function Decrypt() {
             <div className="w-full max-w-md rounded-3xl bg-av-surface/90 border border-av-border/40 p-8 shadow-[0_20px_60px_rgba(0,0,0,0.12)]">
               <div className="flex items-center gap-3 mb-5">
                 <div className="p-3 rounded-2xl bg-av-accent/10 border border-av-accent/30">
-                  <RefreshCw className="w-6 h-6 text-av-accent" strokeWidth={1.5} />
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
+                  >
+                    <RefreshCw className="w-6 h-6 text-av-accent" strokeWidth={1.5} />
+                  </motion.div>
                 </div>
-                <div>
+                <div className="flex-1">
                   <h3 className="text-xl font-medium tracking-tight text-av-main">Unlocking Archive</h3>
                   <p className="text-sm text-av-muted font-light">{progress.currentOperation || 'Preparing secure preview...'}</p>
                 </div>
@@ -575,6 +646,35 @@ export default function Decrypt() {
               <div className="mt-4 flex items-center justify-between text-xs text-av-muted">
                 <span>Elapsed {progress.elapsedSeconds}s</span>
                 {progress.fileSize !== null && <span>{Math.round(progress.fileSize / (1024 * 1024))} MB source</span>}
+              </div>
+
+              {/* Stop Button */}
+              <div className="mt-5 pt-4 border-t border-av-border/20">
+                <button
+                  id="decrypt-stop-btn"
+                  onClick={handleCancelDecrypt}
+                  disabled={isCancelling}
+                  className="w-full flex items-center justify-center gap-2.5 py-2.5 px-4 rounded-xl bg-red-500/10 border border-red-500/25 text-red-400 text-sm font-medium transition-all hover:bg-red-500/20 hover:border-red-500/50 hover:text-red-300 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isCancelling ? (
+                    <>
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
+                        className="w-4 h-4 border-2 border-red-400/30 border-t-red-400 rounded-full"
+                      />
+                      Stopping...
+                    </>
+                  ) : (
+                    <>
+                      <StopCircle className="w-4 h-4" strokeWidth={1.5} />
+                      Stop Decryption
+                    </>
+                  )}
+                </button>
+                <p className="text-[10px] text-av-muted/50 text-center mt-2 font-light">
+                  Stopping will discard any partially decrypted data
+                </p>
               </div>
             </div>
           </div>
@@ -733,7 +833,7 @@ export default function Decrypt() {
       </div>
 
       {/* ── Right Panel: Security Protocol (40%) ─────────────────────── */}
-      <div className="lg:col-span-2 flex flex-col gap-5 pb-6">
+      <div className={`lg:col-span-2 flex flex-col gap-5 pb-6 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
         <div className="px-2 mb-1">
           <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Unlocking Settings</h3>
@@ -798,39 +898,33 @@ export default function Decrypt() {
                 }`}>
                   <Key className={`w-[18px] h-[18px] ${keyphrase.trim().length > 0 ? 'text-purple-500' : 'text-av-muted'}`} strokeWidth={1.5} />
                 </div>
-                <div>
+              <div>
                   <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Security Keyphrase</h3>
                   <p className="text-av-muted text-[13px] font-light">Enter only if this archive was created with a 21-word keyphrase</p>
                 </div>
               </div>
-              <button
-                onClick={handleImportKeyphrase}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-purple-500/10 border border-purple-500/20 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500/30 transition-all shadow-sm group/btn"
-              >
-                <Upload className="w-3.5 h-3.5 group-hover/btn:-translate-y-0.5 transition-transform" />
-                Import .txt
-              </button>
             </div>
 
-            <div className="relative rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 backdrop-blur-md">
-              <textarea
-                placeholder="Enter 21-word security keyphrase..."
-                value={keyphrase}
-                onChange={e => setKeyphrase(e.target.value)}
-                className="w-full px-4 py-3.5 rounded-xl bg-transparent text-av-main text-sm focus:outline-none focus:ring-1 focus:ring-purple-500/50 transition-all font-medium placeholder:font-light min-h-[100px] resize-none"
-              />
-            </div>
+            <KeyphraseAssistInput
+              value={keyphrase}
+              onChange={setKeyphrase}
+              pairs={keyphraseWordPairs}
+              disabled={!backendRuntime.isReady || loading}
+              onIssue={message => toast.error(message)}
+              showClearButton
+              onClearAll={() => setKeyphrase('')}
+            />
 
             {/* Word count indicator */}
             {keyphrase.trim().length > 0 && (
               <div className="mt-3 flex items-center gap-2">
                 <div className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${
-                  keyphrase.trim().split(/\s+/).filter(Boolean).length === 21
+                  splitKeyphraseWords(keyphrase).length === 21
                     ? 'bg-purple-500 shadow-[0_0_6px_rgba(168,85,247,0.8)]'
                     : 'bg-av-border/50 dark:bg-white/10'
                 }`} />
                 <span className="text-[11px] text-av-muted font-medium">
-                  {keyphrase.trim().split(/\s+/).filter(Boolean).length} / 21 words
+                  {splitKeyphraseWords(keyphrase).length} / 21 words
                 </span>
               </div>
             )}
@@ -891,18 +985,22 @@ export default function Decrypt() {
 
         {/* Execution Block */}
         <div className="shrink-0 flex flex-col gap-3 mt-auto pt-2">
+          <BackendStartupNotice backend={backendRuntime} compact />
           <button
             onClick={handleDecrypt}
-            disabled={file.length === 0 || loading || !!decryptionResult}
+            disabled={!canDecrypt}
             className={`w-full py-4 rounded-2xl text-[15px] font-semibold tracking-wide transition-all duration-300 flex items-center justify-center gap-2 ${
-              file.length === 0 || loading || !!decryptionResult
+              !canDecrypt
                 ? 'bg-av-border/10 dark:bg-white/5 border border-av-border/20 dark:border-white/5 text-av-muted cursor-not-allowed shadow-inner backdrop-blur-sm'
                 : 'bg-av-main hover:opacity-90 text-av-surface shadow-[0_10px_30px_rgba(0,0,0,0.15)] hover:shadow-[0_10px_40px_rgba(0,0,0,0.2)] hover:-translate-y-0.5'
             }`}
           >
             <Unlock className="w-5 h-5" />
-            {loading ? 'Unlocking Archive...' : 'Unlock & Preview'}
+            {loading ? 'Unlocking Archive...' : !backendRuntime.isReady ? 'Starting Secure Engine...' : 'Unlock & Preview'}
           </button>
+          {!backendRuntime.isReady && (
+            <p className="text-center text-[11px] text-av-muted font-light">{backendRuntime.detail}</p>
+          )}
         </div>
       </div>
       </div>

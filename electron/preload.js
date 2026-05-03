@@ -10,12 +10,12 @@ contextBridge.exposeInMainWorld('electron', {
   // File dialogs
   openFile: (options) => ipcRenderer.invoke('dialog:openFile', options),
   saveFile: (options) => ipcRenderer.invoke('dialog:saveFile', options),
-  writeFile: (path, content) => ipcRenderer.invoke('fs:writeFile', path, content),
-  readFile: (path) => ipcRenderer.invoke('fs:readFile', path),
-  copyFile: (sourcePath, destinationPath) => ipcRenderer.invoke('fs:copyFile', sourcePath, destinationPath),
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
   openFolders: () => ipcRenderer.invoke('dialog:openFolders'),
   scanDirectory: (dirPath) => ipcRenderer.invoke('fs:scanDirectory', dirPath),
+  saveTextFile: (options) => ipcRenderer.invoke('file:saveText', options),
+  exportFileCopy: (options) => ipcRenderer.invoke('file:exportCopy', options),
+  exportFilesToDirectory: (options) => ipcRenderer.invoke('file:exportFilesToDirectory', options),
   openPath: (path) => ipcRenderer.invoke('shell:openPath', path),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   
@@ -47,5 +47,12 @@ contextBridge.exposeInMainWorld('electron', {
     const listener = (event, data) => callback(data);
     ipcRenderer.on('backend-log', listener);
     return () => ipcRenderer.removeListener('backend-log', listener);
+  },
+  getBackendStatus: () => ipcRenderer.invoke('backend:getStatus'),
+  getBackendRequestConfig: () => ipcRenderer.invoke('backend:getRequestConfig'),
+  onBackendStatus: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('backend-status', listener);
+    return () => ipcRenderer.removeListener('backend-status', listener);
   },
 });

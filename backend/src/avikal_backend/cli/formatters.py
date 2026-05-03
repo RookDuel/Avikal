@@ -294,6 +294,8 @@ def summarize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         "has_payload_salt": metadata.get("salt") is not None,
         "has_chess_salt": metadata.get("chess_salt") is not None,
         "has_drand_ciphertext": metadata.get("drand_ciphertext") is not None,
+        "rekey_capable": metadata.get("wrapped_payload_key") is not None,
+        "payload_key_wrap_algorithm": metadata.get("payload_key_wrap_algorithm"),
     }
 
     unlock_timestamp = metadata.get("unlock_timestamp")

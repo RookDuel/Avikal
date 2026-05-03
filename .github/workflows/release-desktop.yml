@@ -26,9 +26,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          # Include all three lockfiles so the cache invalidates when any dep changes
           cache-dependency-path: |
             package-lock.json
             frontend/package-lock.json
+            backend/scripts/package-lock.json
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -48,8 +50,61 @@ jobs:
           backend\venv\Scripts\python.exe -m pip install --upgrade pip
           backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 
+      - name: Install drand helper dependencies
+        # Uses npm ci (not npm install) for reproducible installs from the lockfile.
+        # backend/scripts/node_modules/ is gitignored; this step populates it on CI
+        # so electron-builder can copy it into the packaged resources/backend/scripts/.
+        run: npm ci
+        working-directory: backend/scripts
+
+      - name: Verify staged PQC runtime
+        shell: powershell
+        run: |
+          $runtimeManifestPath = Resolve-Path runtime\pqc\avikal-openssl-runtime.json
+          $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath | ConvertFrom-Json
+          if (-not $runtimeManifest.version) {
+            throw "runtime\\pqc\\avikal-openssl-runtime.json is missing the OpenSSL version."
+          }
+
+          $openssl = Resolve-Path runtime\pqc\bin\openssl.exe
+          $opensslVersion = & $openssl version
+          if ($opensslVersion -notmatch [regex]::Escape($runtimeManifest.version)) {
+            throw "Bundled OpenSSL version mismatch. Manifest=$($runtimeManifest.version) Actual=$opensslVersion"
+          }
+
+          "AVIKAL_OPENSSL_VERSION=$($runtimeManifest.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AVIKAL_OPENSSL_VERSION_TEXT=$opensslVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify drand helper works
+        # Smoke-test: confirm node can resolve tlock-js before wasting 5 minutes on a full build
+        run: |
+          echo '{"action":"seal","unlock_timestamp":9999999999,"key_b_base64":"dGVzdA=="}' | node backend/scripts/drand_timelock_helper.mjs
+        shell: bash
+
       - name: Build unsigned Windows installer
         run: npm run package
+
+      - name: Verify packaged runtime and write release metadata
+        shell: powershell
+        run: |
+          $packagedOpenSsl = Resolve-Path dist\win-unpacked\resources\backend-runtime\pqc\bin\openssl.exe
+          $packagedVersion = & $packagedOpenSsl version
+          if ($packagedVersion -notmatch [regex]::Escape($env:AVIKAL_OPENSSL_VERSION)) {
+            throw "Packaged OpenSSL runtime mismatch. Expected $env:AVIKAL_OPENSSL_VERSION but got $packagedVersion"
+          }
+
+          $installer = Get-ChildItem -LiteralPath dist -Filter "*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "Installer .exe was not produced in dist."
+          }
+
+          $metadata = [ordered]@{
+            product_version = '${{ github.ref_name }}'
+            installer_name = $installer.Name
+            openssl_runtime_version = $env:AVIKAL_OPENSSL_VERSION
+            openssl_runtime_version_text = $packagedVersion
+          }
+          $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json
 
       - name: Upload installer artifacts to workflow
         uses: actions/upload-artifact@v4
@@ -58,6 +113,7 @@ jobs:
           path: |
             dist/*.exe
             dist/*.blockmap
+            dist/avikal-release-metadata.json
 
       - name: Upload installer to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -66,3 +122,4 @@ jobs:
           files: |
             dist/*.exe
             dist/*.blockmap
+            dist/avikal-release-metadata.json

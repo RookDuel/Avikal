@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import {
   Lock, Key, Shield, Eye, EyeOff,
-  Upload, Search, Copy, RefreshCw, CheckCircle2, Download,
+  Upload, Search, Copy, RefreshCw, CheckCircle2,
   Fingerprint, ShieldAlert, File, Folder
 } from 'lucide-react'
 import { api } from '../lib/api'
@@ -13,6 +13,8 @@ import { toast } from 'sonner'
 import { useProgress } from '../hooks/useProgress'
 import FileTree, { type FileNode } from '../components/FileTree'
 import type { PendingExternalLaunchAction } from '../lib/externalLaunch'
+import { useBackendRuntime } from '../hooks/useBackendRuntime'
+import BackendStartupNotice from '../components/BackendStartupNotice'
 
 function deriveSiblingKeyfilePath(archivePath: string): string {
   return archivePath.replace(/(\.avk)?$/i, '.avkkey')
@@ -48,6 +50,18 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
   const progress = useProgress()
   const [isCopied, setIsCopied] = useState(false)
   const filesRef = useRef<string[]>([])
+  const backendRuntime = useBackendRuntime()
+
+  const resetProtectionPanel = useCallback(() => {
+    setPassword('')
+    setKeyphrase('')
+    setShowPassword(false)
+    setIsCopied(false)
+    setPasswordEnabled(true)
+    setKeyphraseEnabled(false)
+    setPqcEnabled(false)
+    setPqcKeyfilePath('')
+  }, [])
 
   useEffect(() => {
     filesRef.current = files
@@ -220,40 +234,6 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
     setTimeout(() => setIsCopied(false), 2000)
   }
 
-  const handleDownloadKeyphrase = async () => {
-    if (!keyphrase) return
-
-    try {
-      const electron = window.electron
-
-      if (electron?.saveFile && electron.writeFile) {
-        const selected = await electron.saveFile({
-          defaultPath: 'avikal-keyphrase.txt',
-          filters: [{ name: 'Text Files', extensions: ['txt'] }]
-        })
-
-        if (!selected) return
-
-        const saved = await electron.writeFile(selected, `${keyphrase.trim()}\n`)
-        if (!saved) throw new Error('Failed to save keyphrase file')
-
-        toast.success('Keyphrase saved as .txt')
-        return
-      }
-
-      const blob = new Blob([`${keyphrase.trim()}\n`], { type: 'text/plain;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = 'avikal-keyphrase.txt'
-      anchor.click()
-      URL.revokeObjectURL(url)
-      toast.success('Keyphrase download started')
-    } catch {
-      toast.error('Failed to download keyphrase')
-    }
-  }
-
   const handleChoosePqcKeyfile = async () => {
     const electron = window.electron
     const selected = await electron?.saveFile({
@@ -264,7 +244,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
   }
 
   const keyphraseWordCount = keyphrase.trim().split(/\s+/).filter(Boolean).length
-  const canEncrypt = files.length > 0 && !loading &&
+  const canEncrypt = backendRuntime.isReady && files.length > 0 && !loading &&
     (!pqcEnabled || hasSecretLock) &&
     (!usePass || isValidPassword) &&
     (!useKeyp || keyphraseWordCount === 21)
@@ -325,10 +305,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
       } else {
         toast.success(pqcEnabled ? 'Protected archive created and PQC keyfile saved.' : 'Protected archive created successfully.')
       }
-      setPassword('')
-      setKeyphrase('')
-      setPasswordEnabled(true)
-      setKeyphraseEnabled(false)
+      resetProtectionPanel()
     } catch (error: unknown) {
       progress.update({ status: 'error', currentOperation: 'Encryption failed', percentage: progress.percentage || 0 })
       toast.error(getErrorMessage(error, 'Encryption failed'))
@@ -524,7 +501,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
         </div>
 
         {/* ── Right Panel: Security Architecture (40%) ──────────────────────────────── */}
-        <div className="lg:col-span-2 flex flex-col gap-5 pb-6">
+        <div className={`lg:col-span-2 flex flex-col gap-5 pb-6 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
           <div className="px-2 mb-1">
             <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Encryption Settings</h3>
@@ -657,31 +634,28 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
             {keyphraseEnabled && (
               <div className="px-5 pb-5 space-y-4 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
                 {!keyphrase ? (
-                  <button onClick={handleGenerateKeyphrase} className="w-full py-3.5 rounded-xl border border-av-border/30 bg-container-bg shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 text-[13px] font-medium transition-all duration-300 flex items-center justify-center gap-2.5 backdrop-blur-md text-purple-600 dark:text-purple-400 hover:border-purple-500/40">
+                  <button onClick={handleGenerateKeyphrase} className="w-full py-3.5 rounded-xl border border-purple-500/20 bg-purple-500/10 dark:bg-purple-500/10 shadow-sm hover:bg-purple-500/15 dark:hover:bg-purple-500/15 text-[13px] font-semibold transition-all duration-300 flex items-center justify-center gap-2.5 text-purple-700 dark:text-purple-300 hover:border-purple-500/40">
                     <RefreshCw className="w-4 h-4" /> Generate Security Keyphrase
                   </button>
                 ) : (
-                  <div className="bg-container-bg border border-av-border/30 rounded-xl p-4 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 backdrop-blur-md">
-                    <div className="flex items-center justify-between uppercase tracking-[0.15em] text-[10px] font-bold text-av-main opacity-80 mb-3 pb-3 border-b border-av-border/30">
+                  <div className="security-keyphrase-card rounded-2xl p-4">
+                    <div className="security-keyphrase-header mb-3 flex items-center justify-between pb-3 text-[10px] font-bold uppercase tracking-[0.16em]">
                       <span>Keyphrase Generation</span>
-                      <span className="text-purple-400 drop-shadow-[0_0_8px_rgba(168,85,247,0.4)]">21-WORDS</span>
+                      <span className="security-keyphrase-badge rounded-full px-2 py-0.5">21 Words</span>
                     </div>
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                       {keyphrase.split(' ').map((word, idx) => (
-                        <div key={idx} className="flex bg-av-border/10 dark:bg-white/5 border border-av-border/30 rounded-lg overflow-hidden shadow-sm hover:bg-av-border/20 dark:hover:bg-white/10 transition-colors">
-                          <span className="w-6 py-1 bg-av-border/15 dark:bg-black/40 text-av-main opacity-80 text-[9px] font-bold flex items-center justify-center border-r border-av-border/30 tracking-wider">{(idx + 1).toString().padStart(2, '0')}</span>
-                          <span className="flex-1 py-1 px-2 text-[11px] font-medium text-av-main truncate overflow-hidden">{word}</span>
+                        <div key={idx} className="security-keyphrase-chip flex min-w-0 overflow-hidden rounded-lg transition-colors">
+                          <span className="security-keyphrase-index flex w-7 shrink-0 items-center justify-center py-1 text-[9px] font-bold tracking-wider tabular-nums">{(idx + 1).toString().padStart(2, '0')}</span>
+                          <span className="min-w-0 flex-1 truncate px-2 py-1 text-[11px] font-semibold">{word}</span>
                         </div>
                       ))}
                     </div>
-                    <div className="flex items-center gap-3 mt-4 pt-4 border-t border-av-border/30">
-                      <button onClick={handleCopyKeyphrase} className="flex-1 py-2 rounded-lg bg-av-border/10 dark:bg-white/5 border border-av-border/30 dark:border-white/10 text-xs font-semibold text-av-main transition-all duration-300 flex items-center justify-center gap-2 shadow-sm hover:border-purple-500/50 hover:bg-purple-500/20 hover:text-purple-700 dark:hover:text-white">
+                    <div className="security-keyphrase-actions mt-4 flex items-center gap-3 pt-4">
+                      <button onClick={handleCopyKeyphrase} className="security-keyphrase-copy flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-xs font-semibold transition-colors duration-300">
                         {isCopied ? <><CheckCircle2 className="w-4 h-4 text-emerald-500 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" /> Copied</> : <><Copy className="w-4 h-4" /> Copy</>}
                       </button>
-                      <button onClick={handleDownloadKeyphrase} className="flex-1 py-2 rounded-lg bg-av-border/10 dark:bg-white/5 border border-av-border/30 dark:border-white/10 text-xs font-semibold text-av-main transition-all duration-300 flex items-center justify-center gap-2 shadow-sm hover:border-purple-500/50 hover:bg-purple-500/20 hover:text-purple-700 dark:hover:text-white">
-                        <Download className="w-4 h-4" /> Download .txt
-                      </button>
-                      <button onClick={handleGenerateKeyphrase} className={`py-2 px-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-semibold hover:bg-red-500/20 dark:hover:bg-red-500 hover:text-red-700 dark:hover:text-white transition-colors duration-300 shadow-sm`}>
+                      <button onClick={handleGenerateKeyphrase} className="security-keyphrase-secondary rounded-lg px-4 py-2 text-xs font-semibold transition-colors duration-300">
                         Regenerate
                       </button>
                     </div>
@@ -724,30 +698,37 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
 
             {pqcEnabled && (
               <div className="px-5 pb-5 space-y-4 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
-                <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/20 text-[12px] text-av-muted leading-relaxed">
-                  RookDuel Avikal will generate an encrypted `.avkkey` file and keep PQC private material out of the `.avk` archive itself.
+                <div className="security-pqc-info rounded-2xl p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="security-pqc-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
+                      <Fingerprint className="h-4 w-4" />
+                    </div>
+                    <p className="text-[12px] leading-relaxed">
+                      RookDuel Avikal will generate an encrypted <span className="font-semibold">.avkkey</span> file and protect the payload with a fixed hybrid quantum suite while keeping private material outside the <span className="font-semibold">.avk</span> archive.
+                    </p>
+                  </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <button
                     onClick={handleChoosePqcKeyfile}
-                    className="flex-1 py-3 rounded-xl bg-av-surface/80 border border-av-border/50 text-sm font-medium text-av-main hover:border-amber-500/30 hover:bg-amber-500/5 transition-all"
+                    className="flex-1 py-3 rounded-xl bg-av-main text-av-surface border border-av-main text-sm font-semibold hover:opacity-90 transition-all shadow-sm"
                   >
                     {pqcKeyfilePath ? 'Change .avkkey Destination' : 'Choose .avkkey Destination'}
                   </button>
                   {pqcKeyfilePath && (
                     <button
                       onClick={() => setPqcKeyfilePath('')}
-                      className="py-3 px-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm font-medium hover:bg-red-500/20 transition-all"
+                      className="py-3 px-4 rounded-xl bg-av-surface border border-av-border/70 text-av-main text-sm font-semibold hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300 transition-all"
                     >
                       Clear
                     </button>
                   )}
                 </div>
-                <div className="p-3 rounded-xl bg-av-border/10 dark:bg-white/5 border border-av-border/40">
+                <div className="security-keyfile-destination rounded-xl p-3">
                   <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-1">Keyfile Destination</p>
-                  <p className="text-sm text-av-main break-all">{pqcKeyfilePath || 'You will be prompted before encryption starts.'}</p>
+                  <p className="break-all text-sm">{pqcKeyfilePath || 'You will be prompted before encryption starts.'}</p>
                 </div>
-                <p className="text-[11px] text-amber-500 leading-relaxed">
+                <p className="security-keyfile-warning rounded-xl px-3 py-2 text-[11px] leading-relaxed">
                   Losing the `.avkkey` means permanent loss of the archive, even with the correct password or keyphrase.
                 </p>
               </div>
@@ -772,16 +753,31 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
             )}
 
             {pqcEnabled && (
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-[16px] bg-amber-500/10 border border-amber-500/30 flex items-start gap-3 backdrop-blur-md shadow-inner mb-2">
-                <Fingerprint className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-[13px] font-bold text-amber-500 uppercase tracking-wide mb-1">External Keyfile Required</p>
-                  <p className="text-xs text-amber-700 dark:text-amber-200/90 font-medium leading-relaxed">
-                    This archive will require a separate `.avkkey` file during decryption. Keep that file stored away from the `.avk`.
-                  </p>
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="security-external-keyfile-card mb-2 overflow-hidden rounded-[18px]">
+                <div className="h-1.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-400" />
+                <div className="flex items-start gap-3 p-4">
+                  <div className="security-pqc-icon flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl">
+                    <Fingerprint className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <p className="text-[13px] font-bold uppercase tracking-[0.18em] text-av-main">External Keyfile Required</p>
+                      <span className="rounded-full border border-av-border/60 bg-av-border/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-av-muted">
+                        Required
+                      </span>
+                    </div>
+                    <p className="text-[13px] leading-relaxed text-av-main">
+                      This archive will require a separate <span className="font-semibold">.avkkey</span> file during decryption. Keep that file stored away from the <span className="font-semibold">.avk</span>.
+                    </p>
+                    <p className="mt-2 text-[11px] leading-relaxed text-av-muted">
+                      Without the matching keyfile, the archive cannot be opened even with the correct user secret.
+                    </p>
+                  </div>
                 </div>
               </motion.div>
             )}
+
+            <BackendStartupNotice backend={backendRuntime} compact />
 
             <button
               onClick={handleEncrypt}
@@ -790,11 +786,19 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
                 }`}
             >
               <Shield className="w-5 h-5" />
-              {loading ? 'Creating Archive...' : !hasSecretLock ? 'Create Archive' : 'Create Protected Archive'}
+              {loading
+                ? 'Creating Archive...'
+                : !backendRuntime.isReady
+                  ? 'Starting Secure Engine...'
+                  : !hasSecretLock
+                    ? 'Create Archive'
+                    : 'Create Protected Archive'}
             </button>
 
             <p className="text-center text-[11px] text-av-muted mt-1 font-light">
-              {!hasSecretLock
+              {!backendRuntime.isReady
+                ? backendRuntime.detail
+                : !hasSecretLock
                 ? 'This archive will be packaged without password or keyphrase protection.'
                 : isBoth
                 ? 'Both the password and the 21-word keyphrase will be required during unlock.'

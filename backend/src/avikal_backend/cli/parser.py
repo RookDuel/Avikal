@@ -17,6 +17,7 @@ from .commands import (
     doctor_backend,
     encode_archive,
     inspect_archive,
+    rekey_archive,
     validate_archive,
 )
 from .formatters import style_heading, style_label, style_muted
@@ -50,6 +51,8 @@ class AvikalArgumentParser(argparse.ArgumentParser):
 def _add_secret_inputs(parser: argparse.ArgumentParser, *, password_help: str, keyphrase_help: str) -> None:
     access_group = parser.add_argument_group("Access Credentials")
     access_group.add_argument("--password", "-p", help=password_help)
+    access_group.add_argument("--password-prompt", action="store_true", help="Prompt securely for the password instead of reading it from command arguments")
+    access_group.add_argument("--password-stdin", action="store_true", help="Read the password from the first line of standard input")
     access_group.add_argument("--keyphrase", help=keyphrase_help)
     access_group.add_argument("--keyphrase-file", "-K", help="Read the 21-word keyphrase from a UTF-8 text file")
 
@@ -73,21 +76,23 @@ def build_parser() -> argparse.ArgumentParser:
               inspect / info    Read container and metadata details without extraction
               contents / ls     List the logical files stored in an archive
               validate / check  Confirm container structure and optional metadata access
+              rekey / rotate    Rotate archive credentials without rewriting payload.enc
               doctor / diag     Verify Python/runtime readiness and optional Aavrit connectivity
 
             Quick Start:
-              avikal enc document.pdf -p "StrongPass#123"
-              avikal enc --pick-files --pick-output -p "StrongPass#123"
-              avikal enc --pick-folder --timecapsule -u "2026-05-01 12:00" -p "StrongPass#123"
-              avikal dec locked.avk -d output -p "StrongPass#123"
-              avikal info locked.avk -p "StrongPass#123"
-              avikal ls locked.avk -p "StrongPass#123"
+              avikal enc document.pdf --password-prompt
+              avikal enc --pick-files --pick-output --password-prompt
+              avikal enc --pick-folder --timecapsule -u "2026-05-01 12:00" --password-prompt
+              avikal dec locked.avk -d output --password-prompt
+              avikal info locked.avk --password-prompt
+              avikal ls locked.avk --password-prompt
               avikal check locked.avk
+              avikal rekey locked.avk --old-password-prompt --new-password-prompt
               avikal doctor --aavrit-url https://aavrit.example
 
             Python module entrypoints:
               python -m avikal_backend.cli --help
-              python -m avikal_backend enc document.pdf -p "StrongPass#123"
+              python -m avikal_backend enc document.pdf --password-prompt
 
             Help Tips:
               avikal <command> --help
@@ -114,11 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
               - Can add password, keyphrase, PQC keyfile, and time-lock protection
 
             Common examples:
-              avikal enc document.pdf -p "StrongPass#123"
-              avikal enc photo.jpg notes.txt -o bundle.avk -p "StrongPass#123"
-              avikal enc --pick-folder --pick-output -p "StrongPass#123"
-              avikal enc reports --timecapsule -u "2026-05-01 12:00" -p "StrongPass#123"
-              avikal enc secret.docx -p "StrongPass#123" --pqc
+              avikal enc document.pdf --password-prompt
+              avikal enc photo.jpg notes.txt -o bundle.avk --password-prompt
+              avikal enc --pick-folder --pick-output --password-prompt
+              avikal enc reports --timecapsule -u "2026-05-01 12:00" --password-prompt
+              avikal enc secret.docx --password-prompt --pqc
 
             Notes:
               - Use either --keyphrase or --keyphrase-file, not both.
@@ -134,6 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     encode_protection = encode_parser.add_argument_group("Protection")
     encode_protection.add_argument("--password", "-p", help="Password used to protect the archive")
+    encode_protection.add_argument("--password-prompt", action="store_true", help="Prompt securely for the password and confirmation")
+    encode_protection.add_argument("--password-stdin", action="store_true", help="Read the password from the first line of standard input")
     encode_protection.add_argument("--keyphrase", help="Space-separated 21-word keyphrase wrapped in quotes")
     encode_protection.add_argument("--keyphrase-file", "-K", help="Read the 21-word keyphrase from a UTF-8 text file")
     encode_protection.add_argument("--pqc", action="store_true", help="Generate and require an external .avkkey file for decryption")
@@ -170,10 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
               - Extracts the payload into the selected output directory
 
             Common examples:
-              avikal dec locked.avk -d output -p "StrongPass#123"
+              avikal dec locked.avk -d output --password-prompt
               avikal dec locked.avk -d output --keyphrase-file phrase.txt
-              avikal dec locked.avk -d output -p "StrongPass#123" --pqc-keyfile locked.avkkey
-              avikal dec --pick --pick-output-dir -p "StrongPass#123"
+              avikal dec locked.avk -d output --password-prompt --pqc-keyfile locked.avkkey
+              avikal dec --pick --pick-output-dir --password-prompt
             """
         ),
     )
@@ -213,9 +220,9 @@ def build_parser() -> argparse.ArgumentParser:
 
             Common examples:
               avikal info locked.avk
-              avikal info locked.avk -p "StrongPass#123"
+              avikal info locked.avk --password-prompt
               avikal info locked.avk --keyphrase-file phrase.txt
-              avikal info locked.avk -p "StrongPass#123" --skip-timelock
+              avikal info locked.avk --password-prompt --skip-timelock
             """
         ),
     )
@@ -244,9 +251,9 @@ def build_parser() -> argparse.ArgumentParser:
               - Helps confirm archive contents before extraction
 
             Common examples:
-              avikal ls locked.avk -p "StrongPass#123"
+              avikal ls locked.avk --password-prompt
               avikal ls locked.avk --keyphrase-file phrase.txt
-              avikal ls locked.avk -p "StrongPass#123" --pqc-keyfile locked.avkkey
+              avikal ls locked.avk --password-prompt --pqc-keyfile locked.avkkey
             """
         ),
     )
@@ -277,7 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
 
             Common examples:
               avikal check locked.avk
-              avikal check locked.avk -p "StrongPass#123"
+              avikal check locked.avk --password-prompt
               avikal check locked.avk --keyphrase-file phrase.txt --skip-timelock
             """
         ),
@@ -292,6 +299,52 @@ def build_parser() -> argparse.ArgumentParser:
     validate_options.add_argument("--skip-timelock", action="store_true", help="Attempt metadata validation even before the unlock time")
     validate_options.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
     validate_parser.set_defaults(handler=validate_archive)
+
+    rekey_parser = subparsers.add_parser(
+        "rekey",
+        aliases=["rotate"],
+        help="Rotate archive credentials without rewriting payload.enc (alias: rotate)",
+        description="Rotate password/keyphrase protection for rekey-capable Avikal archives while preserving payload.enc bytes unchanged.",
+        formatter_class=AvikalHelpFormatter,
+        epilog=textwrap.dedent(
+            """
+            What this command does:
+              - Opens the current keychain with old credentials
+              - Re-wraps the archive payload key with new credentials
+              - Rewrites keychain.pgn only; payload.enc remains byte-for-byte unchanged
+
+            Common examples:
+              avikal rekey locked.avk --old-password-prompt --new-password-prompt
+              avikal rekey locked.avk --old-password "OldPass#123" --new-password "NewPass#123"
+              avikal rotate locked.avk --output rotated.avk --old-keyphrase-file old.txt --new-keyphrase-file new.txt
+
+            Notes:
+              - Current phase supports regular rekey-capable archives.
+              - PQC keyfile and provider time-capsule rekey are intentionally rejected until their external-key flows are complete.
+            """
+        ),
+    )
+    _add_pick_input(rekey_parser, action_help="Open the file picker to choose an input .avk archive")
+    old_group = rekey_parser.add_argument_group("Current Credentials")
+    old_group.add_argument("--old-password", help="Current password used to unlock the archive")
+    old_group.add_argument("--old-password-prompt", action="store_true", help="Prompt securely for the current password")
+    old_group.add_argument("--old-password-stdin", action="store_true", help="Read the current password from the first line of standard input")
+    old_group.add_argument("--old-keyphrase", help="Current 21-word keyphrase wrapped in quotes")
+    old_group.add_argument("--old-keyphrase-file", help="Read the current 21-word keyphrase from a UTF-8 text file")
+
+    new_group = rekey_parser.add_argument_group("New Credentials")
+    new_group.add_argument("--new-password", help="New password for the archive")
+    new_group.add_argument("--new-password-prompt", action="store_true", help="Prompt securely for the new password and confirmation")
+    new_group.add_argument("--new-password-stdin", action="store_true", help="Read the new password from the first line of standard input")
+    new_group.add_argument("--new-keyphrase", help="New 21-word keyphrase wrapped in quotes")
+    new_group.add_argument("--new-keyphrase-file", help="Read the new 21-word keyphrase from a UTF-8 text file")
+
+    rekey_output = rekey_parser.add_argument_group("Output")
+    rekey_output.add_argument("--output", "-o", help="Optional output .avk path. Omit for in-place rekey.")
+    rekey_output.add_argument("--force", action="store_true", help="Overwrite --output if it already exists")
+    rekey_output.add_argument("--variations", "-v", type=int, default=5, help="Chess-encoding variations per round")
+    rekey_output.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
+    rekey_parser.set_defaults(handler=rekey_archive)
 
     doctor_parser = subparsers.add_parser(
         "doctor",

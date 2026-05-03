@@ -4,9 +4,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react'
-import { BACKEND_BASE_URL } from '../lib/backend'
-
-const BACKEND_URL = BACKEND_BASE_URL
+import { fetchBackend } from '../lib/backend'
 const POLL_INTERVAL_MS = 60_000
 
 function getLocalTimeZoneLabel(ms: number): string {
@@ -47,9 +45,7 @@ export function useNTPTime(): NTPTimeState {
 
   async function fetchNTPTime() {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/ntp-time`, {
-        signal: AbortSignal.timeout(8000),
-      })
+      const res = await fetchBackend('/api/ntp-time', {}, 8000)
       const data = await res.json()
 
       if (data.success && data.timestamp) {

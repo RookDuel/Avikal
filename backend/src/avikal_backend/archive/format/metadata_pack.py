@@ -1,13 +1,21 @@
 """
-Cascade metadata packing helpers.
+Current Avikal metadata packing helpers.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
 """
 
+from __future__ import annotations
+
+import hashlib
 import struct
 
 from ..path_safety import normalize_single_archive_filename
+from ..security.key_wrap import PAYLOAD_KEY_WRAP_ALGORITHM
+
+
+METADATA_FORMAT_VERSION = 0x01
+MAX_METADATA_SIZE = 10 * 1024
 
 
 def pack_cascade_metadata(
@@ -43,23 +51,22 @@ def pack_cascade_metadata(
     entry_count: int = None,
     total_original_size: int = None,
     manifest_hash: bytes = None,
+    payload_key_wrap_algorithm: str = None,
+    wrapped_payload_key: bytes = None,
 ) -> bytes:
     """
-    Pack cascade encryption metadata into binary structure.
+    Pack current public metadata format v1.
 
-    Maximum total size: ~10 KB (enforced for security)
+    The v1 layout always includes the full field set. Inactive optional fields
+    are encoded as empty values instead of selecting older layouts.
     """
-    max_metadata_size = 10 * 1024
-
     if len(salt) != 32:
         raise ValueError("Payload salt must be 32 bytes")
     if len(checksum) != 32:
         raise ValueError("Checksum must be 32 bytes (SHA-256)")
 
     if chess_salt is None:
-        import hashlib
-
-        chess_salt = hashlib.sha256(b"avikal_chess_v3").digest()
+        chess_salt = hashlib.sha256(b"avikal_chess_v1").digest()
     elif len(chess_salt) != 32:
         raise ValueError("Chess salt must be 32 bytes")
 
@@ -74,202 +81,127 @@ def pack_cascade_metadata(
 
     pqc_ciphertext = pqc_ciphertext or b""
     pqc_private_key = pqc_private_key or b""
+    wrapped_payload_key = wrapped_payload_key or b""
 
     if len(pqc_ciphertext) > 2048:
         raise ValueError("PQC ciphertext too large (max 2048 bytes)")
-    if len(pqc_private_key) > 4096:
-        raise ValueError("PQC private key too large (max 4096 bytes)")
+    if pqc_private_key:
+        raise ValueError("PQC private key must not be embedded in archive metadata")
+    if pqc_required:
+        if not pqc_ciphertext:
+            raise ValueError("PQC keyfile mode requires PQC ciphertext")
+        if not pqc_algorithm:
+            raise ValueError("PQC keyfile mode requires PQC algorithm")
+        if not pqc_key_id:
+            raise ValueError("PQC keyfile mode requires PQC key identifier")
+    elif any(value is not None for value in [pqc_algorithm, pqc_key_id]) or pqc_ciphertext:
+        raise ValueError("Inactive PQC fields must be empty")
 
-    flags = 0x01 if keyphrase_protected else 0x00
-
-    if pqc_required and pqc_private_key:
-        raise ValueError("PQC private key must not be embedded in the archive metadata")
-    if pqc_required and not pqc_ciphertext:
-        raise ValueError("PQC keyfile mode requires PQC ciphertext")
-    if pqc_required and not pqc_algorithm:
-        raise ValueError("PQC keyfile mode requires PQC algorithm")
-    if pqc_required and not pqc_key_id:
-        raise ValueError("PQC keyfile mode requires PQC key identifier")
-
-    has_manifest_binding = any(
-        value is not None for value in [archive_type, entry_count, total_original_size, manifest_hash]
-    )
-    if has_manifest_binding:
-        if archive_type not in {"multi_file", "single_file"}:
-            raise ValueError("Manifest binding requires archive_type to be 'multi_file' or 'single_file'")
-        if not isinstance(entry_count, int) or entry_count <= 0:
-            raise ValueError("entry_count must be a positive integer")
-        if not isinstance(total_original_size, int) or total_original_size < 0:
-            raise ValueError("total_original_size must be a non-negative integer")
-        if not isinstance(manifest_hash, (bytes, bytearray)) or len(manifest_hash) != 32:
-            raise ValueError("manifest_hash must be 32 bytes")
-
-    if timecapsule_provider == "aavrit":
-        version = 0x0C
-    elif keyphrase_protected and has_manifest_binding:
-        version = 0x0B
-    elif keyphrase_protected:
-        version = 0x0A
-    elif has_manifest_binding:
-        version = 0x09
-    elif pqc_required or pqc_algorithm or pqc_key_id:
-        version = 0x08
-    elif timecapsule_provider:
-        version = 0x07
-    else:
-        version = 0x05 if timelock_mode == "secure" else 0x04
+    if archive_type not in {"multi_file", "single_file"}:
+        raise ValueError("archive_type must be 'multi_file' or 'single_file'")
+    if not isinstance(entry_count, int) or entry_count <= 0:
+        raise ValueError("entry_count must be a positive integer")
+    if not isinstance(total_original_size, int) or total_original_size < 0:
+        raise ValueError("total_original_size must be a non-negative integer")
+    if not isinstance(manifest_hash, (bytes, bytearray)) or len(manifest_hash) != 32:
+        raise ValueError("manifest_hash must be 32 bytes")
 
     if keyphrase_protected:
         if keyphrase_format_version != 1:
             raise ValueError("Keyphrase-protected archives require keyphrase_format_version=1")
         if keyphrase_wordlist_id != "avikal-hi-2048-v1":
             raise ValueError("Keyphrase-protected archives require keyphrase_wordlist_id='avikal-hi-2048-v1'")
-    elif version == 0x0C:
+    else:
         if keyphrase_format_version not in {None, 0}:
-            raise ValueError("Inactive Aavrit keyphrase format field must be zero")
+            raise ValueError("Inactive keyphrase format field must be zero")
         if keyphrase_wordlist_id not in {None, ""}:
-            raise ValueError("Inactive Aavrit keyphrase wordlist field must be empty")
+            raise ValueError("Inactive keyphrase wordlist field must be empty")
         keyphrase_format_version = 0
         keyphrase_wordlist_id = ""
-    elif keyphrase_format_version is not None or keyphrase_wordlist_id is not None:
-        raise ValueError("Inactive keyphrase format fields must be empty")
 
-    if version == 0x0C and not has_manifest_binding:
-        raise ValueError("Aavrit metadata version 0x0C requires archive binding fields")
+    if wrapped_payload_key:
+        if encryption_method == "plaintext_archive":
+            raise ValueError("Plaintext archives cannot contain wrapped payload keys")
+        if payload_key_wrap_algorithm != PAYLOAD_KEY_WRAP_ALGORITHM:
+            raise ValueError(f"Wrapped payload keys require {PAYLOAD_KEY_WRAP_ALGORITHM}")
+        if len(wrapped_payload_key) > 255:
+            raise ValueError("Wrapped payload key too large")
+    else:
+        if payload_key_wrap_algorithm is not None:
+            raise ValueError("Payload key wrap algorithm requires wrapped payload key material")
+        payload_key_wrap_algorithm = ""
 
-    packed = struct.pack(">BBB", version, flags, len(method_bytes))
+    flags = 0x01 if keyphrase_protected else 0x00
+    packed = struct.pack(">BBB", METADATA_FORMAT_VERSION, flags, len(method_bytes))
     packed += method_bytes
     packed += salt
     packed += chess_salt
     packed += struct.pack(">I", len(pqc_ciphertext))
     packed += pqc_ciphertext
-    packed += struct.pack(">I", len(pqc_private_key))
-    packed += pqc_private_key
+    packed += struct.pack(">I", 0)
     packed += struct.pack(">I", unlock_timestamp)
     packed += checksum
     packed += struct.pack(">B", len(filename_bytes))
     packed += filename_bytes
 
-    if version >= 0x05:
-        mode_bytes = timelock_mode.encode("utf-8")
-        if len(mode_bytes) > 255:
-            raise ValueError("Timelock mode string too long")
-        packed += struct.pack(">B", len(mode_bytes))
-        packed += mode_bytes
+    packed += _pack_short_text(timelock_mode, 255, "Timelock mode")
+    packed += _pack_short_text(file_id or "", 255, "File ID")
+    packed += _pack_long_text(server_url or "", 65535, "Server URL")
+    if time_key_hash:
+        if len(time_key_hash) != 32:
+            raise ValueError("Time key hash must be 32 bytes (SHA-256)")
+        packed += struct.pack(">B", 1) + time_key_hash
+    else:
+        packed += struct.pack(">B", 0)
 
-        if file_id:
-            file_id_bytes = file_id.encode("utf-8")
-            if len(file_id_bytes) > 255:
-                raise ValueError("File ID too long (max 255 bytes)")
-            packed += struct.pack(">B", len(file_id_bytes))
-            packed += file_id_bytes
-        else:
-            packed += struct.pack(">B", 0)
+    packed += _pack_short_text(timecapsule_provider or "", 32, "Timecapsule provider")
+    if drand_round is not None:
+        packed += struct.pack(">BQ", 1, int(drand_round))
+    else:
+        packed += struct.pack(">B", 0)
+    packed += _pack_short_text(drand_chain_hash or "", 255, "drand chain hash")
+    packed += _pack_long_text(drand_chain_url or "", 65535, "drand chain URL")
+    packed += _pack_long_text(drand_ciphertext or "", 65535, "drand ciphertext")
+    packed += _pack_short_text(drand_beacon_id or "", 255, "drand beacon ID")
 
-        if server_url:
-            server_url_bytes = server_url.encode("utf-8")
-            if len(server_url_bytes) > 65535:
-                raise ValueError("Server URL too long (max 65535 bytes)")
-            packed += struct.pack(">H", len(server_url_bytes))
-            packed += server_url_bytes
-        else:
-            packed += struct.pack(">H", 0)
+    packed += struct.pack(">B", 1 if pqc_required else 0)
+    packed += _pack_short_text(pqc_algorithm or "", 64, "PQC algorithm")
+    packed += _pack_short_text(pqc_key_id or "", 128, "PQC key identifier")
 
-        if time_key_hash:
-            if len(time_key_hash) != 32:
-                raise ValueError("Time key hash must be 32 bytes (SHA-256)")
-            packed += struct.pack(">B", 1)
-            packed += time_key_hash
-        else:
-            packed += struct.pack(">B", 0)
+    packed += _pack_short_text(archive_type, 32, "Archive type")
+    packed += struct.pack(">IQ", entry_count, total_original_size)
+    packed += bytes(manifest_hash)
 
+    packed += struct.pack(">B", keyphrase_format_version)
+    packed += _pack_short_text(keyphrase_wordlist_id, 64, "Keyphrase wordlist identifier")
 
-    if version >= 0x07:
-        provider_bytes = (timecapsule_provider or "").encode("utf-8")
-        if len(provider_bytes) > 32:
-            raise ValueError("Timecapsule provider string too long")
-        packed += struct.pack(">B", len(provider_bytes))
-        packed += provider_bytes
+    packed += _pack_short_text(aavrit_data_hash or "", 128, "Aavrit data hash")
+    packed += _pack_short_text(aavrit_commit_hash or "", 128, "Aavrit commit hash")
+    packed += _pack_short_text(aavrit_server_key_id or "", 128, "Aavrit server key identifier")
+    packed += _pack_long_text(aavrit_commit_signature or "", 1024, "Aavrit commit signature")
 
-        if drand_round is not None:
-            packed += struct.pack(">BQ", 1, int(drand_round))
-        else:
-            packed += struct.pack(">B", 0)
+    packed += _pack_short_text(payload_key_wrap_algorithm, 64, "Payload key wrap algorithm")
+    packed += struct.pack(">B", len(wrapped_payload_key))
+    packed += wrapped_payload_key
 
-        drand_chain_hash_bytes = (drand_chain_hash or "").encode("utf-8")
-        if len(drand_chain_hash_bytes) > 255:
-            raise ValueError("drand chain hash too long")
-        packed += struct.pack(">B", len(drand_chain_hash_bytes))
-        packed += drand_chain_hash_bytes
-
-        drand_chain_url_bytes = (drand_chain_url or "").encode("utf-8")
-        if len(drand_chain_url_bytes) > 65535:
-            raise ValueError("drand chain URL too long")
-        packed += struct.pack(">H", len(drand_chain_url_bytes))
-        packed += drand_chain_url_bytes
-
-        drand_ciphertext_bytes = (drand_ciphertext or "").encode("utf-8")
-        if len(drand_ciphertext_bytes) > 65535:
-            raise ValueError("drand ciphertext too large")
-        packed += struct.pack(">H", len(drand_ciphertext_bytes))
-        packed += drand_ciphertext_bytes
-
-        drand_beacon_id_bytes = (drand_beacon_id or "").encode("utf-8")
-        if len(drand_beacon_id_bytes) > 255:
-            raise ValueError("drand beacon ID too long")
-        packed += struct.pack(">B", len(drand_beacon_id_bytes))
-        packed += drand_beacon_id_bytes
-
-    if version >= 0x08:
-        packed += struct.pack(">B", 1 if pqc_required else 0)
-
-        pqc_algorithm_bytes = (pqc_algorithm or "").encode("utf-8")
-        if len(pqc_algorithm_bytes) > 64:
-            raise ValueError("PQC algorithm string too long")
-        packed += struct.pack(">B", len(pqc_algorithm_bytes))
-        packed += pqc_algorithm_bytes
-
-        pqc_key_id_bytes = (pqc_key_id or "").encode("utf-8")
-        if len(pqc_key_id_bytes) > 128:
-            raise ValueError("PQC key identifier too long")
-        packed += struct.pack(">B", len(pqc_key_id_bytes))
-        packed += pqc_key_id_bytes
-
-    if version in {0x09, 0x0B, 0x0C}:
-        archive_type_bytes = archive_type.encode("utf-8")
-        if len(archive_type_bytes) > 32:
-            raise ValueError("Archive type string too long")
-        packed += struct.pack(">B", len(archive_type_bytes))
-        packed += archive_type_bytes
-        packed += struct.pack(">IQ", entry_count, total_original_size)
-        packed += bytes(manifest_hash)
-
-    if version in {0x0A, 0x0B, 0x0C}:
-        packed += struct.pack(">B", keyphrase_format_version)
-        keyphrase_wordlist_id_bytes = keyphrase_wordlist_id.encode("utf-8")
-        if len(keyphrase_wordlist_id_bytes) > 64:
-            raise ValueError("Keyphrase wordlist identifier too long")
-        packed += struct.pack(">B", len(keyphrase_wordlist_id_bytes))
-        packed += keyphrase_wordlist_id_bytes
-
-    if version >= 0x0C:
-        for field_name, field_value, max_length, length_format in (
-            ("Aavrit data hash", aavrit_data_hash or "", 128, ">B"),
-            ("Aavrit commit hash", aavrit_commit_hash or "", 128, ">B"),
-            ("Aavrit server key identifier", aavrit_server_key_id or "", 128, ">B"),
-            ("Aavrit commit signature", aavrit_commit_signature or "", 1024, ">H"),
-        ):
-            field_bytes = field_value.encode("utf-8")
-            if len(field_bytes) > max_length:
-                raise ValueError(f"{field_name} too long")
-            packed += struct.pack(length_format, len(field_bytes))
-            packed += field_bytes
-
-    if len(packed) > max_metadata_size:
+    if len(packed) > MAX_METADATA_SIZE:
         raise ValueError(
-            f"Metadata size ({len(packed)} bytes) exceeds maximum allowed ({max_metadata_size} bytes). "
-            f"This may indicate a malicious file or corrupted data."
+            f"Metadata size ({len(packed)} bytes) exceeds maximum allowed ({MAX_METADATA_SIZE} bytes). "
+            "This may indicate a malicious file or corrupted data."
         )
 
     return packed
 
+
+def _pack_short_text(value: str, max_length: int, field_name: str) -> bytes:
+    field_bytes = value.encode("utf-8")
+    if len(field_bytes) > max_length or max_length > 255:
+        raise ValueError(f"{field_name} too long")
+    return struct.pack(">B", len(field_bytes)) + field_bytes
+
+
+def _pack_long_text(value: str, max_length: int, field_name: str) -> bytes:
+    field_bytes = value.encode("utf-8")
+    if len(field_bytes) > max_length or max_length > 65535:
+        raise ValueError(f"{field_name} too long")
+    return struct.pack(">H", len(field_bytes)) + field_bytes

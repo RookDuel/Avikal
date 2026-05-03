@@ -11,7 +11,7 @@ from typing import Any, List
 from fastapi import HTTPException
 
 from avikal_backend.audit.activity_audit import activity_audit
-from avikal_backend.archive.format.container import read_avk_container
+from avikal_backend.archive.format.container import open_avk_payload_stream
 
 
 log = logging.getLogger("avikal.api")
@@ -22,7 +22,8 @@ def validate_avk_structure(avk_filepath: str) -> None:
         raise HTTPException(status_code=400, detail="File not found. Please check the file path.")
 
     try:
-        read_avk_container(avk_filepath)
+        with open_avk_payload_stream(avk_filepath):
+            pass
     except ValueError as exc:
         log.warning("validate_avk_structure: %s: %s", avk_filepath, exc)
         raise HTTPException(status_code=400, detail="File integrity check failed. The file may be corrupted.")

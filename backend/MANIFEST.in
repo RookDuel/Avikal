@@ -1,6 +1,11 @@
+include README.md
 include README_PACKAGE.md
 include requirements.txt
 include requirements-cli.txt
-include avikal.cmd
+include setup.py
+exclude avikal.cmd
 recursive-include src/avikal_backend/wordlists *.txt
-recursive-include scripts *.mjs
+prune scripts
+prune tests
+global-exclude *.pyc
+global-exclude *.pyo

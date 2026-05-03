@@ -1,5 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
+const { stampExecutableMetadata } = require('./windowsMetadata');
 
 async function removeIfExists(targetPath) {
   await fs.rm(targetPath, { recursive: true, force: true });
@@ -38,9 +39,19 @@ module.exports = async function afterPack(context) {
     path.join(backendRoot, '.tmp_test_runs'),
     path.join(backendRoot, '.pytest_cache'),
     path.join(backendRoot, 'logs'),
+    path.join(backendRoot, 'build'),
     path.join(backendRoot, 'delete-backend'),
     path.join(backendRoot, 'new-backend'),
     path.join(backendRoot, 'docs'),
+    path.join(backendRoot, 'CLI_REFERENCE.md'),
+    path.join(backendRoot, 'CLI_USAGE.md'),
+    path.join(backendRoot, 'MANIFEST.in'),
+    path.join(backendRoot, 'pyproject.toml'),
+    path.join(backendRoot, 'requirements.txt'),
+    path.join(backendRoot, 'avikal.cmd'),
+    path.join(backendRoot, 'avikal.py'),
+    path.join(backendRoot, 'cli.py'),
+    path.join(backendRoot, 'src', 'avikal.egg-info'),
   ];
 
   const removableScriptPaths = [
@@ -113,4 +124,9 @@ module.exports = async function afterPack(context) {
 
   await removeNestedDirectories(sitePackagesRoot, new Set(['tests', 'testing']));
   await removeNestedDirectories(runtimeSitePackagesRoot, new Set(['tests', 'testing']));
+
+  if (context.electronPlatformName === 'win32') {
+    const executablePath = path.join(context.appOutDir, 'RookDuel Avikal.exe');
+    await stampExecutableMetadata(executablePath, context.packager.appInfo.version);
+  }
 };

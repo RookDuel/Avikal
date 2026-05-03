@@ -1,6 +1,6 @@
 import { useState, useEffect, type CSSProperties, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, Unlock, Info, Minus, Square, X, Shield, LogOut, Clock, Settings, CheckCircle2, PlugZap } from 'lucide-react'
+import { Lock, Unlock, Info, Minus, Square, X, Shield, LogOut, Clock, Settings, CheckCircle2, PlugZap, AlertCircle } from 'lucide-react'
 import { Toaster } from 'sonner'
 import Encrypt from './pages/Encrypt'
 import Decrypt from './pages/Decrypt'
@@ -12,6 +12,7 @@ import AuthModal from './components/AuthModal'
 import SecuritySettings from './components/SecuritySettings'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { cn } from './lib/utils'
+import { useBackendRuntime } from './hooks/useBackendRuntime'
 import type { ExternalLaunchAction, PendingExternalLaunchAction } from './lib/externalLaunch'
 
 type Tab = 'encrypt' | 'decrypt' | 'timecapsule' | 'about'
@@ -28,6 +29,7 @@ function AppContent() {
   const [isLoading, setIsLoading] = useState(true)
   const [showContent, setShowContent] = useState(false)
   const [pendingExternalLaunch, setPendingExternalLaunch] = useState<PendingExternalLaunchAction | null>(null)
+  const backendRuntime = useBackendRuntime()
   const { isAuthenticated, isAavritConnected, user, logout, aavritMode, aavritServerUrl } = useAuth()
   const { actualTheme } = useTheme()
 
@@ -138,8 +140,40 @@ function AppContent() {
       <Toaster position="top-right" theme={actualTheme} richColors />
 
       <div className="h-16 bg-av-surface/40 backdrop-blur-3xl border-b border-av-border/30 flex items-center justify-between pl-6 drag-region sticky top-0 z-50 shadow-[0_8px_32px_rgba(0,0,0,0.06)] transition-all duration-300">
-        <div className="flex items-center shrink-0 pr-6 border-r border-av-border/20 h-8">
+        <div className="flex items-center gap-3 shrink-0 pr-6 border-r border-av-border/20 h-8">
           <span className="text-sm font-medium tracking-wide text-av-main">RookDuel Avikal</span>
+          <span
+            className={cn(
+              'h-2.5 w-2.5 rounded-full border',
+              backendRuntime.isReady
+                ? 'bg-emerald-500 border-emerald-400'
+                : backendRuntime.isUnavailable
+                  ? 'bg-red-500 border-red-400'
+                  : 'bg-amber-400 border-amber-300 animate-pulse',
+            )}
+            title={backendRuntime.detail}
+          />
+        </div>
+
+        <div
+          className={cn(
+            'hidden xl:flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
+            backendRuntime.isReady
+              ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+              : backendRuntime.isUnavailable
+                ? 'border-red-500/25 bg-red-500/10 text-red-500'
+                : 'border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-300',
+          )}
+          title={backendRuntime.detail}
+        >
+          {backendRuntime.isReady ? (
+            <CheckCircle2 className="h-3.5 w-3.5" />
+          ) : backendRuntime.isUnavailable ? (
+            <AlertCircle className="h-3.5 w-3.5" />
+          ) : (
+            <PlugZap className="h-3.5 w-3.5 animate-pulse" />
+          )}
+          <span>{backendRuntime.label}</span>
         </div>
 
         <nav className="flex items-center gap-4 overflow-x-auto custom-scrollbar flex-1 px-6 h-full" style={NO_DRAG_REGION_STYLE}>

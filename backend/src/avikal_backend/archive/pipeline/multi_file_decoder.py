@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
 """
 
+import hashlib
 import os
 import shutil
 import tempfile
@@ -15,13 +16,12 @@ import zipfile
 from typing import Dict
 
 from ..format.header import parse_header_bytes, validate_metadata_against_header
-from ..format.manifest import is_internal_manifest_path, load_archive_manifest
+from ..format.manifest import MAX_MANIFEST_BYTES, is_internal_manifest_path, load_archive_manifest
 from ..format.container import open_avk_payload_stream
 from ..security.crypto import (
     compute_checksum,
     derive_time_only_payload_key,
     derive_pqc_hybrid_payload_key,
-    pqc_decapsulate,
     secure_zero,
 )
 from ..chess_metadata import decode_chess_to_metadata_enhanced
@@ -29,7 +29,16 @@ from ..path_safety import normalize_multi_archive_relative_path, resolve_safe_re
 from .payload_streaming import stream_payload_to_file
 from .progress import get_progress_tracker
 from ..security.pqc_keyfile import read_pqc_keyfile
+from ..security.pqc_provider import decapsulate_pqc_archive_material
+from ..security.key_wrap import unwrap_payload_key
 from ..runtime_logging import runtime_debug_print as print
+
+
+def _payload_container_output_limit(metadata: dict) -> int:
+    total_original_size = int(metadata.get("total_original_size") or 0)
+    entry_count = int(metadata.get("entry_count") or 0)
+    zip_overhead_budget = max(1, entry_count) * 512
+    return total_original_size + MAX_MANIFEST_BYTES + zip_overhead_budget + (1024 * 1024)
 
 
 def inspect_multi_file_avk(
@@ -53,7 +62,8 @@ def inspect_multi_file_avk(
     pqc_shared_secret = None
     master_key = None
     payload_key = None
-    pqc_private_key = None
+    payload_decryption_key = None
+    pqc_private_bundle = None
     payload_salt = None
     try:
         tracker = get_progress_tracker()
@@ -121,7 +131,6 @@ def inspect_multi_file_avk(
                 try:
                     encryption_method = metadata["encryption_method"]
                     pqc_ciphertext = metadata.get("pqc_ciphertext")
-                    pqc_private_key = metadata.get("pqc_private_key")
                     pqc_required = bool(metadata.get("pqc_required"))
                     pqc_algorithm = metadata.get("pqc_algorithm")
                     pqc_key_id = metadata.get("pqc_key_id")
@@ -151,13 +160,20 @@ def inspect_multi_file_avk(
                             expected_key_id=pqc_key_id,
                             expected_algorithm=pqc_algorithm,
                         )
-                        pqc_private_key = pqc_key_bundle["private_key"]
-                        pqc_shared_secret = pqc_decapsulate(pqc_private_key, pqc_ciphertext)
-                        if not pqc_shared_secret:
-                            raise ValueError(
-                                "PQC decapsulation failed. The keyfile does not match this archive or the archive is corrupted."
-                            )
+                        pqc_private_bundle = pqc_key_bundle["private_bundle"]
+                        pqc_shared_secret = decapsulate_pqc_archive_material(
+                            private_bundle=pqc_private_bundle,
+                            public_bundle=pqc_key_bundle["public_bundle"],
+                            pqc_ciphertext=pqc_ciphertext,
+                            expected_key_id=pqc_key_id,
+                        )
                         payload_key = derive_pqc_hybrid_payload_key(payload_key, pqc_shared_secret, payload_salt)
+
+                    wrapped_payload_key = metadata.get("wrapped_payload_key")
+                    if wrapped_payload_key:
+                        payload_decryption_key = unwrap_payload_key(wrapped_payload_key, payload_key, header_bytes)
+                    else:
+                        payload_decryption_key = payload_key
 
                     expected_time_key_hash = metadata.get("time_key_hash")
                     if time_key is not None and expected_time_key_hash is not None:
@@ -180,8 +196,9 @@ def inspect_multi_file_avk(
                         payload_stream=payload_stream,
                         output_path=temp_container_path,
                         aad=header_bytes,
-                        decrypt_key=payload_key,
+                        decrypt_key=payload_decryption_key,
                         expected_checksum=expected_checksum,
+                        max_output_size=_payload_container_output_limit(metadata),
                         progress_callback=(
                             (lambda processed, total: tracker.update(
                                 "payload",
@@ -240,10 +257,10 @@ def inspect_multi_file_avk(
             secure_zero(payload_salt)
         if pqc_shared_secret:
             secure_zero(pqc_shared_secret)
-        if pqc_private_key:
-            secure_zero(pqc_private_key)
         if payload_key:
             secure_zero(payload_key)
+        if payload_decryption_key and payload_decryption_key is not payload_key:
+            secure_zero(payload_decryption_key)
         if password:
             secure_zero(password.encode("utf-8"))
 
@@ -255,6 +272,7 @@ def extract_multi_file_avk(
     keyphrase: list = None,
     time_key: bytes = None,
     pqc_keyfile_path: str = None,
+    metadata_override: dict | None = None,
 ) -> Dict:
     """
     Extract multiple files from .avk container with enhanced security.
@@ -269,9 +287,11 @@ def extract_multi_file_avk(
     pqc_shared_secret = None
     master_key = None
     payload_key = None
-    pqc_private_key = None
+    payload_decryption_key = None
+    pqc_private_bundle = None
     payload_salt = None
     print(f"Opening multi-file {avk_filepath}...")
+    chess_decoding_time = 0.0
     try:
         tracker = get_progress_tracker()
         try:
@@ -280,30 +300,36 @@ def extract_multi_file_avk(
                 if tracker:
                     tracker.update("metadata", "Reading archive metadata", 0.05, force=True)
 
-                print("Decoding chess PGN...")
-                try:
-                    start_chess = time.time()
-                    metadata = decode_chess_to_metadata_enhanced(
-                        keychain_pgn,
-                        password,
-                        keyphrase,
-                        skip_timelock=False,
-                        aad=header_bytes,
-                    )
+                if metadata_override is not None:
+                    metadata = metadata_override
                     validate_metadata_against_header(header_info, metadata)
-                    chess_decoding_time = time.time() - start_chess
                     if tracker:
-                        tracker.update("metadata", "Decoding secure metadata", 1.0)
-                    print(f"Chess decoding completed in {chess_decoding_time:.2f} seconds")
-                except ValueError as exc:
-                    error_msg = str(exc)
-                    if "password protected" in error_msg.lower():
-                        raise ValueError("This file is password protected. Please provide password.") from exc
-                    if "incorrect password" in error_msg.lower() or "decryption failed" in error_msg.lower():
-                        raise ValueError("Incorrect password or keyphrase.") from exc
-                    if "time capsule is locked" in error_msg.lower():
-                        raise ValueError(error_msg) from exc
-                    raise ValueError(f"Chess decoding failed: {error_msg}") from exc
+                        tracker.update("metadata", "Validated secure metadata", 1.0)
+                else:
+                    print("Decoding chess PGN...")
+                    try:
+                        start_chess = time.time()
+                        metadata = decode_chess_to_metadata_enhanced(
+                            keychain_pgn,
+                            password,
+                            keyphrase,
+                            skip_timelock=False,
+                            aad=header_bytes,
+                        )
+                        validate_metadata_against_header(header_info, metadata)
+                        chess_decoding_time = time.time() - start_chess
+                        if tracker:
+                            tracker.update("metadata", "Decoding secure metadata", 1.0)
+                        print(f"Chess decoding completed in {chess_decoding_time:.2f} seconds")
+                    except ValueError as exc:
+                        error_msg = str(exc)
+                        if "password protected" in error_msg.lower():
+                            raise ValueError("This file is password protected. Please provide password.") from exc
+                        if "incorrect password" in error_msg.lower() or "decryption failed" in error_msg.lower():
+                            raise ValueError("Incorrect password or keyphrase.") from exc
+                        if "time capsule is locked" in error_msg.lower():
+                            raise ValueError(error_msg) from exc
+                        raise ValueError(f"Chess decoding failed: {error_msg}") from exc
 
                 print("Extracting salts from metadata...")
                 try:
@@ -337,7 +363,6 @@ def extract_multi_file_avk(
                 try:
                     encryption_method = metadata["encryption_method"]
                     pqc_ciphertext = metadata.get("pqc_ciphertext")
-                    pqc_private_key = metadata.get("pqc_private_key")
                     pqc_required = bool(metadata.get("pqc_required"))
                     pqc_algorithm = metadata.get("pqc_algorithm")
                     pqc_key_id = metadata.get("pqc_key_id")
@@ -367,13 +392,20 @@ def extract_multi_file_avk(
                             expected_key_id=pqc_key_id,
                             expected_algorithm=pqc_algorithm,
                         )
-                        pqc_private_key = pqc_key_bundle["private_key"]
-                        pqc_shared_secret = pqc_decapsulate(pqc_private_key, pqc_ciphertext)
-                        if not pqc_shared_secret:
-                            raise ValueError(
-                                "PQC decapsulation failed. The keyfile does not match this archive or the archive is corrupted."
-                            )
+                        pqc_private_bundle = pqc_key_bundle["private_bundle"]
+                        pqc_shared_secret = decapsulate_pqc_archive_material(
+                            private_bundle=pqc_private_bundle,
+                            public_bundle=pqc_key_bundle["public_bundle"],
+                            pqc_ciphertext=pqc_ciphertext,
+                            expected_key_id=pqc_key_id,
+                        )
                         payload_key = derive_pqc_hybrid_payload_key(payload_key, pqc_shared_secret, payload_salt)
+
+                    wrapped_payload_key = metadata.get("wrapped_payload_key")
+                    if wrapped_payload_key:
+                        payload_decryption_key = unwrap_payload_key(wrapped_payload_key, payload_key, header_bytes)
+                    else:
+                        payload_decryption_key = payload_key
 
                     expected_time_key_hash = metadata.get("time_key_hash")
                     if time_key is not None and expected_time_key_hash is not None:
@@ -396,8 +428,9 @@ def extract_multi_file_avk(
                         payload_stream=payload_stream,
                         output_path=temp_container_path,
                         aad=header_bytes,
-                        decrypt_key=payload_key,
+                        decrypt_key=payload_decryption_key,
                         expected_checksum=expected_checksum,
+                        max_output_size=_payload_container_output_limit(metadata),
                         progress_callback=(
                             (lambda processed, total: tracker.update(
                                 "payload",
@@ -464,20 +497,27 @@ def extract_multi_file_avk(
                     if tracker:
                         tracker.update("finalize", f"Preparing preview: {arcname}", index / max(1, len(manifest_entries)))
 
-                    file_data = container_zip.read(member.filename)
-                    file_size = len(file_data)
-                    file_checksum = compute_checksum(file_data).hex()
+                    safe_relpath = normalize_multi_archive_relative_path(arcname)
+                    output_filepath = resolve_safe_relative_output_path(temp_extract_root, safe_relpath)
+                    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+                    file_size = 0
+                    digest = hashlib.sha256()
+                    with container_zip.open(member.filename, "r") as source, open(output_filepath, "wb") as handle:
+                        while True:
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            file_size += len(chunk)
+                            if file_size > entry["size"]:
+                                raise ValueError(f"Manifest size mismatch for {arcname}")
+                            digest.update(chunk)
+                            handle.write(chunk)
 
+                    file_checksum = digest.hexdigest()
                     if file_size != entry["size"]:
                         raise ValueError(f"Manifest size mismatch for {arcname}")
                     if file_checksum != entry["checksum"]:
                         raise ValueError(f"Manifest checksum mismatch for {arcname}")
-
-                    safe_relpath = normalize_multi_archive_relative_path(arcname)
-                    output_filepath = resolve_safe_relative_output_path(temp_extract_root, safe_relpath)
-                    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
-                    with open(output_filepath, "wb") as handle:
-                        handle.write(file_data)
 
                     total_verified_size += file_size
                     extracted_files.append(
@@ -506,10 +546,10 @@ def extract_multi_file_avk(
             secure_zero(payload_salt)
         if pqc_shared_secret:
             secure_zero(pqc_shared_secret)
-        if pqc_private_key:
-            secure_zero(pqc_private_key)
         if payload_key:
             secure_zero(payload_key)
+        if payload_decryption_key and payload_decryption_key is not payload_key:
+            secure_zero(payload_decryption_key)
         if password:
             secure_zero(password.encode("utf-8"))
 
@@ -559,9 +599,9 @@ def extract_multi_file_avk(
         security_features.append("Hierarchical Keys (Argon2id + HKDF)")
         security_features.append("Streaming AES-256-GCM Payload Decryption")
         if metadata.get("pqc_required"):
-            security_features.append("External PQC Keyfile (ML-KEM-1024)")
+            security_features.append("External Quantum Keyfile (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
         elif metadata.get("pqc_ciphertext"):
-            security_features.append("Post-Quantum Cryptography (ML-KEM-1024)")
+            security_features.append("Post-Quantum Cryptography (OpenSSL PQC Suite)")
         security_features.append("Chess Cascade Security (AES + ChaCha)")
     security_features.append("Manifest-Bound Multi-File Payload")
     if metadata.get("keyphrase_protected"):

@@ -9,10 +9,14 @@ Copyright (c) 2026 Atharva Sen Barai.
 import secrets
 import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from .format.metadata_pack import METADATA_FORMAT_VERSION
 from .runtime_logging import runtime_debug_print as print
 
 from ..chess_codec.encoder import ChessGenerator
 from ..chess_codec.decoder import PGNDecoder
+
+CHESS_ENVELOPE_PUBLIC = 0x10
+CHESS_ENVELOPE_PROTECTED = 0x11
 
 
 def _extract_unlock_timestamp(metadata: bytes) -> int:
@@ -21,7 +25,7 @@ def _extract_unlock_timestamp(metadata: bytes) -> int:
 
     offset = 0
     version = metadata[offset]
-    if version not in {0x04, 0x05, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}:
+    if version != METADATA_FORMAT_VERSION:
         raise ValueError(f"Unsupported metadata version: {version}")
     offset += 1  # version
     offset += 1  # flags
@@ -81,7 +85,7 @@ def encode_metadata_to_chess_enhanced(metadata: bytes, password: str, keyphrase:
     aad_bytes = bytes(aad)
 
     if not has_user_secret(password, keyphrase):
-        num = int.from_bytes(b'\x03' + tc_payload, byteorder='big')
+        num = int.from_bytes(bytes([CHESS_ENVELOPE_PUBLIC]) + tc_payload, byteorder='big')
         encoder = ChessGenerator(variations_per_round=variations_per_round)
         return encoder.encode_to_pgn(num)
 
@@ -103,7 +107,7 @@ def encode_metadata_to_chess_enhanced(metadata: bytes, password: str, keyphrase:
     final_payload = chess_salt + nonce1 + encrypted_payload
     
     # 3. Convert to integer
-    num = int.from_bytes(b'\x02' + final_payload, byteorder='big')  # 0x02 = enhanced format
+    num = int.from_bytes(bytes([CHESS_ENVELOPE_PROTECTED]) + final_payload, byteorder='big')
     
     # 4. Encode in chess
     encoder = ChessGenerator(variations_per_round=variations_per_round)
@@ -137,16 +141,15 @@ def decode_chess_to_metadata_enhanced(pgn_string: str, password: str = None, key
     # 2. Convert to bytes
     num_bytes = num.to_bytes((num.bit_length() + 7) // 8, byteorder='big')
     
-    # Check format version
-    if num_bytes[0] == 0x03:
+    envelope_version = num_bytes[0]
+    if envelope_version == CHESS_ENVELOPE_PUBLIC:
         tc_payload = num_bytes[1:]
-    elif num_bytes[0] == 0x02:
-        # Enhanced format with embedded chess_salt
+    elif envelope_version == CHESS_ENVELOPE_PROTECTED:
         final_payload = num_bytes[1:]
     else:
         raise ValueError("Invalid encoded data format")
 
-    if num_bytes[0] == 0x02:
+    if envelope_version == CHESS_ENVELOPE_PROTECTED:
         # 3. Extract chess_salt (first 32 bytes of payload)
         if len(final_payload) < 32 + 12 + 16:  # 32B salt + 12B nonce + 16B GCM tag minimum
             raise ValueError("Invalid chess payload - too short")

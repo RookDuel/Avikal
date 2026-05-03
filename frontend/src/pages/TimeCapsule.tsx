@@ -4,11 +4,12 @@ import { motion } from 'framer-motion'
 import {
   Lock, Key, Upload, Shield, RefreshCw, CheckCircle2,
   ChevronDown, Search, Eye, EyeOff, CheckCircle, ExternalLink,
-  DownloadCloud, Download, Copy, Calendar, Clock, Wifi, WifiOff, File, Folder, Fingerprint
+  DownloadCloud, Copy, Calendar, Clock, Wifi, WifiOff, File, Folder, Fingerprint
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../lib/api'
-import { BACKEND_BASE_URL } from '../lib/backend'
+import { fetchBackend } from '../lib/backend'
+import { waitForBackendReady } from '../lib/backendStatus'
 import { formatEta, parseBackendProgressChunk } from '../lib/backendProgress'
 import { getErrorMessage } from '../lib/errors'
 import { getDroppedPaths } from '../lib/electron'
@@ -16,6 +17,8 @@ import { useProgress } from '../hooks/useProgress'
 import ProgressCard from '../components/ProgressCard'
 import FileTree, { type FileNode } from '../components/FileTree'
 import type { PendingExternalLaunchAction } from '../lib/externalLaunch'
+import { useBackendRuntime } from '../hooks/useBackendRuntime'
+import BackendStartupNotice from '../components/BackendStartupNotice'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type PanelType = 'datetime' | 'password' | 'keyphrase' | 'pqc' | null
@@ -93,7 +96,8 @@ async function fetchNTPTime(): Promise<Date> {
   // time.google.com is a pure NTP server (UDP), not HTTP — so we use the backend NTP endpoint
   // which already calls time.google.com, or fall back to a public HTTP time API.
   try {
-    const res = await fetch(`${BACKEND_BASE_URL}/api/ntp-time`, { method: 'GET' })
+    await waitForBackendReady()
+    const res = await fetchBackend('/api/ntp-time', { method: 'GET' })
     if (res.ok) {
       const data = await res.json()
       if (data.timestamp) return new Date(data.timestamp * 1000)
@@ -124,6 +128,7 @@ interface TimeCapsuleProps {
 export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) {
   const { sessionToken, refreshUserProfile, aavritMode, aavritServerUrl } = useAuth()
   const [timecapsuleProvider, setTimecapsuleProvider] = useState<'drand' | 'aavrit'>('drand')
+  const [authorityExpanded, setAuthorityExpanded] = useState(false)
   const [files, setFiles]               = useState<string[]>([])
   const [treeNodes, setTreeNodes]       = useState<FileNode[]>([])
   const [isDragging, setIsDragging]     = useState(false)
@@ -143,6 +148,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const [pqcEnabled, setPqcEnabled]     = useState(false)
   const [pqcKeyfilePath, setPqcKeyfilePath] = useState('')
   const progress = useProgress()
+  const backendRuntime = useBackendRuntime()
 
   // Date & time state (user-local timezone)
   const [unlockDate, setUnlockDate]     = useState('')
@@ -152,6 +158,22 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const [timeOffset, setTimeOffset]     = useState<number | null>(null)
   const ntpFetched = useRef(false)
   const filesRef = useRef<string[]>([])
+
+  const resetTimecapsulePanel = useCallback(() => {
+    setAuthorityExpanded(false)
+    setTimecapsuleProvider('drand')
+    setActivePanel('datetime')
+    setUnlockDate('')
+    setUnlockTime('')
+    setPasswordEnabled(false)
+    setKeyphraseEnabled(false)
+    setPassword('')
+    setKeyphrase('')
+    setShowPassword(false)
+    setIsCopied(false)
+    setPqcEnabled(false)
+    setPqcKeyfilePath('')
+  }, [])
 
   useEffect(() => {
     filesRef.current = files
@@ -348,40 +370,6 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
     setTimeout(() => setIsCopied(false), 2000)
   }
 
-  const handleDownloadKeyphrase = async () => {
-    if (!keyphrase) return
-
-    try {
-      const electron = window.electron
-
-      if (electron?.saveFile && electron.writeFile) {
-        const selected = await electron.saveFile({
-          defaultPath: 'avikal-keyphrase.txt',
-          filters: [{ name: 'Text Files', extensions: ['txt'] }]
-        })
-
-        if (!selected) return
-
-        const saved = await electron.writeFile(selected, `${keyphrase.trim()}\n`)
-        if (!saved) throw new Error('Failed to save keyphrase file')
-
-        toast.success('Keyphrase saved as .txt')
-        return
-      }
-
-      const blob = new Blob([`${keyphrase.trim()}\n`], { type: 'text/plain;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = 'avikal-keyphrase.txt'
-      anchor.click()
-      URL.revokeObjectURL(url)
-      toast.success('Keyphrase download started')
-    } catch {
-      toast.error('Failed to download keyphrase')
-    }
-  }
-
   const handleChoosePqcKeyfile = async () => {
     const electron = window.electron
     const selected = await electron?.saveFile({
@@ -398,7 +386,6 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         setPassword('')
         setShowPassword(false)
       }
-      setActivePanel(next ? 'password' : null)
       return next
     })
   }
@@ -410,7 +397,6 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         setKeyphrase('')
         setIsCopied(false)
       }
-      setActivePanel(next ? 'keyphrase' : null)
       return next
     })
   }
@@ -421,13 +407,16 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       if (!next) {
         setPqcKeyfilePath('')
       }
-      setActivePanel(next ? 'pqc' : null)
       return next
     })
   }
 
   // Validate & submit to integration backend
   const handleEncode = async () => {
+    if (!backendRuntime.isReady) {
+      toast.info(backendRuntime.detail)
+      return
+    }
     if (files.length === 0) { toast.error('Please select files to lock'); return }
     if (!unlockDate || !unlockTime) { toast.error('Please set the unlock date & time'); return }
 
@@ -530,6 +519,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       if (timecapsuleProvider === 'aavrit' && sessionToken) {
         void refreshUserProfile()
       }
+      resetTimecapsulePanel()
       progress.update({
         status: 'completed',
         currentOperation: 'Time-Capsule created',
@@ -578,7 +568,19 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const isProviderReady = timecapsuleProvider !== 'aavrit' || !!aavritServerUrl && (aavritMode !== 'private' || !!sessionToken)
   const isPqcReady = !pqcEnabled || hasProtection
   const showInlineProgressCard = false
-  const canAttemptCreateTimeCapsule = !loading && isFilesReady && isUnlockReady && isProviderReady && isPasswordReady && isKeyphraseReady && isPqcReady
+  const canAttemptCreateTimeCapsule = backendRuntime.isReady && !loading && isFilesReady && unlockMs !== null
+  const providerModeLabel = timecapsuleProvider === 'drand'
+    ? 'No Login'
+    : aavritMode === 'private'
+      ? 'Private'
+      : 'Public'
+  const providerSummaryText = timecapsuleProvider === 'drand'
+    ? 'Public quicknet unlock with no account requirement.'
+    : !aavritServerUrl
+      ? 'Connect an Aavrit server to enable signed commit/reveal release.'
+      : aavritMode === 'private'
+        ? 'Private Aavrit server with authenticated release flow.'
+        : 'Public Aavrit server with signed reveal verification.'
 
   return (
     <div className="min-h-full w-full max-w-[1600px] mx-auto p-6 lg:p-10 box-border">
@@ -794,104 +796,115 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       </div>
 
       {/* ── Right Panel: Security Protocol (40%) ───────────────────── */}
-      <div className="lg:col-span-2 flex flex-col gap-5 pb-6">
+      <div className={`lg:col-span-2 flex flex-col gap-5 pb-6 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
         <div className="px-2 mb-1">
           <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Time-Lock Settings</h3>
         </div>
 
-        <div className="rounded-[20px] border border-av-border/30 bg-av-surface/40 backdrop-blur-xl overflow-hidden shadow-sm p-5">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h3 className="font-semibold text-av-main text-sm">Unlock Authority</h3>
-              <p className="text-av-muted text-xs mt-1">
-                Choose public drand unlocks or Aavrit-backed commit/reveal verification.
+        <div className="rounded-[20px] border border-av-border/30 bg-av-surface/40 backdrop-blur-xl overflow-hidden shadow-sm">
+          <button
+            type="button"
+            onClick={() => setAuthorityExpanded(value => !value)}
+            className="flex w-full items-start justify-between gap-4 p-5 text-left transition-colors hover:bg-av-border/5"
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-3">
+                <h3 className="font-semibold text-av-main text-sm">Unlock Authority</h3>
+                <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${
+                  timecapsuleProvider === 'drand'
+                    ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                    : 'border-blue-500/20 bg-blue-500/10 text-blue-400'
+                }`}>
+                  {providerModeLabel}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-av-muted">
+                {timecapsuleProvider === 'drand' ? 'drand' : 'Aavrit'} selected. {providerSummaryText}
               </p>
             </div>
-            <div className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border ${
-              timecapsuleProvider === 'drand'
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                : 'bg-blue-500/10 text-blue-400 border-blue-500/20'
-            }`}>
-              {timecapsuleProvider === 'drand' ? 'No Login' : aavritMode === 'private' ? 'Private' : 'Public'}
-            </div>
-          </div>
+            <ChevronDown className={`mt-1 h-4 w-4 shrink-0 text-av-muted transition-transform ${authorityExpanded ? 'rotate-180' : ''}`} />
+          </button>
 
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={() => setTimecapsuleProvider('drand')}
-              className={`text-left rounded-2xl border p-4 transition-all ${
+          {authorityExpanded && (
+            <div className="border-t border-av-border/30 px-5 pb-5 pt-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setTimecapsuleProvider('drand')}
+                  className={`rounded-2xl border p-4 text-left transition-all ${
+                    timecapsuleProvider === 'drand'
+                      ? 'border-emerald-500 bg-emerald-500/10 shadow-sm ring-1 ring-emerald-500/10'
+                      : 'border-av-border hover:border-emerald-500/30 hover:bg-av-border/5'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10">
+                      <Shield className="h-5 w-5 text-emerald-400" />
+                    </div>
+                    <CheckCircle2 className={`h-4 w-4 ${timecapsuleProvider === 'drand' ? 'text-emerald-400' : 'text-transparent'}`} />
+                  </div>
+                  <h4 className="mt-3 text-sm font-semibold text-av-main">drand</h4>
+                  <p className="mt-1 text-xs leading-relaxed text-av-muted">
+                    Unlimited public capsules with decentralized unlock timing and no account requirement.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTimecapsuleProvider('aavrit')
+                    if (!aavritServerUrl || (aavritMode === 'private' && !sessionToken)) {
+                      toast.info('Connect your Aavrit server to use Aavrit release mode.')
+                      promptAavritLogin()
+                    }
+                  }}
+                  className={`rounded-2xl border p-4 text-left transition-all ${
+                    timecapsuleProvider === 'aavrit'
+                      ? 'border-blue-500 bg-blue-500/10 shadow-sm ring-1 ring-blue-500/10'
+                      : 'border-av-border hover:border-blue-500/30 hover:bg-av-border/5'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-blue-500/20 bg-blue-500/10">
+                      <Lock className="h-5 w-5 text-blue-400" />
+                    </div>
+                    <CheckCircle2 className={`h-4 w-4 ${timecapsuleProvider === 'aavrit' ? 'text-blue-400' : 'text-transparent'}`} />
+                  </div>
+                  <h4 className="mt-3 text-sm font-semibold text-av-main">Aavrit</h4>
+                  <p className="mt-1 text-xs leading-relaxed text-av-muted">
+                    Signed commit/reveal verification with public or Appwrite-protected private deployments.
+                  </p>
+                </button>
+              </div>
+
+              <div className={`mt-4 rounded-xl border p-3 text-xs leading-relaxed ${
                 timecapsuleProvider === 'drand'
-                  ? 'border-emerald-500 bg-emerald-500/10 shadow-sm ring-1 ring-emerald-500/10'
-                  : 'border-av-border hover:border-emerald-500/30 hover:bg-av-border/5'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="w-10 h-10 rounded-xl border flex items-center justify-center bg-emerald-500/10 border-emerald-500/20">
-                  <Shield className="w-5 h-5 text-emerald-400" />
-                </div>
-                <CheckCircle2 className={`w-4 h-4 ${timecapsuleProvider === 'drand' ? 'text-emerald-400' : 'text-transparent'}`} />
+                  ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300'
+                  : 'border-blue-500/20 bg-blue-500/5 text-blue-700 dark:text-blue-300'
+              }`}>
+                {timecapsuleProvider === 'drand'
+                  ? 'drand stays self-contained in the archive and unlocks once the selected quicknet round becomes public.'
+                  : !aavritServerUrl
+                    ? 'Connect an Aavrit server before creating an Aavrit time-capsule.'
+                    : aavritMode === 'private'
+                      ? sessionToken
+                        ? 'Private Aavrit is connected and ready.'
+                        : 'Sign in to your Aavrit server before creating a private Aavrit time-capsule.'
+                      : 'Public Aavrit is connected and ready.'}
               </div>
-              <h4 className="mt-3 text-sm font-semibold text-av-main">drand</h4>
-              <p className="mt-1 text-xs text-av-muted leading-relaxed">
-                Unlimited public capsules with decentralized unlock timing and no account requirement.
-              </p>
-            </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setTimecapsuleProvider('aavrit')
-                if (!aavritServerUrl || (aavritMode === 'private' && !sessionToken)) {
-                  toast.info('Connect your Aavrit server to use Aavrit release mode.')
-                  promptAavritLogin()
-                }
-              }}
-              className={`text-left rounded-2xl border p-4 transition-all ${
-                timecapsuleProvider === 'aavrit'
-                  ? 'border-blue-500 bg-blue-500/10 shadow-sm ring-1 ring-blue-500/10'
-                  : 'border-av-border hover:border-blue-500/30 hover:bg-av-border/5'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="w-10 h-10 rounded-xl border flex items-center justify-center bg-blue-500/10 border-blue-500/20">
-                  <Lock className="w-5 h-5 text-blue-400" />
-                </div>
-                <CheckCircle2 className={`w-4 h-4 ${timecapsuleProvider === 'aavrit' ? 'text-blue-400' : 'text-transparent'}`} />
-              </div>
-              <h4 className="mt-3 text-sm font-semibold text-av-main">Aavrit</h4>
-              <p className="mt-1 text-xs text-av-muted leading-relaxed">
-                Signed commit/reveal verification with public or Appwrite-protected private deployments.
-              </p>
-            </button>
-          </div>
-
-          <div className={`mt-4 p-3 rounded-xl border text-xs leading-relaxed ${
-            timecapsuleProvider === 'drand'
-              ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-700 dark:text-emerald-300'
-              : 'bg-blue-500/5 border-blue-500/20 text-blue-700 dark:text-blue-300'
-          }`}>
-            {timecapsuleProvider === 'drand'
-              ? 'drand stays self-contained in the archive and unlocks once the selected quicknet round becomes public.'
-              : !aavritServerUrl
-              ? 'Connect an Aavrit server before creating an Aavrit time-capsule.'
-              : aavritMode === 'private'
-              ? sessionToken
-                ? 'Private Aavrit is connected and ready.'
-                : 'Sign in to your Aavrit server before creating a private Aavrit time-capsule.'
-              : 'Public Aavrit is connected and ready.'}
-          </div>
-
-          {timecapsuleProvider === 'aavrit' && (!aavritServerUrl || (aavritMode === 'private' && !sessionToken)) && (
-            <button
-              type="button"
-              onClick={promptAavritLogin}
-              className="mt-3 w-full py-3 rounded-xl bg-blue-500 text-white text-sm font-semibold hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
-            >
-              <ExternalLink className="w-4 h-4" />
-              Connect Aavrit Server
-            </button>
+              {timecapsuleProvider === 'aavrit' && (!aavritServerUrl || (aavritMode === 'private' && !sessionToken)) && (
+                <button
+                  type="button"
+                  onClick={promptAavritLogin}
+                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-500 py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Connect Aavrit Server
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -993,18 +1006,18 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         </div>
 
         <div
-          onClick={() => setActivePanel(activePanel === 'password' ? null : 'password')}
+          onClick={togglePasswordProtection}
           className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden backdrop-blur-xl relative group ${
-            activePanel === 'password' || passwordEnabled
+            passwordEnabled
               ? 'bg-av-surface/80 border-emerald-500 shadow-[0_8px_30px_rgba(16,185,129,0.08)] ring-1 ring-emerald-500/20'
               : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
           }`}
         >
-          {(activePanel === 'password' || passwordEnabled) && <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-emerald-500/5 to-transparent pointer-events-none" />}
+          {passwordEnabled && <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-emerald-500/5 to-transparent pointer-events-none" />}
           <div className="p-5 flex items-center justify-between border-b border-transparent relative z-10">
             <div className="flex items-center gap-4">
-              <div className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-colors duration-300 ${(activePanel === 'password' || passwordEnabled) ? 'bg-emerald-500/10 border-emerald-500/30 shadow-inner' : 'bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20 group-hover:scale-105'}`}>
-                <Lock className={`w-[18px] h-[18px] ${(activePanel === 'password' || passwordEnabled) ? 'text-emerald-500' : 'text-av-muted'}`} strokeWidth={1.5} />
+              <div className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-colors duration-300 ${passwordEnabled ? 'bg-emerald-500/10 border-emerald-500/30 shadow-inner' : 'bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20 group-hover:scale-105'}`}>
+                <Lock className={`w-[18px] h-[18px] ${passwordEnabled ? 'text-emerald-500' : 'text-av-muted'}`} strokeWidth={1.5} />
               </div>
               <div>
                 <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Optional Access Password</h3>
@@ -1021,7 +1034,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
             </div>
           </div>
 
-          {(activePanel === 'password' || passwordEnabled) && (
+          {passwordEnabled && (
             <div className="px-5 pb-5 space-y-5 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
               <div className="relative rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 backdrop-blur-md group/input">
                 <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
@@ -1062,18 +1075,18 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
 
         {/* ── Accordion 3: Keyphrase ─────────────────────────── */}
         <div
-          onClick={() => setActivePanel(activePanel === 'keyphrase' ? null : 'keyphrase')}
+          onClick={toggleKeyphraseProtection}
           className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden backdrop-blur-xl relative group ${
-            activePanel === 'keyphrase' || keyphraseEnabled
+            keyphraseEnabled
               ? 'bg-av-surface/80 border-purple-500 shadow-[0_8px_30px_rgba(168,85,247,0.08)] ring-1 ring-purple-500/20'
               : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
           }`}
         >
-          {(activePanel === 'keyphrase' || keyphraseEnabled) && <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-purple-500/5 to-transparent pointer-events-none" />}
+          {keyphraseEnabled && <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-purple-500/5 to-transparent pointer-events-none" />}
           <div className="p-5 flex items-center justify-between relative z-10">
             <div className="flex items-center gap-4">
-               <div className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-colors duration-300 ${(activePanel === 'keyphrase' || keyphraseEnabled) ? 'bg-purple-500/10 border-purple-500/30' : 'bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20 group-hover:scale-105'}`}>
-                 <Key className={`w-[18px] h-[18px] ${(activePanel === 'keyphrase' || keyphraseEnabled) ? 'text-purple-500' : 'text-av-muted'}`} strokeWidth={1.5} />
+               <div className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-colors duration-300 ${keyphraseEnabled ? 'bg-purple-500/10 border-purple-500/30' : 'bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20 group-hover:scale-105'}`}>
+                 <Key className={`w-[18px] h-[18px] ${keyphraseEnabled ? 'text-purple-500' : 'text-av-muted'}`} strokeWidth={1.5} />
                </div>
                <div>
                   <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Optional Security Keyphrase</h3>
@@ -1090,34 +1103,31 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
             </div>
           </div>
 
-          {(activePanel === 'keyphrase' || keyphraseEnabled) && (
+          {keyphraseEnabled && (
              <div className="px-5 pb-5 space-y-4 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
                {!keyphrase ? (
-                 <button onClick={handleGenerateKeyphrase} className="w-full py-3.5 rounded-xl border border-av-border/30 bg-container-bg shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 text-[13px] font-medium transition-all duration-300 flex items-center justify-center gap-2.5 backdrop-blur-md text-purple-600 dark:text-purple-400 hover:border-purple-500/40">
+                 <button onClick={handleGenerateKeyphrase} className="w-full py-3.5 rounded-xl border border-purple-500/20 bg-purple-500/10 shadow-sm hover:bg-purple-500/15 text-[13px] font-semibold transition-all duration-300 flex items-center justify-center gap-2.5 text-purple-700 dark:text-purple-300 hover:border-purple-500/40">
                     <RefreshCw className="w-4 h-4" /> Generate Recovery Keyphrase
                  </button>
                ) : (
-                 <div className="bg-container-bg border border-av-border/30 rounded-xl p-4 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 backdrop-blur-md">
-                   <div className="flex items-center justify-between uppercase tracking-[0.15em] text-[10px] font-bold text-av-muted mb-3 pb-3 border-b border-av-border/30">
+                 <div className="security-keyphrase-card rounded-2xl p-4">
+                   <div className="security-keyphrase-header mb-3 flex items-center justify-between pb-3 text-[10px] font-bold uppercase tracking-[0.16em]">
                       <span>Recovery Keyphrase</span>
-                      <span className="text-purple-700 dark:text-purple-400 drop-shadow-[0_0_8px_rgba(168,85,247,0.28)]">21 WORDS</span>
+                      <span className="security-keyphrase-badge rounded-full px-2 py-0.5">21 Words</span>
                    </div>
-                   <div className="grid grid-cols-3 gap-2">
+                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                      {keyphraseWords.map((word, idx) => (
-                       <div key={idx} className="flex bg-av-border/10 dark:bg-white/5 border border-av-border/30 dark:border-white/10 rounded-lg overflow-hidden shadow-sm hover:bg-av-border/20 dark:hover:bg-white/10 transition-colors">
-                          <span className="w-6 py-1 bg-av-border/15 dark:bg-black/40 text-av-muted text-[9px] font-bold flex items-center justify-center border-r border-av-border/20 tracking-wider">{(idx + 1).toString().padStart(2, '0')}</span>
-                          <span className="flex-1 py-1 px-2 text-[11px] font-medium text-av-main truncate overflow-hidden">{word}</span>
+                       <div key={idx} className="security-keyphrase-chip flex min-w-0 overflow-hidden rounded-lg transition-colors">
+                          <span className="security-keyphrase-index flex w-7 shrink-0 items-center justify-center py-1 text-[9px] font-bold tracking-wider tabular-nums">{(idx + 1).toString().padStart(2, '0')}</span>
+                          <span className="min-w-0 flex-1 truncate px-2 py-1 text-[11px] font-semibold">{word}</span>
                        </div>
                      ))}
                    </div>
-                   <div className="flex items-center gap-3 mt-4 pt-4 border-t border-av-border/30">
-                      <button onClick={handleCopyKeyphrase} className="flex-1 py-2 rounded-lg bg-av-border/10 dark:bg-white/5 border border-av-border/30 dark:border-white/10 text-xs font-semibold text-av-main transition-all duration-300 flex items-center justify-center gap-2 shadow-sm hover:border-purple-500/50 hover:bg-purple-500/20 hover:text-purple-700 dark:hover:text-white">
+                   <div className="security-keyphrase-actions mt-4 flex items-center gap-3 pt-4">
+                      <button onClick={handleCopyKeyphrase} className="security-keyphrase-copy flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-xs font-semibold transition-colors duration-300">
                         {isCopied ? <><CheckCircle2 className="w-4 h-4 text-emerald-500 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]"/> Copied</> : <><Copy className="w-4 h-4"/> Copy</>}
                       </button>
-                      <button onClick={handleDownloadKeyphrase} className="flex-1 py-2 rounded-lg bg-av-border/10 dark:bg-white/5 border border-av-border/30 dark:border-white/10 text-xs font-semibold text-av-main transition-all duration-300 flex items-center justify-center gap-2 shadow-sm hover:border-purple-500/50 hover:bg-purple-500/20 hover:text-purple-700 dark:hover:text-white">
-                        <Download className="w-4 h-4" /> Download .txt
-                      </button>
-                      <button onClick={handleGenerateKeyphrase} className="py-2 px-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-semibold hover:bg-red-500/20 dark:hover:bg-red-500 hover:text-red-700 dark:hover:text-white transition-colors duration-300 shadow-sm">
+                      <button onClick={handleGenerateKeyphrase} className="security-keyphrase-secondary rounded-lg px-4 py-2 text-xs font-semibold transition-colors duration-300">
                         Regenerate
                       </button>
                    </div>
@@ -1129,14 +1139,14 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
 
         {/* ── Lock button ────────────────────────────────────── */}
         <div
-          onClick={() => setActivePanel(activePanel === 'pqc' ? null : 'pqc')}
+          onClick={togglePqcProtection}
           className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden backdrop-blur-xl relative group ${
-            activePanel === 'pqc' || pqcEnabled
+            pqcEnabled
               ? 'bg-av-surface/80 border-amber-500 shadow-[0_8px_30px_rgba(245,158,11,0.12)] ring-1 ring-amber-500/20'
               : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
           }`}
         >
-          {(activePanel === 'pqc' || pqcEnabled) && <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-amber-500/5 to-transparent pointer-events-none" />}
+          {pqcEnabled && <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-amber-500/5 to-transparent pointer-events-none" />}
           <div className="p-5 flex items-center justify-between relative z-10">
             <div className="flex items-center gap-4">
               <div className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-colors duration-300 ${
@@ -1161,30 +1171,37 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
 
           {pqcEnabled && (
             <div className="px-5 pb-5 space-y-4 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
-              <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/20 text-[12px] text-av-muted leading-relaxed">
-                This mode keeps the capsule portable, but it also creates a separate protected `.avkkey` file that must be present during unlock.
+              <div className="security-pqc-info rounded-2xl p-4">
+                <div className="flex items-start gap-3">
+                  <div className="security-pqc-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
+                    <Fingerprint className="h-4 w-4" />
+                  </div>
+                  <p className="text-[12px] leading-relaxed">
+                    This mode keeps the capsule portable while adding a fixed hybrid quantum suite through a separate protected <span className="font-semibold">.avkkey</span> file that must be present during unlock.
+                  </p>
+                </div>
               </div>
               <div className="flex items-center gap-3">
                 <button
                   onClick={handleChoosePqcKeyfile}
-                  className="flex-1 py-3 rounded-xl bg-av-surface border border-av-border text-sm font-medium text-av-main hover:border-amber-500/30 hover:bg-amber-500/5 transition-all"
+                  className="flex-1 py-3 rounded-xl bg-av-main text-av-surface border border-av-main text-sm font-semibold hover:opacity-90 transition-all shadow-sm"
                 >
                   {pqcKeyfilePath ? 'Change .avkkey Destination' : 'Choose .avkkey Destination'}
                 </button>
                 {pqcKeyfilePath && (
                   <button
                     onClick={() => setPqcKeyfilePath('')}
-                    className="py-3 px-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm font-medium hover:bg-red-500/20 transition-all"
+                    className="py-3 px-4 rounded-xl bg-av-surface border border-av-border/70 text-av-main text-sm font-semibold hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300 transition-all"
                   >
                     Clear
                   </button>
                 )}
               </div>
-              <div className="p-3 rounded-xl bg-av-border/10 dark:bg-white/5 border border-av-border/40">
+              <div className="security-keyfile-destination rounded-xl p-3">
                 <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-1">Keyfile Destination</p>
-                <p className="text-sm text-av-main break-all">{pqcKeyfilePath || 'You will be prompted before capsule creation starts.'}</p>
+                <p className="break-all text-sm">{pqcKeyfilePath || 'You will be prompted before capsule creation starts.'}</p>
               </div>
-              <p className="text-[11px] text-amber-500 leading-relaxed">
+              <p className="security-keyfile-warning rounded-xl px-3 py-2 text-[11px] leading-relaxed">
                 Losing the `.avkkey` means the capsule cannot be opened, even after the Aavrit or drand release succeeds.
               </p>
             </div>
@@ -1196,12 +1213,12 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="mb-2 overflow-hidden rounded-[18px] border border-av-border/60 bg-av-surface shadow-[0_16px_34px_rgba(15,23,42,0.08)] dark:shadow-[0_16px_34px_rgba(0,0,0,0.35)]"
+              className="security-external-keyfile-card mb-2 overflow-hidden rounded-[18px]"
             >
-              <div className="h-1.5 w-full bg-gradient-to-r from-sky-500 via-blue-500 to-cyan-400 dark:from-amber-500 dark:via-orange-500 dark:to-yellow-400" />
+              <div className="h-1.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-400" />
               <div className="flex items-start gap-3 p-4">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-av-border/60 bg-av-border/10">
-                  <Fingerprint className="h-5 w-5 text-av-main" />
+                <div className="security-pqc-icon flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl">
+                  <Fingerprint className="h-5 w-5" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="mb-2 flex items-center gap-2">
@@ -1234,6 +1251,8 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
             />
           )}
 
+          <BackendStartupNotice backend={backendRuntime} compact />
+
           <button
             onClick={handleEncode}
             disabled={!canAttemptCreateTimeCapsule}
@@ -1245,13 +1264,17 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           >
             {loading ? (
               <><RefreshCw className="w-5 h-5 animate-spin" /> Creating Secure Archive...</>
+            ) : !backendRuntime.isReady ? (
+              <><Shield className="w-5 h-5" /> Starting Secure Engine...</>
             ) : (
               <><Shield className="w-5 h-5" /> Create Time-Capsule</>
             )}
           </button>
 
           <p className="text-center text-[11px] text-av-muted mt-1 font-light">
-            {(!unlockDate || !unlockTime)
+            {!backendRuntime.isReady
+              ? backendRuntime.detail
+              : (!unlockDate || !unlockTime)
               ? 'Set an unlock date and time to continue.'
               : !isUnlockReady
               ? 'Choose a future unlock date and time.'

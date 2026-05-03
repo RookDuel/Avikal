@@ -20,6 +20,7 @@ from ..inputs import (
     default_archive_output,
     ensure_input_paths_exist,
     load_keyphrase,
+    load_password,
     pick_output_dir_dialog,
     pick_save_file_dialog,
     parse_unlock_datetime,
@@ -31,6 +32,7 @@ from .inspect import detect_archive_kind
 
 
 def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
+    password = load_password(args, confirm=bool(getattr(args, "password_prompt", False)))
     keyphrase = load_keyphrase(args)
     unlock_dt = parse_unlock_datetime(args.unlock)
     if args.timecapsule and not unlock_dt:
@@ -61,7 +63,7 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
             input_filepath=input_paths[0],
             output_filepath=output_path,
             unlock_datetime=unlock_dt,
-            password=args.password,
+            password=password,
             keyphrase=keyphrase,
             username=args.username,
             variations_per_round=args.variations,
@@ -76,7 +78,7 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
             input_filepaths=input_paths,
             output_filepath=output_path,
             unlock_datetime=unlock_dt,
-            password=args.password,
+            password=password,
             keyphrase=keyphrase,
             username=args.username,
             variations_per_round=args.variations,
@@ -113,6 +115,7 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
+    password = load_password(args)
     keyphrase = load_keyphrase(args)
     input_path = resolve_single_input(
         args.input,
@@ -134,7 +137,7 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
 
     archive_kind, metadata = detect_archive_kind(
         input_path,
-        password=args.password,
+        password=password,
         keyphrase=keyphrase,
         # skip_timelock=True here: this call is only for archive-type detection
         # (single vs. multi-file). The time-lock is enforced inside the pipeline
@@ -146,7 +149,7 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
         decoded_result = extract_multi_file_avk(
             avk_filepath=input_path,
             output_directory=str(output_dir),
-            password=args.password,
+            password=password,
             keyphrase=keyphrase,
             pqc_keyfile_path=args.pqc_keyfile,
         )
@@ -165,7 +168,7 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
     extracted_path = extract_avk_file(
         avk_filepath=input_path,
         output_directory=str(output_dir),
-        password=args.password,
+        password=password,
         keyphrase=keyphrase,
         pqc_keyfile_path=args.pqc_keyfile,
     )

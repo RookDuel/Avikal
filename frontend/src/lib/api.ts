@@ -5,18 +5,55 @@
  * Safe-to-retry requests are wrapped with retry logic for transient failures.
  */
 
-import { BACKEND_BASE_URL } from './backend'
+import { buildBackendUrl, createBackendHeaders, fetchBackend } from './backend'
+import { waitForBackendReady } from './backendStatus'
 import { withRetry } from './retry'
 
-const API_BASE = BACKEND_BASE_URL
+// Active decrypt abort controller — allows mid-flight cancellation
+let _decryptAbortController: AbortController | null = null
+
+/** Abort the currently running decrypt request, if any. */
+export function cancelDecrypt(): void {
+  if (_decryptAbortController) {
+    _decryptAbortController.abort()
+    _decryptAbortController = null
+  }
+}
 
 async function readErrorResponse(response: Response, fallback: string): Promise<string> {
   const contentType = response.headers.get('content-type') || ''
 
   try {
+    const toMessage = (value: unknown): string => {
+      if (typeof value === 'string') return value.trim()
+      if (Array.isArray(value)) {
+        return value
+          .map((entry) => toMessage(entry))
+          .filter(Boolean)
+          .join('; ')
+      }
+      if (value && typeof value === 'object') {
+        const payload = value as Record<string, unknown>
+        const location = Array.isArray(payload.loc)
+          ? payload.loc
+              .map((part) => String(part))
+              .filter((part) => part !== 'body' && part !== 'query' && part !== 'path')
+              .join('.')
+          : ''
+        const message =
+          toMessage(payload.detail)
+          || toMessage(payload.message)
+          || toMessage(payload.error)
+          || toMessage(payload.msg)
+        if (location && message) return `${location}: ${message}`
+        if (message) return message
+      }
+      return ''
+    }
+
     if (contentType.includes('application/json')) {
       const payload = await response.json()
-      return payload?.detail || payload?.error || payload?.message || fallback
+      return toMessage(payload?.detail) || toMessage(payload?.error) || toMessage(payload?.message) || fallback
     }
 
     const text = (await response.text()).trim()
@@ -24,7 +61,7 @@ async function readErrorResponse(response: Response, fallback: string): Promise<
 
     try {
       const parsed = JSON.parse(text)
-      return parsed?.detail || parsed?.error || parsed?.message || text
+      return toMessage(parsed?.detail) || toMessage(parsed?.error) || toMessage(parsed?.message) || toMessage(parsed) || text
     } catch {
       return text
     }
@@ -34,23 +71,11 @@ async function readErrorResponse(response: Response, fallback: string): Promise<
 }
 
 export async function fetchWithTimeout(
-  url: string,
+  path: string,
   options: RequestInit = {},
   timeoutMs = 30_000,
 ): Promise<Response> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-
-  try {
-    return await fetch(url, { ...options, signal: controller.signal })
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Network error: request timed out after ${timeoutMs / 1000}s`)
-    }
-    throw err
-  } finally {
-    clearTimeout(timer)
-  }
+  return fetchBackend(path, options, timeoutMs)
 }
 
 export interface EncryptRequest {
@@ -67,7 +92,7 @@ export interface EncryptRequest {
 
 export interface DecryptRequest {
   input_file: string
-  output_dir: string
+  output_dir?: string
   password?: string
   keyphrase?: string[]
   pqc_keyfile?: string
@@ -81,6 +106,19 @@ export interface ArchiveInspectRequest {
   input_file: string
 }
 
+export interface KeyphraseWordPair {
+  index: number
+  hindi: string
+  roman: string
+}
+
+export interface KeyphraseRomanMapResponse {
+  success: boolean
+  wordlist_id: string
+  roman_wordlist_id: string
+  words: KeyphraseWordPair[]
+}
+
 export interface VerifySessionRequest {
   session_token: string
   aavrit_url?: string
@@ -88,12 +126,13 @@ export interface VerifySessionRequest {
 
 export const api = {
   async encrypt(data: EncryptRequest, token?: string) {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    await waitForBackendReady()
+    const headers = await createBackendHeaders({ 'Content-Type': 'application/json' })
     if (data.use_timecapsule && data.timecapsule_provider === 'aavrit' && token) {
-      headers.Authorization = `Bearer ${token}`
+      headers.set('Authorization', `Bearer ${token}`)
     }
 
-    const response = await fetch(`${API_BASE}/api/encrypt`, {
+    const response = await fetch(await buildBackendUrl('/api/encrypt'), {
       method: 'POST',
       headers,
       body: JSON.stringify(data),
@@ -103,22 +142,46 @@ export const api = {
   },
 
   async decrypt(data: DecryptRequest, token?: string) {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    await waitForBackendReady()
+    const headers = await createBackendHeaders({ 'Content-Type': 'application/json' })
     if (token) {
-      headers.Authorization = `Bearer ${token}`
+      headers.set('Authorization', `Bearer ${token}`)
     }
 
-    const response = await fetch(`${API_BASE}/api/decrypt`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(data),
-    })
-    if (!response.ok) throw new Error(await readErrorResponse(response, 'Decryption failed'))
-    return response.json()
+    // Cancel any previous in-flight decrypt
+    if (_decryptAbortController) {
+      _decryptAbortController.abort()
+    }
+    _decryptAbortController = new AbortController()
+    const signal = _decryptAbortController.signal
+
+    // 5-minute timeout for large archives
+    const timer = setTimeout(() => _decryptAbortController?.abort(), 300_000)
+
+    try {
+      const response = await fetch(await buildBackendUrl('/api/decrypt'), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(data),
+        signal,
+      })
+      if (!response.ok) throw new Error(await readErrorResponse(response, 'Decryption failed'))
+      return response.json()
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        const cancelled = new Error('Decryption cancelled by user.')
+        ;(cancelled as Error & { cancelled: boolean }).cancelled = true
+        throw cancelled
+      }
+      throw err
+    } finally {
+      clearTimeout(timer)
+      _decryptAbortController = null
+    }
   },
 
   async inspectArchive(data: ArchiveInspectRequest) {
-    const response = await fetchWithTimeout(`${API_BASE}/api/archive/inspect`, {
+    const response = await fetchWithTimeout('/api/archive/inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -128,7 +191,7 @@ export const api = {
   },
 
   async cleanupDecryptSession(data: PreviewCleanupRequest) {
-    const response = await fetchWithTimeout(`${API_BASE}/api/decrypt/cleanup-session`, {
+    const response = await fetchWithTimeout('/api/decrypt/cleanup-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -139,7 +202,7 @@ export const api = {
 
   async generateKeyphrase(wordCount = 21) {
     return withRetry(async () => {
-      const response = await fetchWithTimeout(`${API_BASE}/api/generate-keyphrase`, {
+      const response = await fetchWithTimeout('/api/generate-keyphrase', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ word_count: wordCount, language: 'hindi' }),
@@ -149,9 +212,17 @@ export const api = {
     })
   },
 
+  async getKeyphraseRomanMap(): Promise<KeyphraseRomanMapResponse> {
+    return withRetry(async () => {
+      const response = await fetchWithTimeout('/api/keyphrase/roman-map')
+      if (!response.ok) throw new Error(await readErrorResponse(response, 'Keyphrase helper loading failed'))
+      return response.json()
+    })
+  },
+
   async verifySession(sessionToken: string, aavritUrl?: string) {
     return withRetry(async () => {
-      const response = await fetchWithTimeout(`${API_BASE}/api/auth/verify-session`, {
+      const response = await fetchWithTimeout('/api/auth/verify-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_token: sessionToken, aavrit_url: aavritUrl }),
@@ -166,14 +237,14 @@ export const api = {
       const headers: Record<string, string> = {}
       if (token) headers['X-Aavrit-Session'] = token
       if (aavritUrl) headers['X-Aavrit-Server-URL'] = aavritUrl
-      const response = await fetchWithTimeout(`${API_BASE}/api/auth/profile`, { headers })
+      const response = await fetchWithTimeout('/api/auth/profile', { headers })
       if (!response.ok) throw new Error(await readErrorResponse(response, 'Profile fetch failed'))
       return response.json()
     })
   },
 
   async logout() {
-    const response = await fetchWithTimeout(`${API_BASE}/api/auth/logout`, {
+    const response = await fetchWithTimeout('/api/auth/logout', {
       method: 'POST',
     })
     return response.json()

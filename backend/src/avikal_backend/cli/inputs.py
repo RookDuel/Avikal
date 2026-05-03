@@ -8,6 +8,8 @@ Copyright (c) 2026 Atharva Sen Barai.
 from __future__ import annotations
 
 import argparse
+import getpass
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -120,20 +122,78 @@ def prepare_output_file(path_value: str, *, force: bool) -> str:
     return str(output_path)
 
 
-def load_keyphrase(args: argparse.Namespace) -> list[str] | None:
-    if args.keyphrase and args.keyphrase_file:
+def load_keyphrase_fields(
+    args: argparse.Namespace,
+    *,
+    keyphrase_attr: str = "keyphrase",
+    keyphrase_file_attr: str = "keyphrase_file",
+) -> list[str] | None:
+    raw_keyphrase = getattr(args, keyphrase_attr, None)
+    keyphrase_file = getattr(args, keyphrase_file_attr, None)
+
+    if raw_keyphrase and keyphrase_file:
         raise ValueError("Use either --keyphrase or --keyphrase-file, not both.")
 
-    if args.keyphrase_file:
-        content = Path(args.keyphrase_file).read_text(encoding="utf-8").strip()
+    if keyphrase_file:
+        content = Path(keyphrase_file).read_text(encoding="utf-8").strip()
         words = [word for word in content.split() if word]
         return words or None
 
-    if args.keyphrase:
-        words = [word for word in args.keyphrase.split() if word]
+    if raw_keyphrase:
+        words = [word for word in raw_keyphrase.split() if word]
         return words or None
 
     return None
+
+
+def load_keyphrase(args: argparse.Namespace) -> list[str] | None:
+    return load_keyphrase_fields(args)
+
+
+def load_password_fields(
+    args: argparse.Namespace,
+    *,
+    password_attr: str = "password",
+    prompt_attr: str = "password_prompt",
+    stdin_attr: str = "password_stdin",
+    prompt_label: str = "Password",
+    confirm: bool = False,
+) -> str | None:
+    """Load a password from one explicit CLI input mode."""
+    raw_password = getattr(args, password_attr, None)
+    use_prompt = bool(getattr(args, prompt_attr, False))
+    use_stdin = bool(getattr(args, stdin_attr, False))
+
+    selected_modes = sum(1 for selected in (raw_password is not None, use_prompt, use_stdin) if selected)
+    if selected_modes > 1:
+        raise ValueError("Use only one password input mode for each password role.")
+
+    if raw_password is not None:
+        if raw_password == "":
+            raise ValueError("Password cannot be empty.")
+        return raw_password
+
+    if use_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+        if not password:
+            raise ValueError("No password was received from stdin.")
+        return password
+
+    if use_prompt:
+        password = getpass.getpass(f"{prompt_label}: ")
+        if not password:
+            raise ValueError("Password cannot be empty.")
+        if confirm:
+            confirmation = getpass.getpass(f"Confirm {prompt_label.lower()}: ")
+            if password != confirmation:
+                raise ValueError("Password confirmation did not match.")
+        return password
+
+    return None
+
+
+def load_password(args: argparse.Namespace, *, confirm: bool = False) -> str | None:
+    return load_password_fields(args, confirm=confirm)
 
 
 def resolve_encode_inputs(args: argparse.Namespace) -> list[str]:

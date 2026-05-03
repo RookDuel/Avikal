@@ -257,3 +257,8 @@ def validate_mnemonic(mnemonic: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def get_romanized_word_pairs() -> list[dict]:
+    """Return romanized input helpers mapped to canonical Hindi words."""
+    return get_generator().wordlist.get_roman_pairs()

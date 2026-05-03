@@ -1,330 +1,81 @@
 """
-Cascade metadata unpacking helpers.
+Current Avikal metadata unpacking helpers.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
 """
 
+from __future__ import annotations
+
 import struct
 
+from .metadata_pack import METADATA_FORMAT_VERSION
 from .metadata_validation import validate_cascade_metadata_dict
 
 
+MAX_METADATA_SIZE = 16 * 1024
+
+
 def unpack_cascade_metadata(packed: bytes) -> dict:
-    """
-    Unpack cascade encryption metadata.
-    Supports v0x04 through v0x0C.
-    """
-    max_metadata_size = 16 * 1024
-
-    if len(packed) > max_metadata_size:
+    """Unpack current public metadata format v1."""
+    if len(packed) > MAX_METADATA_SIZE:
         raise ValueError(
-            f"Metadata size ({len(packed)} bytes) exceeds maximum allowed ({max_metadata_size} bytes). "
-            f"This may be a malicious file designed to cause DOS attack."
+            f"Metadata size ({len(packed)} bytes) exceeds maximum allowed ({MAX_METADATA_SIZE} bytes). "
+            "This may be a malicious file designed to cause DOS attack."
         )
-
     if len(packed) < 3:
         raise ValueError("Metadata too short")
 
-    offset = 0
-
-    version = packed[offset]
-    if version not in [0x04, 0x05, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C]:
+    reader = _MetadataReader(packed)
+    version = reader.read_u8("metadata version")
+    if version != METADATA_FORMAT_VERSION:
         raise ValueError(f"Unsupported metadata version: {version}")
-    offset += 1
 
-    flags = packed[offset]
+    flags = reader.read_u8("metadata flags")
     keyphrase_protected = bool(flags & 0x01)
-    offset += 1
+    encryption_method = reader.read_short_text("encryption method")
+    salt = reader.read_bytes(32, "payload salt")
+    chess_salt = reader.read_bytes(32, "chess salt")
+    pqc_ciphertext = reader.read_length_prefixed_bytes(">I", "PQC ciphertext") or None
+    pqc_private_key = reader.read_length_prefixed_bytes(">I", "PQC private key") or None
+    unlock_timestamp = reader.read_u32("unlock timestamp")
+    checksum = reader.read_bytes(32, "checksum")
+    filename = reader.read_short_text("filename")
 
-    method_length = packed[offset]
-    offset += 1
-    if len(packed) < offset + method_length:
-        raise ValueError("Metadata corrupted: method truncated")
-    encryption_method = packed[offset:offset + method_length].decode("utf-8")
-    offset += method_length
+    timelock_mode = reader.read_short_text("timelock mode")
+    file_id = reader.read_short_text("file ID") or None
+    server_url = reader.read_long_text("server URL") or None
+    time_key_hash = reader.read_optional_fixed_bytes(32, "time key hash")
 
-    if len(packed) < offset + 32:
-        raise ValueError("Metadata corrupted: payload salt truncated")
-    salt = packed[offset:offset + 32]
-    offset += 32
+    timecapsule_provider = reader.read_short_text("timecapsule provider") or None
+    drand_round = reader.read_optional_u64("drand round")
+    drand_chain_hash = reader.read_short_text("drand chain hash") or None
+    drand_chain_url = reader.read_long_text("drand chain URL") or None
+    drand_ciphertext = reader.read_long_text("drand ciphertext") or None
+    drand_beacon_id = reader.read_short_text("drand beacon ID") or None
 
-    if len(packed) < offset + 32:
-        raise ValueError("Metadata corrupted: chess salt truncated")
-    chess_salt = packed[offset:offset + 32]
-    offset += 32
+    pqc_required = bool(reader.read_u8("PQC required flag"))
+    pqc_algorithm = reader.read_short_text("PQC algorithm") or None
+    pqc_key_id = reader.read_short_text("PQC key ID") or None
 
-    if len(packed) < offset + 4:
-        raise ValueError("Metadata corrupted: PQC ciphertext length missing")
-    pqc_ciphertext_len = struct.unpack(">I", packed[offset:offset + 4])[0]
-    offset += 4
-    if len(packed) < offset + pqc_ciphertext_len:
-        raise ValueError("Metadata corrupted: PQC ciphertext truncated")
-    pqc_ciphertext = packed[offset:offset + pqc_ciphertext_len] if pqc_ciphertext_len > 0 else None
-    offset += pqc_ciphertext_len
+    archive_type = reader.read_short_text("archive type") or None
+    entry_count = reader.read_u32("entry count")
+    total_original_size = reader.read_u64("total original size")
+    manifest_hash = reader.read_bytes(32, "manifest hash")
 
-    if len(packed) < offset + 4:
-        raise ValueError("Metadata corrupted: PQC private key length missing")
-    pqc_private_key_len = struct.unpack(">I", packed[offset:offset + 4])[0]
-    offset += 4
-    if len(packed) < offset + pqc_private_key_len:
-        raise ValueError("Metadata corrupted: PQC private key truncated")
-    pqc_private_key = packed[offset:offset + pqc_private_key_len] if pqc_private_key_len > 0 else None
-    offset += pqc_private_key_len
+    keyphrase_format_version = reader.read_u8("keyphrase format version")
+    keyphrase_wordlist_id = reader.read_short_text("keyphrase wordlist ID") or None
 
-    if len(packed) < offset + 4:
-        raise ValueError("Metadata corrupted: timestamp missing")
-    unlock_timestamp = struct.unpack(">I", packed[offset:offset + 4])[0]
-    offset += 4
+    aavrit_data_hash = reader.read_short_text("Aavrit data hash") or None
+    aavrit_commit_hash = reader.read_short_text("Aavrit commit hash") or None
+    aavrit_server_key_id = reader.read_short_text("Aavrit server key ID") or None
+    aavrit_commit_signature = reader.read_long_text("Aavrit commit signature") or None
 
-    if len(packed) < offset + 32:
-        raise ValueError("Metadata corrupted: checksum missing")
-    checksum = packed[offset:offset + 32]
-    offset += 32
+    payload_key_wrap_algorithm = reader.read_short_text("payload key wrap algorithm") or None
+    wrapped_payload_key_length = reader.read_u8("wrapped payload key length")
+    wrapped_payload_key = reader.read_bytes(wrapped_payload_key_length, "wrapped payload key") if wrapped_payload_key_length else None
 
-    if len(packed) < offset + 1:
-        raise ValueError("Metadata corrupted: filename length missing")
-    filename_length = packed[offset]
-    offset += 1
-    if len(packed) < offset + filename_length:
-        raise ValueError("Metadata corrupted: filename truncated")
-    filename_bytes = packed[offset:offset + filename_length]
-    filename = filename_bytes.decode("utf-8")
-    offset += filename_length
-
-    timelock_mode = "convenience"
-    file_id = None
-    server_url = None
-    time_key_hash = None
-    timecapsule_provider = None
-    drand_round = None
-    drand_chain_hash = None
-    drand_chain_url = None
-    drand_ciphertext = None
-    drand_beacon_id = None
-    pqc_required = False
-    pqc_algorithm = None
-    pqc_key_id = None
-    archive_type = None
-    entry_count = None
-    total_original_size = None
-    manifest_hash = None
-    keyphrase_format_version = None
-    keyphrase_wordlist_id = None
-    aavrit_data_hash = None
-    aavrit_commit_hash = None
-    aavrit_server_key_id = None
-    aavrit_commit_signature = None
-
-    if version >= 0x05:
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: timelock mode length missing")
-        mode_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + mode_length:
-            raise ValueError("Metadata corrupted: timelock mode truncated")
-        timelock_mode = packed[offset:offset + mode_length].decode("utf-8")
-        offset += mode_length
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: file ID length missing")
-        file_id_length = packed[offset]
-        offset += 1
-        if file_id_length > 0:
-            if len(packed) < offset + file_id_length:
-                raise ValueError("Metadata corrupted: file ID truncated")
-            file_id = packed[offset:offset + file_id_length].decode("utf-8")
-            offset += file_id_length
-
-        if len(packed) < offset + 2:
-            raise ValueError("Metadata corrupted: server URL length missing")
-        server_url_length = struct.unpack(">H", packed[offset:offset + 2])[0]
-        offset += 2
-        if server_url_length > 0:
-            if len(packed) < offset + server_url_length:
-                raise ValueError("Metadata corrupted: server URL truncated")
-            server_url = packed[offset:offset + server_url_length].decode("utf-8")
-            offset += server_url_length
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: time key hash flag missing")
-        time_key_hash_present = packed[offset]
-        offset += 1
-        if time_key_hash_present:
-            if len(packed) < offset + 32:
-                raise ValueError("Metadata corrupted: time key hash truncated")
-            time_key_hash = packed[offset:offset + 32]
-            offset += 32
-
-
-    if version >= 0x07:
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: provider length missing")
-        provider_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + provider_length:
-            raise ValueError("Metadata corrupted: provider truncated")
-        if provider_length > 0:
-            timecapsule_provider = packed[offset:offset + provider_length].decode("utf-8")
-            offset += provider_length
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: drand round flag missing")
-        drand_round_present = packed[offset]
-        offset += 1
-        if drand_round_present:
-            if len(packed) < offset + 8:
-                raise ValueError("Metadata corrupted: drand round truncated")
-            drand_round = struct.unpack(">Q", packed[offset:offset + 8])[0]
-            offset += 8
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: drand chain hash length missing")
-        drand_chain_hash_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + drand_chain_hash_length:
-            raise ValueError("Metadata corrupted: drand chain hash truncated")
-        if drand_chain_hash_length > 0:
-            drand_chain_hash = packed[offset:offset + drand_chain_hash_length].decode("utf-8")
-            offset += drand_chain_hash_length
-
-        if len(packed) < offset + 2:
-            raise ValueError("Metadata corrupted: drand chain URL length missing")
-        drand_chain_url_length = struct.unpack(">H", packed[offset:offset + 2])[0]
-        offset += 2
-        if len(packed) < offset + drand_chain_url_length:
-            raise ValueError("Metadata corrupted: drand chain URL truncated")
-        if drand_chain_url_length > 0:
-            drand_chain_url = packed[offset:offset + drand_chain_url_length].decode("utf-8")
-            offset += drand_chain_url_length
-
-        if len(packed) < offset + 2:
-            raise ValueError("Metadata corrupted: drand ciphertext length missing")
-        drand_ciphertext_length = struct.unpack(">H", packed[offset:offset + 2])[0]
-        offset += 2
-        if len(packed) < offset + drand_ciphertext_length:
-            raise ValueError("Metadata corrupted: drand ciphertext truncated")
-        if drand_ciphertext_length > 0:
-            drand_ciphertext = packed[offset:offset + drand_ciphertext_length].decode("utf-8")
-            offset += drand_ciphertext_length
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: drand beacon ID length missing")
-        drand_beacon_id_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + drand_beacon_id_length:
-            raise ValueError("Metadata corrupted: drand beacon ID truncated")
-        if drand_beacon_id_length > 0:
-            drand_beacon_id = packed[offset:offset + drand_beacon_id_length].decode("utf-8")
-            offset += drand_beacon_id_length
-
-    if version >= 0x08:
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: PQC required flag missing")
-        pqc_required = bool(packed[offset])
-        offset += 1
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: PQC algorithm length missing")
-        pqc_algorithm_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + pqc_algorithm_length:
-            raise ValueError("Metadata corrupted: PQC algorithm truncated")
-        if pqc_algorithm_length > 0:
-            pqc_algorithm = packed[offset:offset + pqc_algorithm_length].decode("utf-8")
-            offset += pqc_algorithm_length
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: PQC key ID length missing")
-        pqc_key_id_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + pqc_key_id_length:
-            raise ValueError("Metadata corrupted: PQC key ID truncated")
-        if pqc_key_id_length > 0:
-            pqc_key_id = packed[offset:offset + pqc_key_id_length].decode("utf-8")
-            offset += pqc_key_id_length
-
-    if version in {0x09, 0x0B, 0x0C}:
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: archive type length missing")
-        archive_type_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + archive_type_length:
-            raise ValueError("Metadata corrupted: archive type truncated")
-        if archive_type_length > 0:
-            archive_type = packed[offset:offset + archive_type_length].decode("utf-8")
-            offset += archive_type_length
-
-        if len(packed) < offset + 12:
-            raise ValueError("Metadata corrupted: archive summary truncated")
-        entry_count = struct.unpack(">I", packed[offset:offset + 4])[0]
-        offset += 4
-        total_original_size = struct.unpack(">Q", packed[offset:offset + 8])[0]
-        offset += 8
-
-        if len(packed) < offset + 32:
-            raise ValueError("Metadata corrupted: manifest hash truncated")
-        manifest_hash = packed[offset:offset + 32]
-        offset += 32
-    if version in {0x0A, 0x0B, 0x0C}:
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: keyphrase format version missing")
-        keyphrase_format_version = packed[offset]
-        offset += 1
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: keyphrase wordlist length missing")
-        keyphrase_wordlist_id_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + keyphrase_wordlist_id_length:
-            raise ValueError("Metadata corrupted: keyphrase wordlist ID truncated")
-        if keyphrase_wordlist_id_length > 0:
-            keyphrase_wordlist_id = packed[offset:offset + keyphrase_wordlist_id_length].decode("utf-8")
-            offset += keyphrase_wordlist_id_length
-
-    if version >= 0x0C:
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: Aavrit data hash length missing")
-        aavrit_data_hash_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + aavrit_data_hash_length:
-            raise ValueError("Metadata corrupted: Aavrit data hash truncated")
-        if aavrit_data_hash_length > 0:
-            aavrit_data_hash = packed[offset:offset + aavrit_data_hash_length].decode("utf-8")
-            offset += aavrit_data_hash_length
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: Aavrit commit hash length missing")
-        aavrit_commit_hash_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + aavrit_commit_hash_length:
-            raise ValueError("Metadata corrupted: Aavrit commit hash truncated")
-        if aavrit_commit_hash_length > 0:
-            aavrit_commit_hash = packed[offset:offset + aavrit_commit_hash_length].decode("utf-8")
-            offset += aavrit_commit_hash_length
-
-        if len(packed) < offset + 1:
-            raise ValueError("Metadata corrupted: Aavrit server key ID length missing")
-        aavrit_server_key_id_length = packed[offset]
-        offset += 1
-        if len(packed) < offset + aavrit_server_key_id_length:
-            raise ValueError("Metadata corrupted: Aavrit server key ID truncated")
-        if aavrit_server_key_id_length > 0:
-            aavrit_server_key_id = packed[offset:offset + aavrit_server_key_id_length].decode("utf-8")
-            offset += aavrit_server_key_id_length
-
-        if len(packed) < offset + 2:
-            raise ValueError("Metadata corrupted: Aavrit commit signature length missing")
-        aavrit_commit_signature_length = struct.unpack(">H", packed[offset:offset + 2])[0]
-        offset += 2
-        if len(packed) < offset + aavrit_commit_signature_length:
-            raise ValueError("Metadata corrupted: Aavrit commit signature truncated")
-        if aavrit_commit_signature_length > 0:
-            aavrit_commit_signature = packed[offset:offset + aavrit_commit_signature_length].decode("utf-8")
-            offset += aavrit_commit_signature_length
-
-    if offset != len(packed):
-        raise ValueError("Metadata corrupted: unexpected trailing bytes")
+    reader.ensure_finished()
 
     metadata = {
         "version": version,
@@ -360,7 +111,71 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
         "aavrit_commit_hash": aavrit_commit_hash,
         "aavrit_server_key_id": aavrit_server_key_id,
         "aavrit_commit_signature": aavrit_commit_signature,
+        "payload_key_wrap_algorithm": payload_key_wrap_algorithm,
+        "wrapped_payload_key": wrapped_payload_key,
     }
-
     return validate_cascade_metadata_dict(metadata)
 
+
+class _MetadataReader:
+    def __init__(self, data: bytes):
+        self._data = data
+        self._offset = 0
+
+    def read_u8(self, field_name: str) -> int:
+        return self.read_struct(">B", field_name)
+
+    def read_u32(self, field_name: str) -> int:
+        return self.read_struct(">I", field_name)
+
+    def read_u64(self, field_name: str) -> int:
+        return self.read_struct(">Q", field_name)
+
+    def read_struct(self, fmt: str, field_name: str) -> int:
+        size = struct.calcsize(fmt)
+        raw = self.read_bytes(size, field_name)
+        return struct.unpack(fmt, raw)[0]
+
+    def read_short_text(self, field_name: str) -> str:
+        length = self.read_u8(f"{field_name} length")
+        return self.read_text(length, field_name)
+
+    def read_long_text(self, field_name: str) -> str:
+        length = self.read_struct(">H", f"{field_name} length")
+        return self.read_text(length, field_name)
+
+    def read_text(self, length: int, field_name: str) -> str:
+        try:
+            return self.read_bytes(length, field_name).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Metadata corrupted: {field_name} is not valid UTF-8") from exc
+
+    def read_length_prefixed_bytes(self, length_format: str, field_name: str) -> bytes:
+        length = self.read_struct(length_format, f"{field_name} length")
+        return self.read_bytes(length, field_name)
+
+    def read_optional_fixed_bytes(self, size: int, field_name: str) -> bytes | None:
+        present = self.read_u8(f"{field_name} flag")
+        if not present:
+            return None
+        return self.read_bytes(size, field_name)
+
+    def read_optional_u64(self, field_name: str) -> int | None:
+        present = self.read_u8(f"{field_name} flag")
+        if not present:
+            return None
+        return self.read_u64(field_name)
+
+    def read_bytes(self, size: int, field_name: str) -> bytes:
+        if size < 0:
+            raise ValueError(f"Metadata corrupted: invalid {field_name} length")
+        end = self._offset + size
+        if len(self._data) < end:
+            raise ValueError(f"Metadata corrupted: {field_name} truncated")
+        value = self._data[self._offset:end]
+        self._offset = end
+        return value
+
+    def ensure_finished(self) -> None:
+        if self._offset != len(self._data):
+            raise ValueError("Metadata corrupted: unexpected trailing bytes")

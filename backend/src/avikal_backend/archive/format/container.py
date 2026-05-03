@@ -11,14 +11,14 @@ import os
 import zipfile
 from contextlib import contextmanager
 
-from .header import HEADER_FILENAME, HEADER_SIZE, parse_header_bytes
+from .header import extract_header_from_keychain_pgn, parse_header_bytes
 
-REQUIRED_AVK_MEMBERS = {HEADER_FILENAME, "keychain.pgn", "payload.enc"}
+REQUIRED_AVK_MEMBERS = {"keychain.pgn", "payload.enc"}
 # keychain.pgn only carries the encrypted control plane, not bulk payload bytes.
 MAX_KEYCHAIN_BYTES = 256 * 1024
 
 
-def _validate_avk_zip(zf: zipfile.ZipFile) -> tuple[zipfile.ZipInfo, zipfile.ZipInfo, zipfile.ZipInfo]:
+def _validate_avk_zip(zf: zipfile.ZipFile) -> tuple[zipfile.ZipInfo, zipfile.ZipInfo]:
     infos = zf.infolist()
     names = [info.filename for info in infos]
     unique_names = set(names)
@@ -33,20 +33,31 @@ def _validate_avk_zip(zf: zipfile.ZipFile) -> tuple[zipfile.ZipInfo, zipfile.Zip
     if extras:
         raise ValueError("Invalid .avk container: unexpected archive members are present")
 
-    header_info = zf.getinfo(HEADER_FILENAME)
     keychain_info = zf.getinfo("keychain.pgn")
     payload_info = zf.getinfo("payload.enc")
 
-    if header_info.is_dir() or keychain_info.is_dir() or payload_info.is_dir():
+    if keychain_info.is_dir() or payload_info.is_dir():
         raise ValueError("Invalid .avk container: archive members must be files")
-    if header_info.file_size != HEADER_SIZE:
-        raise ValueError("Invalid .avk container: header.bin size is out of bounds")
     if keychain_info.file_size <= 0 or keychain_info.file_size > MAX_KEYCHAIN_BYTES:
         raise ValueError("Invalid .avk container: keychain.pgn size is out of bounds")
     if payload_info.file_size <= 0:
         raise ValueError("Invalid .avk container: payload.enc is empty")
 
-    return header_info, keychain_info, payload_info
+    return keychain_info, payload_info
+
+
+def _read_header_bytes(keychain_pgn: str) -> bytes:
+    header_bytes = extract_header_from_keychain_pgn(keychain_pgn)
+    parse_header_bytes(header_bytes)
+    return header_bytes
+
+
+def KEYCHAIN_HAS_HEADER(keychain_pgn: str) -> bool:
+    try:
+        extract_header_from_keychain_pgn(keychain_pgn)
+        return True
+    except ValueError:
+        return False
 
 
 def read_avk_container(avk_filepath: str) -> tuple[bytes, str, bytes]:
@@ -55,9 +66,9 @@ def read_avk_container(avk_filepath: str) -> tuple[bytes, str, bytes]:
 
     Rules:
     - file must exist and be a valid ZIP
-    - exactly `header.bin`, `keychain.pgn`, and `payload.enc` must be present
+    - exactly `keychain.pgn` and `payload.enc` must be present
     - duplicate members are rejected
-    - `header.bin` must be 8 bytes and pass Avk header validation
+    - `keychain.pgn` carries the fixed Avk header tag
     - `keychain.pgn` must be valid UTF-8 and size-bounded
     - `payload.enc` must be non-empty
     """
@@ -66,12 +77,11 @@ def read_avk_container(avk_filepath: str) -> tuple[bytes, str, bytes]:
 
     try:
         with zipfile.ZipFile(avk_filepath, "r") as zf:
-            _validate_avk_zip(zf)
+            _keychain_info, _payload_info = _validate_avk_zip(zf)
 
             try:
-                header_bytes = zf.read(HEADER_FILENAME)
-                parse_header_bytes(header_bytes)
                 keychain_pgn = zf.read("keychain.pgn").decode("utf-8")
+                header_bytes = _read_header_bytes(keychain_pgn)
             except UnicodeDecodeError as exc:
                 raise ValueError("Invalid .avk container: keychain.pgn is not valid UTF-8") from exc
             encrypted_payload = zf.read("payload.enc")
@@ -83,6 +93,31 @@ def read_avk_container(avk_filepath: str) -> tuple[bytes, str, bytes]:
     return header_bytes, keychain_pgn, encrypted_payload
 
 
+def read_avk_header_and_keychain(avk_filepath: str) -> tuple[bytes, str]:
+    """
+    Read only the validated public header and PGN control plane.
+
+    This avoids materializing `payload.enc` for metadata inspection flows.
+    """
+    if not os.path.exists(avk_filepath):
+        raise ValueError("File not found")
+
+    try:
+        with zipfile.ZipFile(avk_filepath, "r") as zf:
+            _validate_avk_zip(zf)
+            try:
+                keychain_pgn = zf.read("keychain.pgn").decode("utf-8")
+                header_bytes = _read_header_bytes(keychain_pgn)
+            except UnicodeDecodeError as exc:
+                raise ValueError("Invalid .avk container: keychain.pgn is not valid UTF-8") from exc
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Invalid .avk container: file is not a valid ZIP archive") from exc
+    except OSError as exc:
+        raise ValueError("Invalid .avk container: unable to read archive") from exc
+
+    return header_bytes, keychain_pgn
+
+
 @contextmanager
 def open_avk_payload_stream(avk_filepath: str):
     """Yield `(header_bytes, keychain_pgn, payload_stream)` for streamed payload processing."""
@@ -91,11 +126,10 @@ def open_avk_payload_stream(avk_filepath: str):
 
     try:
         with zipfile.ZipFile(avk_filepath, "r") as zf:
-            _header_info, _keychain_info, payload_info = _validate_avk_zip(zf)
+            _keychain_info, payload_info = _validate_avk_zip(zf)
             try:
-                header_bytes = zf.read(HEADER_FILENAME)
-                parse_header_bytes(header_bytes)
                 keychain_pgn = zf.read("keychain.pgn").decode("utf-8")
+                header_bytes = _read_header_bytes(keychain_pgn)
             except UnicodeDecodeError as exc:
                 raise ValueError("Invalid .avk container: keychain.pgn is not valid UTF-8") from exc
 

@@ -19,15 +19,17 @@ from typing import Any
 
 import requests
 
+from avikal_backend.archive.security.pqc_provider import provider_status
+
 
 log = logging.getLogger("avikal.cli")
+EXPECTED_HYBRID_KEM = "ML-KEM-1024+X25519"
 
 REQUIRED_RUNTIME_IMPORTS = {
     "requests": "requests",
     "cryptography": "cryptography",
     "nacl": "PyNaCl",
     "Crypto": "pycryptodome",
-    "pqcrypto": "pqcrypto",
     "brotli": "brotli",
     "psutil": "psutil",
 }
@@ -70,6 +72,16 @@ def doctor_backend(args: argparse.Namespace) -> dict[str, Any]:
         except Exception:
             import_results[friendly_name] = False
     checks["imports"] = import_results
+    pqc_status = provider_status()
+    checks["pqc_provider"] = pqc_status
+    pqc_suite = pqc_status.get("suite") if isinstance(pqc_status, dict) else {}
+    pqc_algorithms = pqc_suite.get("algorithms") if isinstance(pqc_suite, dict) else {}
+    checks["pqc_hybrid_suite"] = {
+        "ok": bool(pqc_status.get("available")) and pqc_algorithms.get("kem") == EXPECTED_HYBRID_KEM,
+        "expected_kem": EXPECTED_HYBRID_KEM,
+        "reported_kem": pqc_algorithms.get("kem"),
+        "suite_id": pqc_suite.get("suite_id") if isinstance(pqc_suite, dict) else None,
+    }
 
     probe_path = Path.cwd() / ".avikal-doctor-probe.txt"
     try:
@@ -98,7 +110,12 @@ def doctor_backend(args: argparse.Namespace) -> dict[str, Any]:
         checks["aavrit"] = aavrit_checks
 
     return {
-        "ok": all(checks["imports"].values()) and checks["filesystem"]["write_ok"] and aavrit_ok,
+        "ok": (
+            all(checks["imports"].values())
+            and checks["filesystem"]["write_ok"]
+            and checks["pqc_hybrid_suite"]["ok"]
+            and aavrit_ok
+        ),
         "mode": "doctor",
         "checks": checks,
     }

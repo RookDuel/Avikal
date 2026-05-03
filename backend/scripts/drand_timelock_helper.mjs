@@ -13,6 +13,7 @@ import {
   timelockDecrypt,
   timelockEncrypt,
 } from 'tlock-js'
+import readline from 'node:readline'
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -115,20 +116,47 @@ async function open(payload) {
   }
 }
 
+async function processPayload(payload) {
+  if (payload.action === 'seal') {
+    return seal(payload)
+  }
+  if (payload.action === 'open') {
+    return open(payload)
+  }
+  throw new Error('Unsupported drand helper action')
+}
+
+async function serverLoop() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  })
+
+  for await (const line of rl) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+
+    try {
+      const payload = JSON.parse(trimmed)
+      const result = await processPayload(payload)
+      process.stdout.write(`${JSON.stringify(result)}\n`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      process.stdout.write(`${JSON.stringify({ success: false, error: message })}\n`)
+    }
+  }
+}
+
 async function main() {
   try {
-    const raw = await readStdin()
-    const payload = JSON.parse(raw || '{}')
-
-    let result
-    if (payload.action === 'seal') {
-      result = await seal(payload)
-    } else if (payload.action === 'open') {
-      result = await open(payload)
-    } else {
-      throw new Error('Unsupported drand helper action')
+    if (process.argv.includes('--server')) {
+      await serverLoop()
+      return
     }
 
+    const raw = await readStdin()
+    const payload = JSON.parse(raw || '{}')
+    const result = await processPayload(payload)
     process.stdout.write(JSON.stringify(result))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
