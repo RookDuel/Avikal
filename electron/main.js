@@ -533,7 +533,15 @@ async function createWindow() {
   
   // Load app immediately
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    try {
+      await mainWindow.webContents.session.clearCache();
+      await mainWindow.webContents.session.clearStorageData({
+        storages: ['serviceworkers'],
+      });
+    } catch (error) {
+      console.warn('Failed to clear dev renderer cache:', error);
+    }
+    mainWindow.loadURL(`http://localhost:5173/?devts=${Date.now()}`);
   } else {
     const indexPath = path.join(__dirname, '../frontend/dist/index.html');
     console.log(`Loading frontend from: ${indexPath}`);

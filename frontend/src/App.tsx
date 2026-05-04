@@ -1,9 +1,10 @@
 import { useState, useEffect, type CSSProperties, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, Unlock, Info, Minus, Square, X, Shield, LogOut, Clock, Settings, CheckCircle2, PlugZap, AlertCircle } from 'lucide-react'
+import { Lock, Unlock, Info, Minus, Square, X, Shield, LogOut, Clock, Settings, CheckCircle2, PlugZap, AlertCircle, RotateCw } from 'lucide-react'
 import { Toaster } from 'sonner'
 import Encrypt from './pages/Encrypt'
 import Decrypt from './pages/Decrypt'
+import Rekey from './pages/Rekey'
 import TimeCapsule from './pages/TimeCapsule'
 import About from './pages/About'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
@@ -15,7 +16,7 @@ import { cn } from './lib/utils'
 import { useBackendRuntime } from './hooks/useBackendRuntime'
 import type { ExternalLaunchAction, PendingExternalLaunchAction } from './lib/externalLaunch'
 
-type Tab = 'encrypt' | 'decrypt' | 'timecapsule' | 'about'
+type Tab = 'encrypt' | 'decrypt' | 'rekey' | 'timecapsule' | 'about'
 
 const NO_DRAG_REGION_STYLE: CSSProperties & { WebkitAppRegion: 'no-drag' } = {
   WebkitAppRegion: 'no-drag',
@@ -89,6 +90,11 @@ function AppContent() {
     decrypt: (
       <ErrorBoundary context="Decrypt">
         <Decrypt />
+      </ErrorBoundary>
+    ),
+    rekey: (
+      <ErrorBoundary context="Rekey">
+        <Rekey />
       </ErrorBoundary>
     ),
     timecapsule: (
@@ -178,11 +184,12 @@ function AppContent() {
 
         <nav className="flex items-center gap-4 overflow-x-auto custom-scrollbar flex-1 px-6 h-full" style={NO_DRAG_REGION_STYLE}>
           {[
-            { id: 'encrypt', icon: Lock, label: 'Encode' },
-            { id: 'decrypt', icon: Unlock, label: 'Decode' },
-            { id: 'timecapsule', icon: Clock, label: 'Time-Capsule' },
-            { id: 'about', icon: Info, label: 'About' },
-          ].map((tab) => (
+          { id: 'encrypt', icon: Lock, label: 'Encode' },
+          { id: 'decrypt', icon: Unlock, label: 'Decode' },
+          { id: 'rekey', icon: RotateCw, label: 'Rekey' },
+          { id: 'timecapsule', icon: Clock, label: 'Time-Capsule' },
+          { id: 'about', icon: Info, label: 'About' },
+        ].map((tab) => (
             <motion.button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as Tab)}

@@ -41,6 +41,8 @@ DecryptRequest = api.DecryptRequest
 
 ArchiveInspectRequest = api.ArchiveInspectRequest
 
+RekeyRequest = api.RekeyRequest
+
 PreviewCleanupRequest = api.PreviewCleanupRequest
 
 GenerateKeyphraseRequest = api.GenerateKeyphraseRequest
@@ -805,6 +807,81 @@ async def inspect_archive(request: ArchiveInspectRequest):
     except Exception as e:
 
         api.log.error("Archive inspect failed: %s", e, exc_info=True)
+
+        raise HTTPException(status_code=500, detail=api.friendly_error(str(e)))
+
+
+@router.post("/api/archive/rekey")
+
+async def rekey_archive(request: RekeyRequest):
+
+    try:
+
+        if not os.path.exists(request.input_file):
+
+            raise HTTPException(status_code=400, detail=f"Input file not found: {request.input_file}")
+
+
+
+        api.validate_avk_structure(request.input_file)
+
+        _header_info, route_hints = await run_in_threadpool(api.read_avk_public_route, request.input_file)
+
+
+
+        if route_hints.get("provider"):
+
+            raise HTTPException(status_code=400, detail="Time-capsule rekey is not supported in this phase.")
+
+        if route_hints.get("requires_pqc"):
+
+            raise HTTPException(status_code=400, detail="PQC keyfile rekey is not supported in this phase.")
+
+        if not route_hints.get("requires_password") and not route_hints.get("requires_keyphrase"):
+
+            raise HTTPException(status_code=400, detail="Plaintext archives do not need rekey.")
+
+
+
+        from avikal_backend.archive.pipeline.rekey import rekey_avk_archive
+
+
+
+        result = await run_in_threadpool(
+
+            _run_with_crypto_lock,
+
+            rekey_avk_archive,
+
+            request.input_file,
+
+            old_password=request.old_password,
+
+            old_keyphrase=request.old_keyphrase,
+
+            new_password=request.new_password,
+
+            new_keyphrase=request.new_keyphrase,
+
+            output_filepath=request.output_file,
+
+            force=request.force,
+
+        )
+
+        return result
+
+    except HTTPException:
+
+        raise
+
+    except ValueError as e:
+
+        raise HTTPException(status_code=400, detail=api.friendly_error(str(e)))
+
+    except Exception as e:
+
+        api.log.error("Archive rekey failed: %s", e, exc_info=True)
 
         raise HTTPException(status_code=500, detail=api.friendly_error(str(e)))
 

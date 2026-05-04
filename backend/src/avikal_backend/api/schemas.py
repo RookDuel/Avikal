@@ -68,6 +68,26 @@ class ArchiveInspectRequest(BaseModel):
     input_file: str = Field(min_length=1, max_length=4096)
 
 
+class RekeyRequest(BaseModel):
+    input_file: str = Field(min_length=1, max_length=4096)
+    output_file: str = Field(min_length=1, max_length=4096)
+    old_password: Optional[str] = Field(default=None, min_length=1, max_length=4096)
+    old_keyphrase: Optional[List[str]] = Field(default=None, min_length=1, max_length=64)
+    new_password: Optional[str] = Field(default=None, min_length=1, max_length=4096)
+    new_keyphrase: Optional[List[str]] = Field(default=None, min_length=1, max_length=64)
+    force: bool = False
+
+    @field_validator("old_keyphrase", "new_keyphrase")
+    @classmethod
+    def _validate_rekey_keyphrase(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        words = [word.strip() for word in value if isinstance(word, str) and word.strip()]
+        if len(words) != 21:
+            raise ValueError("Keyphrase must contain exactly 21 words")
+        return words
+
+
 class PreviewCleanupRequest(BaseModel):
     session_id: str = Field(pattern=r"^[0-9a-f]{32}$")
 

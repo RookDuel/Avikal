@@ -106,6 +106,16 @@ export interface ArchiveInspectRequest {
   input_file: string
 }
 
+export interface RekeyRequest {
+  input_file: string
+  output_file: string
+  old_password?: string
+  old_keyphrase?: string[]
+  new_password?: string
+  new_keyphrase?: string[]
+  force?: boolean
+}
+
 export interface KeyphraseWordPair {
   index: number
   hindi: string
@@ -187,6 +197,17 @@ export const api = {
       body: JSON.stringify(data),
     })
     if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive inspection failed'))
+    return response.json()
+  },
+
+  async rekeyArchive(data: RekeyRequest) {
+    await waitForBackendReady()
+    const response = await fetchWithTimeout('/api/archive/rekey', {
+      method: 'POST',
+      headers: await createBackendHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(data),
+      }, 120_000)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Rekey failed'))
     return response.json()
   },
 

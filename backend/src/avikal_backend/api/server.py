@@ -234,6 +234,7 @@ from .schemas import (
     EncryptRequest,
     GenerateKeyphraseRequest,
     PreviewCleanupRequest,
+    RekeyRequest,
     VerifySessionRequest,
     AavritLoginRequest,
     AavritServerCheckRequest,

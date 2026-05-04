@@ -1,6 +1,6 @@
 {
   "name": "avikal-desktop",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "RookDuel Avikal - Quantum-Resistant File Encryption",
   "main": "electron/main.js",
   "author": "RookDuel",

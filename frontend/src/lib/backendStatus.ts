@@ -1,9 +1,10 @@
 import type { BackendRuntimeStatus } from '../types/electron'
-import { DEFAULT_BACKEND_BASE_URL } from './backend'
+
+const FALLBACK_BACKEND_BASE_URL = 'http://127.0.0.1:5000'
 
 const DEFAULT_BROWSER_STATUS: BackendRuntimeStatus = {
   state: 'ready',
-  baseUrl: DEFAULT_BACKEND_BASE_URL,
+  baseUrl: FALLBACK_BACKEND_BASE_URL,
   error: null,
   updatedAt: Date.now(),
 }

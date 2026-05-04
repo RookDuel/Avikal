@@ -400,6 +400,89 @@ def test_decrypt_fast_fails_for_locked_drand_capsule(monkeypatch: pytest.MonkeyP
         asyncio.run(api_routes.decrypt_file(request))
 
 
+def test_rekey_route_fast_fails_for_timecapsule(monkeypatch: pytest.MonkeyPatch):
+    archive_path = Path(__file__).resolve()
+
+    monkeypatch.setattr(api_server, "validate_avk_structure", lambda _path: None)
+    monkeypatch.setattr(
+        api_server,
+        "read_avk_public_route",
+        lambda _path: (
+            {"provider": "drand", "archive_mode": 0x01},
+            {
+                "available": True,
+                "provider": "drand",
+                "archive_type": "single_file",
+                "requires_password": True,
+                "requires_keyphrase": False,
+                "requires_pqc": False,
+            },
+        ),
+    )
+
+    from avikal_backend.api import routes as api_routes
+
+    request = api_server.RekeyRequest(
+        input_file=str(archive_path),
+        output_file=str(archive_path.with_name("rotated.avk")),
+        old_password="OldPass!234",
+        new_password="NewPass!234",
+    )
+    with pytest.raises(api_server.HTTPException, match="Time-capsule rekey is not supported"):
+        asyncio.run(api_routes.rekey_archive(request))
+
+
+def test_rekey_route_delegates_to_rekey_pipeline(monkeypatch: pytest.MonkeyPatch):
+    archive_path = Path(__file__).resolve()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(api_server, "validate_avk_structure", lambda _path: None)
+    monkeypatch.setattr(
+        api_server,
+        "read_avk_public_route",
+        lambda _path: (
+            {"provider": None, "archive_mode": 0x01},
+            {
+                "available": True,
+                "provider": None,
+                "archive_type": "single_file",
+                "requires_password": True,
+                "requires_keyphrase": False,
+                "requires_pqc": False,
+            },
+        ),
+    )
+
+    def fake_rekey(avk_filepath, **kwargs):
+        captured["avk_filepath"] = avk_filepath
+        captured.update(kwargs)
+        return {"ok": True, "mode": "rekey", "output_file": kwargs["output_filepath"]}
+
+    monkeypatch.setattr("avikal_backend.archive.pipeline.rekey.rekey_avk_archive", fake_rekey)
+
+    from avikal_backend.api import routes as api_routes
+
+    request = api_server.RekeyRequest(
+        input_file=str(archive_path),
+        output_file=str(archive_path.with_name("rotated.avk")),
+        old_password="OldPass!234",
+        old_keyphrase=["शब्द"] * 21,
+        new_password="NewPass!234",
+        new_keyphrase=["नया"] * 21,
+        force=True,
+    )
+    result = asyncio.run(api_routes.rekey_archive(request))
+
+    assert result["ok"] is True
+    assert captured["avk_filepath"] == str(archive_path)
+    assert captured["old_password"] == "OldPass!234"
+    assert captured["new_password"] == "NewPass!234"
+    assert captured["old_keyphrase"] == ["शब्द"] * 21
+    assert captured["new_keyphrase"] == ["नया"] * 21
+    assert captured["output_filepath"] == str(archive_path.with_name("rotated.avk"))
+    assert captured["force"] is True
+
+
 def test_drand_decrypt_reuses_preloaded_metadata(monkeypatch: pytest.MonkeyPatch):
     archive_path = Path(__file__).resolve()
     metadata = {
