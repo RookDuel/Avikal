@@ -2,31 +2,50 @@
 
 The `avikal` command is the standalone command-line interface for the Avikal archive engine.
 
-It uses the same Python archive core as the desktop application, but it does not require:
+It uses the same shared archive core as the desktop app, but it does **not** require:
 
 - Electron
 - the React frontend
-- the local FastAPI server to be running
+- the local FastAPI desktop backend
 
-That makes it the right interface for developers, scripting, CI, and direct local archive work.
+That makes it the right surface for scripting, CI, automation, and direct local archive work.
 
-## Package scope
+## What the CLI includes today
 
-The published `avikal` package is intentionally CLI-focused.
+The CLI currently supports:
 
-It includes:
+- regular `.avk` archive creation
+- regular `.avk` extraction
+- archive inspection
+- logical contents listing
+- archive validation
+- credential rotation through `rekey`
+- shared-engine time-lock support
+- runtime diagnostics through `doctor`
 
-- the `avikal` command
-- the shared archive core
-- CLI support modules used for local archive operations
+## Important limits today
 
-It does not include the desktop application's FastAPI service layer. The Electron app keeps its
-own local backend process inside the repository and packaged desktop build, while the PyPI package
-ships only what the CLI needs.
+### PQC
+
+The desktop app bundles its OpenSSL PQC runtime.
+
+The plain CLI package does **not** bundle that runtime today. That means:
+
+- `pip install avikal` gives you the core CLI
+- PQC archive operations still require an OpenSSL 3.5+ runtime with the needed algorithms available
+- the CLI expects that runtime through `AVIKAL_OPENSSL_EXEC` when PQC is used
+
+### TimeCapsule
+
+Current CLI TimeCapsule position:
+
+- shared-engine time-lock support exists
+- drand-style future-unlock behavior is supported through the shared engine
+- full Aavrit login / session / commit / reveal workflows are **not** exposed as a first-class CLI experience yet
 
 ## Install
 
-### From a local source checkout
+### From a local checkout
 
 From the repository root:
 
@@ -49,15 +68,13 @@ pip install .
 
 ### From a published package
 
-If the package is published separately:
-
 ```powershell
 pip install avikal
 ```
 
 ## Entry points
 
-After installation, all of these work:
+After installation, these entry points work:
 
 ```powershell
 avikal --help
@@ -65,19 +82,15 @@ python -m avikal_backend --help
 python -m avikal_backend.cli --help
 ```
 
-On Windows, `pip` creates the `avikal` command automatically through the package entry point.
-
 ## Command overview
 
-| Command | Aliases | Purpose |
-| --- | --- | --- |
-| `encode` | `enc` | Create a new `.avk` archive |
-| `decode` | `dec`, `extract` | Extract an `.avk` archive |
-| `inspect` | `info` | Read container and metadata details |
-| `contents` | `ls`, `list` | List logical files inside an archive |
-| `validate` | `check` | Verify archive structure and optional metadata access |
-| `rekey` | `rotate` | Rotate archive credentials without rewriting `payload.enc` |
-| `doctor` | `diag` | Check runtime health and optional Aavrit connectivity |
+- `encode` / `enc` — create a new `.avk` archive
+- `decode` / `dec` / `extract` — recover files from an archive
+- `inspect` / `info` — read archive/container details
+- `contents` / `ls` / `list` — list logical files in an archive
+- `validate` / `check` — verify archive structure and optional metadata access
+- `rekey` / `rotate` — rotate password or keyphrase protection without rewriting `payload.enc`
+- `doctor` / `diag` — check runtime readiness and optional Aavrit connectivity
 
 ## Quick examples
 
@@ -87,49 +100,41 @@ On Windows, `pip` creates the `avikal` command automatically through the package
 avikal enc document.pdf --password-prompt
 ```
 
-### Create a multi-file archive
+### Create with a Devanagari keyphrase
 
 ```powershell
-avikal enc photo.jpg notes.txt reports.xlsx -o bundle.avk -p "StrongPass#123"
-```
-
-### Create with a 21-word keyphrase
-
-```powershell
-avikal enc document.pdf --keyphrase "word1 word2 word3 ... word21"
 avikal enc document.pdf --keyphrase-file phrase.txt
 ```
 
-### Create with PQC keyfile support
+### Create with PQC
 
 ```powershell
-avikal enc secret.docx -p "StrongPass#123" --pqc
-avikal enc secret.docx -p "StrongPass#123" --pqc --pqc-keyfile-output secret.avkkey
 avikal enc secret.docx --password-prompt --pqc
 ```
 
 ### Create a time-locked archive
 
 ```powershell
-avikal enc reports --timecapsule -u "2026-05-01 12:00" -p "StrongPass#123"
+avikal enc reports --timecapsule -u "2026-05-01 12:00" --password-prompt
 ```
-
-The `--unlock` value is interpreted in your local timezone.
 
 ### Extract an archive
 
 ```powershell
-avikal dec locked.avk -d output -p "StrongPass#123"
 avikal dec locked.avk -d output --password-prompt
-avikal dec locked.avk -d output --keyphrase-file phrase.txt
-avikal dec locked.avk -d output -p "StrongPass#123" --pqc-keyfile locked.avkkey
+```
+
+### Extract a PQC-protected archive
+
+```powershell
+avikal dec locked.avk -d output --password-prompt --pqc-keyfile locked.avkkey
 ```
 
 ### Inspect before extraction
 
 ```powershell
 avikal info locked.avk
-avikal ls locked.avk -p "StrongPass#123"
+avikal ls locked.avk --password-prompt
 avikal check locked.avk
 ```
 
@@ -137,189 +142,161 @@ avikal check locked.avk
 
 ```powershell
 avikal rekey locked.avk --old-password-prompt --new-password-prompt
-avikal rotate locked.avk --output rotated.avk --old-keyphrase-file old.txt --new-keyphrase-file new.txt
+```
+
+### Diagnose the local runtime
+
+```powershell
+avikal doctor
 ```
 
 ## `encode`
 
-Use `encode` when you want to create a new `.avk` archive.
+Use `encode` to create a new archive from:
 
-### What it supports
+- one file
+- several files
+- one folder
 
-- single-file archives
-- multi-file archives
-- folder-backed archives
+It supports:
+
 - password protection
-- 21-word Hindi keyphrase protection
+- 21-word Devanagari keyphrase protection
 - optional PQC `.avkkey` generation
-- optional TimeCapsule creation
+- optional time-lock creation
 
-### Main options
+Helpful options:
 
-| Option | Purpose |
-| --- | --- |
-| `inputs` | One or more input file or folder paths |
-| `--pick-files`, `-F` | Open the system picker for files |
-| `--pick-folder`, `-D` | Open the system picker for one folder |
-| `--pick-output`, `-O` | Open the save dialog for the destination archive |
-| `--output`, `-o` | Explicit output `.avk` path |
-| `--password`, `-p` | Password-based protection |
-| `--password-prompt` | Prompt securely for the password instead of placing it in shell history |
-| `--password-stdin` | Read the password from the first line of standard input for scripts |
-| `--keyphrase` | Direct 21-word keyphrase input |
-| `--keyphrase-file`, `-K` | Read the keyphrase from a UTF-8 text file |
-| `--pqc` | Generate and require a companion `.avkkey` file |
-| `--pqc-keyfile-output` | Custom output path for the generated `.avkkey` |
-| `--timecapsule` | Enable time-locked archive creation |
-| `--unlock`, `-u` | Unlock time in your local timezone using `YYYY-MM-DD HH:MM` |
-| `--force` | Overwrite an existing output archive |
-| `--json` | Return machine-readable output |
-
-### Important rules
-
-- Use either `--keyphrase` or `--keyphrase-file`, not both.
-- Prefer `--password-prompt` for manual use so the password is not stored in terminal history.
-- Use `--password-stdin` for automation when a separate secret manager feeds the password.
-- TimeCapsule creation requires both `--timecapsule` and `--unlock`.
-- PQC mode is layered protection. It adds a required `.avkkey` file to the normal archive credentials.
-  Current Quantum Keyfile archives use Avikal's fixed hybrid suite: ML-KEM-1024 + X25519, ML-DSA-87, SLH-DSA-SHA2-256s, AES-256-GCM, Argon2id, and HKDF.
+- `--output`, `-o` — output `.avk` path
+- `--pick-files`, `-F` — choose files visually
+- `--pick-folder`, `-D` — choose one folder visually
+- `--pick-output`, `-O` — choose output path visually
+- `--password-prompt` — safest interactive password flow
+- `--password-stdin` — useful for automation
+- `--keyphrase-file`, `-K` — read a 21-word keyphrase from file
+- `--pqc` — require a companion `.avkkey`
+- `--pqc-keyfile-output` — custom `.avkkey` destination
+- `--timecapsule` with `--unlock` — create a time-locked archive
+- `--json` — machine-readable output
 
 ## `decode`
 
 Use `decode` when you want to recover files from an archive.
 
-### Main options
+Helpful options:
 
-| Option | Purpose |
-| --- | --- |
-| `input` | Source archive path |
-| `--pick`, `-P` | Pick the archive visually |
-| `--output-dir`, `-d` | Extraction directory |
-| `--pick-output-dir`, `-O` | Pick the extraction directory visually |
-| `--password`, `-p` | Password for decryption |
-| `--password-prompt` | Prompt securely for the password |
-| `--password-stdin` | Read the password from standard input for automation |
-| `--keyphrase` | Direct keyphrase input |
-| `--keyphrase-file`, `-K` | Keyphrase file path |
-| `--pqc-keyfile` | Companion `.avkkey` path |
-| `--json` | Return machine-readable output |
+- `--output-dir`, `-d` — extraction directory
+- `--pick`, `-P` — choose archive visually
+- `--pick-output-dir`, `-O` — choose extraction directory visually
+- `--password-prompt`
+- `--password-stdin`
+- `--keyphrase-file`, `-K`
+- `--pqc-keyfile`
+- `--json`
 
 ## `inspect`
 
-Use `inspect` when you want to read archive/container details without extracting files.
+Use `inspect` when you want archive details without extracting files.
 
-Typical output includes:
+It can show:
 
 - archive mode
-- encryption method
+- protection requirements
 - TimeCapsule provider
 - PQC requirement state
-- manifest and logical file summary where available
+- basic metadata and file summary where available
 
-Useful examples:
+Helpful options:
 
-```powershell
-avikal info locked.avk
-avikal info locked.avk -p "StrongPass#123"
-avikal info locked.avk --keyphrase-file phrase.txt
-```
+- `--skip-timelock` — try metadata inspection before unlock time
+- `--json`
 
 ## `contents`
 
 Use `contents` when you want the logical file list before extraction.
 
-Useful examples:
+Helpful options:
 
-```powershell
-avikal ls locked.avk -p "StrongPass#123"
-avikal ls locked.avk --keyphrase-file phrase.txt
-avikal ls locked.avk -p "StrongPass#123" --pqc-keyfile locked.avkkey
-```
+- `--pqc-keyfile`
+- `--skip-timelock`
+- `--json`
 
 ## `validate`
 
 Use `validate` for a quick structural and metadata-access check.
 
-Useful examples:
+Helpful options:
 
-```powershell
-avikal check locked.avk
-avikal check locked.avk -p "StrongPass#123"
-avikal check locked.avk --keyphrase-file phrase.txt
-```
+- `--skip-timelock`
+- `--json`
 
 ## `rekey`
 
-Use `rekey` when you want to rotate the password or keyphrase for a rekey-capable archive.
+Use `rekey` when you want to rotate the archive's password or keyphrase without rebuilding the whole payload.
 
-New protected archives store a random payload data-encryption key wrapped inside `keychain.pgn`. Rekey opens the old keychain, re-wraps that payload key with the new credentials, and writes a fresh keychain while copying `payload.enc` byte-for-byte unchanged.
+What it does:
 
-### Main options
+- opens the current keychain with the old credentials
+- re-wraps the payload key with the new credentials
+- rewrites `keychain.pgn`
+- keeps `payload.enc` byte-for-byte unchanged
 
-| Option | Purpose |
-| --- | --- |
-| `input` | Source archive path |
-| `--output`, `-o` | Optional output `.avk`; omit for in-place rekey |
-| `--old-password`, `--old-password-prompt`, `--old-password-stdin` | Current password input modes |
-| `--new-password`, `--new-password-prompt`, `--new-password-stdin` | New password input modes |
-| `--old-keyphrase`, `--old-keyphrase-file` | Current keyphrase input modes |
-| `--new-keyphrase`, `--new-keyphrase-file` | New keyphrase input modes |
-| `--force` | Overwrite an existing `--output` file |
-| `--json` | Return machine-readable output |
+Helpful options:
 
-Current phase supports regular rekey-capable archives. PQC keyfile and provider TimeCapsule rekey are intentionally rejected until their external-key update flows are implemented end to end.
+- `--old-password-prompt`
+- `--old-keyphrase-file`
+- `--new-password-prompt`
+- `--new-keyphrase-file`
+- `--output`, `-o` — write a new archive instead of rekeying in place
+- `--force`
+- `--json`
+
+Current limitation:
+
+- regular rekey-capable archives are supported
+- PQC rekey is not supported yet
+- provider TimeCapsule rekey is not supported yet
 
 ## `doctor`
 
 Use `doctor` when you want to verify that the CLI environment is healthy.
 
-It checks:
+It currently checks:
 
 - Python/runtime information
-- required CLI package imports
-- OpenSSL Quantum Keyfile provider and hybrid KEM suite readiness
-- local filesystem write access
+- required imports
+- local write access
+- PQC runtime readiness
 - optional Aavrit endpoint reachability
 
 Examples:
 
 ```powershell
-avikal diag
-avikal diag --aavrit-url https://aavrit.example
-avikal diag --aavrit-url https://aavrit.example --timeout 5
+avikal doctor
+avikal doctor --aavrit-url https://aavrit.example
 ```
-
-### Important Aavrit note
-
-Current CLI Aavrit support is intentionally limited.
-
-The CLI can probe Aavrit connectivity through `doctor`, but it does not currently handle:
-
-- Aavrit login/session management
-- Aavrit-backed archive creation
-- Aavrit-backed reveal/unlock workflows
-
-Those workflows are currently handled through the desktop application and its backend API.
 
 ## CLI vs desktop app
 
-| Surface | Best for |
-| --- | --- |
-| CLI | scripting, automation, CI, direct local archive operations |
-| Desktop app | interactive archive creation, native dialogs, preview-based decryption, Aavrit session workflows |
+### CLI is best for
 
-The important architectural point is that both surfaces use the same archive core:
+- scripts
+- CI
+- automation
+- direct local archive operations
 
-```text
-CLI -> avikal_backend.archive.*
-Desktop backend API -> avikal_backend.archive.*
-```
+### Desktop is best for
 
-There is no second or separate encryption engine.
+- interactive archive creation
+- native dialogs
+- preview-based decryption
+- full Aavrit workflow handling
+
+Both surfaces still use the same shared archive core. There is no second encryption engine.
 
 ## JSON mode
 
-Commands that support `--json` return structured output for:
+Commands that support `--json` are useful for:
 
 - scripts
 - CI checks
@@ -338,5 +315,5 @@ avikal info --help
 avikal ls --help
 avikal check --help
 avikal rekey --help
-avikal diag --help
+avikal doctor --help
 ```

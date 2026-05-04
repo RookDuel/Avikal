@@ -58,6 +58,13 @@ function getStrength(password: string): number {
   return Math.min(score, 100)
 }
 
+function formatProtectionSet(passwordEnabled: boolean, keyphraseEnabled: boolean): string {
+  if (passwordEnabled && keyphraseEnabled) return 'Password + Keyphrase'
+  if (passwordEnabled) return 'Password only'
+  if (keyphraseEnabled) return 'Keyphrase only'
+  return 'No protection selected'
+}
+
 export default function Rekey() {
   const backendRuntime = useBackendRuntime()
 
@@ -232,18 +239,45 @@ export default function Rekey() {
 
   const hasCurrentSecret = oldPassword.trim().length > 0 || splitKeyphraseWords(oldKeyphrase).length > 0
   const hasNewSecret = (newPasswordEnabled && newPassword.trim().length > 0) || (newKeyphraseEnabled && newKeyphraseWordCount > 0)
+  const currentPasswordEnabled = Boolean(archiveHints?.password_hint)
+  const currentKeyphraseEnabled = Boolean(archiveHints?.keyphrase_hint)
+  const currentProtectionSet = useMemo(
+    () => formatProtectionSet(currentPasswordEnabled, currentKeyphraseEnabled),
+    [currentKeyphraseEnabled, currentPasswordEnabled],
+  )
+  const resultingProtectionSet = useMemo(
+    () => formatProtectionSet(newPasswordEnabled, newKeyphraseEnabled),
+    [newKeyphraseEnabled, newPasswordEnabled],
+  )
+  const isReducingProtection = useMemo(() => {
+    const currentCount = Number(currentPasswordEnabled) + Number(currentKeyphraseEnabled)
+    const nextCount = Number(newPasswordEnabled) + Number(newKeyphraseEnabled)
+    return currentCount > 0 && nextCount < currentCount
+  }, [currentKeyphraseEnabled, currentPasswordEnabled, newKeyphraseEnabled, newPasswordEnabled])
+  const resultingProtectionNotice = useMemo(() => {
+    if (!archiveHints) return 'Choose the protections that should remain on the rekeyed archive.'
+    if (isReducingProtection) {
+      return 'Any protection left disabled here will be removed from the rekeyed archive.'
+    }
+    if (currentProtectionSet === resultingProtectionSet) {
+      return 'You are keeping the same protection shape and rotating its secrets.'
+    }
+    return 'The rekeyed archive will require exactly this new protection set during decryption.'
+  }, [archiveHints, currentProtectionSet, isReducingProtection, resultingProtectionSet])
   const currentCredentialSummary = useMemo(() => {
     const parts: string[] = []
+    if (archiveHints) parts.push(currentProtectionSet)
     if (oldPassword.trim().length > 0) parts.push('Password entered')
     if (splitKeyphraseWords(oldKeyphrase).length > 0) parts.push('Keyphrase entered')
-    return parts.length > 0 ? parts.join(' • ') : 'No current secret entered yet'
-  }, [oldKeyphrase, oldPassword])
+    return parts.length > 0 ? parts.join(' - ') : 'No current secret entered yet'
+  }, [archiveHints, currentProtectionSet, oldKeyphrase, oldPassword])
   const newCredentialSummary = useMemo(() => {
     const parts: string[] = []
+    parts.push(resultingProtectionSet)
     if (newPasswordEnabled) parts.push(newPassword.trim().length > 0 ? 'Password ready' : 'Password on')
     if (newKeyphraseEnabled) parts.push(newKeyphraseWordCount > 0 ? `Keyphrase ${newKeyphraseWordCount}/21` : 'Keyphrase on')
-    return parts.length > 0 ? parts.join(' • ') : 'No new protection selected yet'
-  }, [newKeyphraseWordCount, newPassword, newPasswordEnabled, newKeyphraseEnabled])
+    return parts.length > 0 ? parts.join(' - ') : 'No new protection selected yet'
+  }, [newKeyphraseWordCount, newPassword, newPasswordEnabled, newKeyphraseEnabled, resultingProtectionSet])
 
   const canRekey = backendRuntime.isReady
     && !!archivePath
@@ -461,6 +495,45 @@ export default function Rekey() {
             </div>
           </div>
 
+          <div className={`rounded-[20px] border shadow-sm overflow-hidden backdrop-blur-xl ${
+            isReducingProtection
+              ? 'bg-amber-500/8 border-amber-500/30'
+              : 'bg-av-surface/40 border-av-border/30'
+          }`}>
+            <div className="p-5">
+              <div className="flex items-start gap-4">
+                <div className={`w-11 h-11 rounded-xl flex items-center justify-center border shadow-[0_2px_8px_rgba(0,0,0,0.04)] shrink-0 ${
+                  isReducingProtection
+                    ? 'bg-amber-500/10 border-amber-500/25 text-amber-500'
+                    : 'bg-av-surface border-av-border/20 text-av-accent'
+                }`}>
+                  {isReducingProtection ? <ShieldAlert className="w-[18px] h-[18px]" strokeWidth={1.5} /> : <Archive className="w-[18px] h-[18px]" strokeWidth={1.5} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Resulting Archive Protection</h3>
+                  <p className="text-av-muted text-[13px] font-light leading-relaxed">
+                    Rekey replaces the archive&apos;s full protection set. The new archive will require exactly what you keep enabled below.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-2xl border border-av-border/35 bg-av-border/10 p-4">
+                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-2">Current Archive</p>
+                  <p className="text-sm font-medium text-av-main">{currentProtectionSet}</p>
+                </div>
+                <div className="rounded-2xl border border-av-border/35 bg-av-border/10 p-4">
+                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-2">After Rekey</p>
+                  <p className="text-sm font-medium text-av-main">{resultingProtectionSet}</p>
+                </div>
+              </div>
+
+              <p className={`mt-4 text-[12px] leading-relaxed ${isReducingProtection ? 'text-amber-500 font-medium' : 'text-av-muted'}`}>
+                {resultingProtectionNotice}
+              </p>
+            </div>
+          </div>
+
           <CollapsibleSettingsCard
             icon={<Fingerprint className="w-[18px] h-[18px] text-emerald-500" strokeWidth={1.5} />}
             title="Current Credentials"
@@ -504,7 +577,7 @@ export default function Rekey() {
           <CollapsibleSettingsCard
             icon={<Key className="w-[18px] h-[18px] text-purple-500" strokeWidth={1.5} />}
             title="New Credentials"
-            description="Choose the new password, keyphrase, or both for the rekeyed archive."
+            description="Choose the full protection set the rekeyed archive should require during decryption."
             summary={newCredentialSummary}
             open={showNewCredentialsPanel}
             onToggle={() => setShowNewCredentialsPanel((value) => !value)}
@@ -556,7 +629,7 @@ export default function Rekey() {
                           />
                         </div>
                         <div className="grid grid-cols-2 gap-y-2.5 text-[11px] font-medium text-av-main opacity-90 tracking-wide">
-                          <RuleDot ok={hasMinLen} label="Length ≥ 12" />
+                          <RuleDot ok={hasMinLen} label="Length >= 12" />
                           <RuleDot ok={hasUpper} label="Uppercase" />
                           <RuleDot ok={hasLower} label="Lowercase" />
                           <RuleDot ok={hasNumber} label="Numeric" />
@@ -662,9 +735,7 @@ export default function Rekey() {
                 ? backendRuntime.detail
                 : unsupportedReason
                   ? unsupportedReason
-                  : currentNeedsBoth
-                    ? 'Provide both current protections, then choose the new protection set for the rotated archive.'
-                    : 'Rekey keeps payload.enc unchanged and rotates only the credential-protection layer.'}
+                  : 'Rekey keeps payload.enc unchanged and rebuilds the archive around the exact new protection set shown above.'}
             </p>
           </div>
         </div>
