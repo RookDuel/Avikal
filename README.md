@@ -312,8 +312,6 @@ Main components used in this project include:
   Copyright Uvicorn contributors
 - **drand / tlock-js** - time-based unlock path for TimeCapsule workflows  
   Copyright drand authors and contributors
-- **python-chess** - chess handling used in Avikal's archive workflows  
-  Copyright python-chess authors and contributors
 
 Avikal itself remains an independent project built on top of these tools. Their names, licenses, and rights remain with their original owners.
 
