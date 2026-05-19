@@ -615,8 +615,8 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    minWidth: 1000,
-    minHeight: 700,
+    minWidth: 760,
+    minHeight: 620,
     backgroundColor: '#0A0E27',
     icon: getAppIconPath(),
     webPreferences: {

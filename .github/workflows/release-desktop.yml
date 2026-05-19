@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Tag of the GitHub release to attach portable desktop assets to
+        description: Tag of the GitHub release to attach Windows installer assets to
         required: true
         type: string
 
@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  windows-portable:
+  windows-installer:
     runs-on: windows-latest
     env:
       OPENSSL_VERSION: "3.5.6"
@@ -100,40 +100,46 @@ jobs:
           echo '{"action":"seal","unlock_timestamp":9999999999,"key_b_base64":"dGVzdA=="}' | node backend/scripts/drand_timelock_helper.mjs
         shell: bash
 
-      - name: Build portable Windows desktop executable
-        run: npm run package:portable
+      - name: Build self-contained Windows installer
+        run: npm run package
 
-      - name: Prepare portable release assets
+      - name: Verify packaged runtime and prepare installer release assets
         shell: powershell
         run: |
-          $portableExe = Join-Path (Resolve-Path dist) "RookDuel Avikal-beta.exe"
-          if (-not (Test-Path -LiteralPath $portableExe)) {
-            throw "Portable executable was not produced in dist."
+          $packagedOpenSsl = Resolve-Path dist\win-unpacked\resources\backend-runtime\pqc\bin\openssl.exe
+          $packagedVersion = & $packagedOpenSsl version
+          if ($packagedVersion -notmatch [regex]::Escape($env:AVIKAL_OPENSSL_VERSION)) {
+            throw "Packaged OpenSSL runtime mismatch. Expected $env:AVIKAL_OPENSSL_VERSION but got $packagedVersion"
           }
 
-          $portableHash = (Get-FileHash -LiteralPath $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $hashFilePath = "$portableExe.sha256"
-          "$portableHash *$(Split-Path -Leaf $portableExe)" | Set-Content -LiteralPath $hashFilePath -NoNewline
+          $installerExe = Join-Path (Resolve-Path dist) "RookDuel Avikal-beta.exe"
+          if (-not (Test-Path -LiteralPath $installerExe)) {
+            throw "Installer executable was not produced in dist."
+          }
+
+          $installerHash = (Get-FileHash -LiteralPath $installerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hashFilePath = "$installerExe.sha256"
+          "$installerHash *$(Split-Path -Leaf $installerExe)" | Set-Content -LiteralPath $hashFilePath -NoNewline
 
           $metadata = [ordered]@{
             product_version = $env:RELEASE_TAG
-            portable_executable_name = [System.IO.Path]::GetFileName($portableExe)
-            portable_executable_sha256 = $portableHash
+            installer_name = [System.IO.Path]::GetFileName($installerExe)
+            installer_sha256 = $installerHash
             openssl_runtime_version = $env:AVIKAL_OPENSSL_VERSION
-            openssl_runtime_version_text = $env:AVIKAL_OPENSSL_VERSION_TEXT
+            openssl_runtime_version_text = $packagedVersion
           }
           $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json
 
-      - name: Upload portable desktop artifacts to workflow
+      - name: Upload Windows installer artifacts to workflow
         uses: actions/upload-artifact@v4
         with:
-          name: avikal-windows-portable
+          name: avikal-windows-installer
           path: |
             dist/RookDuel Avikal-beta.exe
             dist/RookDuel Avikal-beta.exe.sha256
             dist/avikal-release-metadata.json
 
-      - name: Upload portable desktop executable to GitHub Release
+      - name: Upload Windows installer to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}

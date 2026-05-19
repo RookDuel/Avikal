@@ -206,7 +206,7 @@ function AppContent() {
 
   return (
     <div
-      className="min-h-screen w-full font-sans flex flex-col transition-all duration-500"
+      className="min-h-screen w-full overflow-hidden font-sans flex flex-col transition-all duration-500"
       style={{
         background: 'var(--av-bg-gradient)',
         color: 'var(--av-text-main)',
@@ -214,10 +214,12 @@ function AppContent() {
     >
       <Toaster position="top-right" theme={actualTheme} richColors />
 
-      <div className="sticky top-0 z-50 drag-region border-b border-av-border/30 bg-av-surface/46 backdrop-blur-3xl shadow-[0_8px_32px_rgba(0,0,0,0.06)] transition-all duration-300">
-        <div className="flex min-h-16 items-center gap-4 px-4 sm:px-5 lg:px-6">
-          <div className="flex min-w-0 items-center gap-3 pr-2 sm:pr-3 lg:pr-5 lg:border-r lg:border-av-border/20">
-            <BrandLockup compact />
+      <div className="sticky top-0 z-50 drag-region border-b border-av-border/35 bg-av-surface/78 shadow-[0_10px_28px_rgba(0,0,0,0.06)] backdrop-blur-3xl transition-all duration-300 dark:bg-av-surface/92">
+        <div className="flex min-h-16 items-center pl-4 sm:pl-5 lg:pl-6">
+          <div className="flex min-w-0 items-center gap-3 pr-4">
+            <div className="min-w-0">
+              <BrandLockup compact />
+            </div>
             <span
               className={cn(
                 'h-2.5 w-2.5 shrink-0 rounded-full border',
@@ -231,7 +233,10 @@ function AppContent() {
             />
           </div>
 
-          <nav className="flex h-16 flex-1 items-center gap-3 overflow-x-auto custom-scrollbar px-1 sm:px-2" style={NO_DRAG_REGION_STYLE}>
+          <nav
+            className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto custom-scrollbar px-2 py-2"
+            style={NO_DRAG_REGION_STYLE}
+          >
             {[
               { id: 'encrypt', icon: Lock, label: 'Encode' },
               { id: 'decrypt', icon: Unlock, label: 'Decode' },
@@ -243,8 +248,10 @@ function AppContent() {
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as Tab)}
                 className={cn(
-                  'relative flex h-full shrink-0 items-center gap-2 font-medium transition-all group',
-                  activeTab === tab.id ? 'text-av-main' : 'text-av-muted hover:text-av-main',
+                  'relative flex h-10 shrink-0 items-center gap-2 rounded-xl px-3 font-medium transition-all group',
+                  activeTab === tab.id
+                    ? 'bg-av-border/14 text-av-main shadow-[inset_0_0_0_1px_rgba(58,87,232,0.14)]'
+                    : 'text-av-muted hover:bg-av-border/10 hover:text-av-main',
                 )}
               >
                 <div
@@ -260,7 +267,7 @@ function AppContent() {
                 {activeTab === tab.id && (
                   <motion.div
                     layoutId="activeNavTab"
-                    className="absolute bottom-0 left-0 right-0 h-[3px] rounded-t-full bg-av-accent"
+                    className="absolute inset-x-3 bottom-0 h-[3px] rounded-t-full bg-av-accent"
                     transition={{ type: 'spring', stiffness: 500, damping: 30 }}
                   />
                 )}
@@ -268,74 +275,74 @@ function AppContent() {
             ))}
           </nav>
 
-          <div className="flex h-16 shrink-0 items-center" style={NO_DRAG_REGION_STYLE}>
-            <div className="flex items-center gap-2 sm:gap-3 pr-2 sm:pr-4">
-              {isAavritConnected ? (
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowAuthModal(true)}
-                    className="flex items-center gap-3 rounded-xl border border-av-border/30 bg-av-border/10 px-3 py-1.5 shadow-inner backdrop-blur-md transition-colors hover:bg-av-border/20 dark:bg-black/10 dark:hover:bg-white/10"
-                    title="Manage Aavrit Connection"
-                  >
-                    <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/15 shadow-md">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                    </div>
-                    <div className="hidden text-left lg:block">
-                      <div className="text-sm font-medium leading-tight tracking-wide text-av-main">
-                        {aavritMode === 'private' ? (user?.name || 'Aavrit Connected') : 'Aavrit Connected'}
-                      </div>
-                      <div className="text-[11px] leading-tight text-av-muted">
-                        {aavritMode === 'private' ? 'Private session active' : 'Public server ready'}
-                      </div>
-                    </div>
-                  </button>
-                  {aavritMode === 'private' && (
-                    <motion.button
-                      type="button"
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={logout}
-                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/30 bg-av-border/10 text-av-muted shadow-sm backdrop-blur-md transition-all hover:bg-av-border/20 hover:text-red-400 dark:bg-black/10"
-                      title="Disconnect Aavrit"
-                    >
-                      <LogOut className="w-4 h-4" />
-                    </motion.button>
-                  )}
-                </div>
-              ) : (
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+          <div className="flex shrink-0 items-center gap-2 border-l border-av-border/20 pl-3 sm:gap-3 sm:pl-4" style={NO_DRAG_REGION_STYLE}>
+            {isAavritConnected ? (
+              <div className="flex min-w-0 items-center gap-2">
+                <button
                   onClick={() => setShowAuthModal(true)}
-                  className="flex items-center gap-2 rounded-lg bg-av-main px-3 py-1.5 text-sm font-medium tracking-wide text-av-surface shadow-sm transition-colors hover:opacity-90"
+                  className="flex items-center gap-3 rounded-xl border border-av-border/35 bg-av-surface/82 px-3 py-1.5 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:border-av-border/55 hover:bg-av-border/12 hover:shadow-[0_10px_22px_rgba(15,23,42,0.08)] dark:bg-white/[0.03] dark:hover:bg-white/[0.06] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.28)]"
+                  title="Manage Aavrit Connection"
                 >
-                  {aavritServerUrl ? <PlugZap className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
-                  {aavritServerUrl && aavritMode === 'private' ? 'Reconnect Aavrit' : 'Connect Aavrit'}
-                </motion.button>
-              )}
-
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/15 shadow-md">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                  </div>
+                  <div className="hidden text-left xl:block">
+                    <div className="text-sm font-medium leading-tight tracking-wide text-av-main">
+                      {aavritMode === 'private' ? (user?.name || 'Aavrit Connected') : 'Aavrit Connected'}
+                    </div>
+                    <div className="text-[11px] leading-tight text-av-muted">
+                      {aavritMode === 'private' ? 'Private session active' : 'Public server ready'}
+                    </div>
+                  </div>
+                </button>
+                {aavritMode === 'private' && (
+                  <motion.button
+                    type="button"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={logout}
+                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/35 bg-av-surface/82 text-av-muted shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:border-av-border/55 hover:bg-av-border/12 hover:text-red-400 hover:shadow-[0_10px_22px_rgba(15,23,42,0.08)] dark:bg-white/[0.03] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.28)]"
+                    title="Disconnect Aavrit"
+                  >
+                    <LogOut className="w-4 h-4" />
+                  </motion.button>
+                )}
+              </div>
+            ) : (
               <motion.button
-                whileHover={{ scale: 1.05, rotate: 15 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setShowSecuritySettings(true)}
-                className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/30 bg-av-surface/40 text-av-muted shadow-sm backdrop-blur-md transition-all hover:bg-av-border/50 hover:text-av-main"
-                title="Global Settings"
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.97 }}
+                onClick={() => setShowAuthModal(true)}
+                className="flex items-center gap-2 rounded-xl bg-av-main px-3 py-1.5 text-sm font-medium tracking-wide text-av-surface shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-all hover:opacity-90 hover:shadow-[0_10px_22px_rgba(15,23,42,0.12)] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.3)]"
               >
-                <Settings className="w-4 h-4" />
+                {aavritServerUrl ? <PlugZap className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
+                <span className="hidden sm:inline">
+                  {aavritServerUrl && aavritMode === 'private' ? 'Reconnect Aavrit' : 'Connect Aavrit'}
+                </span>
               </motion.button>
-            </div>
+            )}
 
-            <div className="flex h-16 border-l border-av-border/20 pl-1">
+            <motion.button
+              whileHover={{ scale: 1.05, rotate: 15 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setShowSecuritySettings(true)}
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/35 bg-av-surface/82 text-av-muted shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:border-av-border/55 hover:bg-av-border/12 hover:text-av-main hover:shadow-[0_10px_22px_rgba(15,23,42,0.08)] dark:bg-white/[0.03] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.28)]"
+              title="Global Settings"
+            >
+              <Settings className="w-4 h-4" />
+            </motion.button>
+
+            <div className="flex self-stretch border-l border-av-border/20 pl-1">
               <button
                 onClick={() => window.electron?.minimizeWindow()}
-                className="flex h-full w-11 items-center justify-center text-av-muted transition-colors hover:bg-av-border/15 dark:hover:bg-white/10 sm:w-12"
+                className="flex h-full w-11 items-center justify-center text-av-muted transition-all hover:bg-av-border/25 hover:text-av-main hover:shadow-[inset_0_0_0_1px_rgba(24,36,56,0.08)] dark:hover:bg-white/10 sm:w-12"
                 title="Minimize"
               >
                 <Minus className="w-4 h-4" strokeWidth={1.5} />
               </button>
               <button
                 onClick={() => window.electron?.maximizeWindow()}
-                className="flex h-full w-11 items-center justify-center text-av-muted transition-colors hover:bg-av-border/15 dark:hover:bg-white/10 sm:w-12"
+                className="flex h-full w-11 items-center justify-center text-av-muted transition-all hover:bg-av-border/25 hover:text-av-main hover:shadow-[inset_0_0_0_1px_rgba(24,36,56,0.08)] dark:hover:bg-white/10 sm:w-12"
                 title="Maximize"
               >
                 <Square className="w-4 h-4" strokeWidth={1.5} />
@@ -352,7 +359,7 @@ function AppContent() {
         </div>
       </div>
 
-      <main className="relative min-h-[calc(100vh-120px)] overflow-y-auto">
+      <main className="relative flex-1 min-h-0 overflow-y-auto">
         <AnimatePresence initial={false}>
           {mountedTabs.map((tab) => {
             const isActive = activeTab === tab
