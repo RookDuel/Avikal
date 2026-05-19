@@ -100,43 +100,27 @@ jobs:
           echo '{"action":"seal","unlock_timestamp":9999999999,"key_b_base64":"dGVzdA=="}' | node backend/scripts/drand_timelock_helper.mjs
         shell: bash
 
-      - name: Build unsigned Windows desktop package
-        run: npm run package
+      - name: Build portable Windows desktop executable
+        run: npm run package:portable
 
-      - name: Verify packaged runtime and prepare portable release assets
+      - name: Prepare portable release assets
         shell: powershell
         run: |
-          $packagedOpenSsl = Resolve-Path dist\win-unpacked\resources\backend-runtime\pqc\bin\openssl.exe
-          $packagedVersion = & $packagedOpenSsl version
-          if ($packagedVersion -notmatch [regex]::Escape($env:AVIKAL_OPENSSL_VERSION)) {
-            throw "Packaged OpenSSL runtime mismatch. Expected $env:AVIKAL_OPENSSL_VERSION but got $packagedVersion"
-          }
-
-          $portableRoot = Resolve-Path dist\win-unpacked
-          $portableExe = Join-Path $portableRoot "RookDuel Avikal-beta.exe"
+          $portableExe = Join-Path (Resolve-Path dist) "RookDuel Avikal-beta.exe"
           if (-not (Test-Path -LiteralPath $portableExe)) {
-            throw "Portable executable was not produced in dist\\win-unpacked."
+            throw "Portable executable was not produced in dist."
           }
 
-          $releaseStem = "RookDuel-Avikal-beta-windows-portable-x64"
-          $archivePath = Join-Path (Resolve-Path dist) "$releaseStem.zip"
-          if (Test-Path -LiteralPath $archivePath) {
-            Remove-Item -LiteralPath $archivePath -Force
-          }
-
-          Compress-Archive -Path (Join-Path $portableRoot "*") -DestinationPath $archivePath -CompressionLevel Optimal
-
-          $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $hashFilePath = "$archivePath.sha256"
-          "$archiveHash *$(Split-Path -Leaf $archivePath)" | Set-Content -LiteralPath $hashFilePath -NoNewline
+          $portableHash = (Get-FileHash -LiteralPath $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hashFilePath = "$portableExe.sha256"
+          "$portableHash *$(Split-Path -Leaf $portableExe)" | Set-Content -LiteralPath $hashFilePath -NoNewline
 
           $metadata = [ordered]@{
             product_version = $env:RELEASE_TAG
-            portable_archive_name = [System.IO.Path]::GetFileName($archivePath)
             portable_executable_name = [System.IO.Path]::GetFileName($portableExe)
-            portable_archive_sha256 = $archiveHash
+            portable_executable_sha256 = $portableHash
             openssl_runtime_version = $env:AVIKAL_OPENSSL_VERSION
-            openssl_runtime_version_text = $packagedVersion
+            openssl_runtime_version_text = $env:AVIKAL_OPENSSL_VERSION_TEXT
           }
           $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json
 
@@ -145,15 +129,15 @@ jobs:
         with:
           name: avikal-windows-portable
           path: |
-            dist/*portable-x64.zip
-            dist/*portable-x64.zip.sha256
+            dist/RookDuel Avikal-beta.exe
+            dist/RookDuel Avikal-beta.exe.sha256
             dist/avikal-release-metadata.json
 
-      - name: Upload portable desktop bundle to GitHub Release
+      - name: Upload portable desktop executable to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            dist/*portable-x64.zip
-            dist/*portable-x64.zip.sha256
+            dist/RookDuel Avikal-beta.exe
+            dist/RookDuel Avikal-beta.exe.sha256
             dist/avikal-release-metadata.json

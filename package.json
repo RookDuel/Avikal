@@ -18,7 +18,8 @@
     "build:runtime": "backend\\venv\\Scripts\\python.exe scripts\\prepare_backend_runtime.py",
     "build:electron": "npm run build:runtime && electron-builder",
     "start": "electron .",
-    "package": "npm run build:frontend && npm run build:runtime && electron-builder --win --publish never"
+    "package": "npm run build:frontend && npm run build:runtime && electron-builder --win --publish never",
+    "package:portable": "npm run build:frontend && npm run build:runtime && electron-builder --win portable --publish never"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
