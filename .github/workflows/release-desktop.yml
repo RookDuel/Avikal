@@ -52,6 +52,7 @@ jobs:
           python -m venv backend\venv
           backend\venv\Scripts\python.exe -m pip install --upgrade pip
           backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+          backend\venv\Scripts\python.exe -m pip install -r backend\requirements-build.txt
 
       - name: Install OpenSSL PQC runtime build tools
         shell: powershell
