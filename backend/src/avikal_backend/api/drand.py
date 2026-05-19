@@ -31,6 +31,7 @@ import threading
 from fastapi import HTTPException
 
 from .errors import friendly_error
+from ..runtime_paths import drand_helper_path as runtime_drand_helper_path
 
 
 log = logging.getLogger("avikal.api")
@@ -103,6 +104,13 @@ def drand_helper_path() -> str:
     # Walk up: drand.py → api/ → avikal_backend/ → src/ → backend/
     project_root = Path(__file__).resolve().parents[3]
     return str(project_root / "scripts" / "drand_timelock_helper.mjs")
+
+
+def _runtime_drand_helper_path_override() -> str:
+    return str(runtime_drand_helper_path())
+
+
+drand_helper_path = _runtime_drand_helper_path_override
 
 
 def _resolve_drand_runtime() -> tuple[str, dict[str, str], str]:

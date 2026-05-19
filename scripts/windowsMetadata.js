@@ -12,12 +12,13 @@ const RCEDIT_PATH = path.join(
 
 const BRANDING = Object.freeze({
   companyName: "RookDuel",
-  productName: "RookDuel Avikal",
-  fileDescription: "RookDuel Avikal - Quantum-Resistant File Encryption",
+  productName: "RookDuel Avikal Beta",
+  fileDescription: "RookDuel Avikal Beta - Quantum-Resistant File Encryption",
   homepage: "https://avikal.rookduel.tech",
   copyright: "Copyright (c) 2026 RookDuel",
-  originalFilename: "RookDuel Avikal.exe",
-  internalName: "RookDuel Avikal",
+  originalFilename: "RookDuel Avikal-beta.exe",
+  internalName: "RookDuel Avikal Beta",
+  iconPath: path.join(__dirname, "..", "assets", "icon.ico"),
 });
 
 function runRcedit(targetPath, args) {
@@ -53,6 +54,8 @@ function runRcedit(targetPath, args) {
 
 async function stampExecutableMetadata(targetPath, version) {
   const args = [
+    "--set-icon",
+    BRANDING.iconPath,
     "--set-version-string",
     "CompanyName",
     BRANDING.companyName,

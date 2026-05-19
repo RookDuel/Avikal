@@ -20,6 +20,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +28,9 @@ from typing import Any
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from ...runtime_paths import backend_root as runtime_backend_root
+from ...runtime_paths import is_frozen as runtime_is_frozen
+from ...runtime_paths import project_root as runtime_project_root
 
 
 PQC_PROVIDER_NAME = "openssl"
@@ -85,16 +89,21 @@ def _canonical_json(document: dict[str, Any]) -> bytes:
 
 
 def _backend_root() -> Path:
-    return Path(__file__).resolve().parents[4]
+    return runtime_backend_root()
 
 
 def _project_root() -> Path:
-    return _backend_root().parent
+    return runtime_project_root()
 
 
 def _pqc_temp_root() -> Path:
     configured = os.environ.get("AVIKAL_PQC_TEMP_DIR")
-    root = Path(configured) if configured else _project_root() / ".tmp_pqc_provider"
+    if configured:
+        root = Path(configured)
+    elif runtime_is_frozen():
+        root = Path(tempfile.gettempdir()) / "avikal-pqc-provider"
+    else:
+        root = _project_root() / ".tmp_pqc_provider"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

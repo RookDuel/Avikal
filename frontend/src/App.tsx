@@ -22,12 +22,94 @@ const NO_DRAG_REGION_STYLE: CSSProperties & { WebkitAppRegion: 'no-drag' } = {
   WebkitAppRegion: 'no-drag',
 }
 
+function BetaBadge({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center rounded-md border border-av-border/70 bg-av-surface/80 text-av-muted shadow-sm',
+        compact ? 'px-1.5 py-0.5 text-[10px] leading-none font-semibold uppercase tracking-[0.22em]' : 'px-2 py-1 text-[11px] leading-none font-semibold uppercase tracking-[0.24em]',
+      )}
+    >
+      Beta
+    </span>
+  )
+}
+
+function BrandLockup({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={cn('flex gap-2.5', compact ? 'items-center' : 'items-start')}>
+      <span className={cn(compact ? 'text-sm leading-none font-medium tracking-wide text-av-main whitespace-nowrap' : 'text-[2.45rem] leading-none font-light tracking-[0.22em] text-av-main')}>
+        RookDuel Avikal
+      </span>
+      <div className={cn(compact ? 'flex items-center self-center' : 'pt-1')}>
+        <BetaBadge compact={compact} />
+      </div>
+    </div>
+  )
+}
+
+function StartupShell({
+  isVisible,
+  backendLabel,
+  backendDetail,
+  isUnavailable,
+}: {
+  isVisible: boolean
+  backendLabel: string
+  backendDetail: string
+  isUnavailable: boolean
+}) {
+  return (
+    <div
+      className="flex min-h-screen items-center justify-center px-6 py-10 transition-colors duration-500"
+      style={{ background: 'var(--av-bg-gradient)' }}
+    >
+      <motion.div
+        initial={{ opacity: 0, y: 16, scale: 0.985 }}
+        animate={{ opacity: isVisible ? 1 : 0, y: isVisible ? 0 : 10, scale: isVisible ? 1 : 0.99 }}
+        transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+        className="relative w-full max-w-[34rem] px-2 py-2"
+      >
+        <div className="relative flex flex-col items-center gap-6 text-center">
+          <BrandLockup />
+          <div className="w-full max-w-md space-y-3">
+            <p className="text-sm font-medium uppercase tracking-[0.24em] text-av-muted">
+              {isUnavailable ? 'Connection failed' : 'Initializing secure engine'}
+            </p>
+            <p className="text-sm leading-7 text-av-muted">
+              {isUnavailable ? backendDetail : 'Avikal opens when the local backend is ready.'}
+            </p>
+          </div>
+          <div className="w-full max-w-md space-y-3">
+            <div className="flex items-center justify-between gap-3 text-xs font-medium uppercase tracking-[0.2em] text-av-muted">
+              <span>{backendLabel}</span>
+              <span
+                className={cn(
+                  'inline-flex h-2.5 w-2.5 rounded-full border',
+                  isUnavailable ? 'border-red-400 bg-red-500' : 'border-amber-300 bg-amber-400 animate-pulse',
+                )}
+              />
+            </div>
+            <div className="h-1 overflow-hidden rounded-full bg-av-border/45">
+              <motion.div
+                initial={{ x: '-70%' }}
+                animate={isUnavailable ? { x: 0 } : { x: ['-70%', '10%', '92%'] }}
+                transition={isUnavailable ? { duration: 0.2 } : { duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
+                className={cn('h-full rounded-full', isUnavailable ? 'w-full bg-red-500/80' : 'w-1/4 bg-av-accent')}
+              />
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  )
+}
+
 function AppContent() {
   const [activeTab, setActiveTab] = useState<Tab>('encrypt')
   const [visitedTabs, setVisitedTabs] = useState<Tab[]>(['encrypt'])
   const [showAuthModal, setShowAuthModal] = useState(false)
   const [showSecuritySettings, setShowSecuritySettings] = useState(false)
-  const [isLoading, setIsLoading] = useState(true)
   const [showContent, setShowContent] = useState(false)
   const [pendingExternalLaunch, setPendingExternalLaunch] = useState<PendingExternalLaunchAction | null>(null)
   const backendRuntime = useBackendRuntime()
@@ -35,12 +117,14 @@ function AppContent() {
   const { actualTheme } = useTheme()
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsLoading(false)
-      setTimeout(() => setShowContent(true), 300)
-    }, 1500)
-    return () => clearTimeout(timer)
-  }, [])
+    if (backendRuntime.isReady) {
+      const timer = window.setTimeout(() => setShowContent(true), 180)
+      return () => window.clearTimeout(timer)
+    }
+
+    setShowContent(false)
+    return undefined
+  }, [backendRuntime.isReady])
 
   useEffect(() => {
     const openAuthModal = () => setShowAuthModal(true)
@@ -109,29 +193,14 @@ function AppContent() {
     ),
   }
 
-  if (isLoading || !showContent) {
+  if (!showContent) {
     return (
-      <div
-        className="flex flex-col items-center justify-center min-h-screen transition-colors duration-500"
-        style={{ background: 'var(--av-bg-gradient)' }}
-      >
-        <motion.div
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: isLoading ? 1 : 0, scale: isLoading ? 1 : 0.95 }}
-          transition={{ duration: 0.5, ease: 'easeInOut' }}
-          className="flex flex-col items-center"
-        >
-          <h1 className="text-4xl font-light tracking-widest mb-8 text-av-main">RookDuel Avikal</h1>
-          <div className="w-48 h-1 rounded-full bg-av-main/10 overflow-hidden">
-            <motion.div
-              initial={{ x: '-100%' }}
-              animate={{ x: '100%' }}
-              transition={{ repeat: Infinity, duration: 1.5, ease: 'easeInOut' }}
-              className="w-full h-full bg-av-accent rounded-full"
-            />
-          </div>
-        </motion.div>
-      </div>
+      <StartupShell
+        isVisible={!showContent}
+        backendLabel={backendRuntime.label}
+        backendDetail={backendRuntime.detail}
+        isUnavailable={backendRuntime.isUnavailable}
+      />
     )
   }
 
@@ -145,159 +214,140 @@ function AppContent() {
     >
       <Toaster position="top-right" theme={actualTheme} richColors />
 
-      <div className="h-16 bg-av-surface/40 backdrop-blur-3xl border-b border-av-border/30 flex items-center justify-between pl-6 drag-region sticky top-0 z-50 shadow-[0_8px_32px_rgba(0,0,0,0.06)] transition-all duration-300">
-        <div className="flex items-center gap-3 shrink-0 pr-6 border-r border-av-border/20 h-8">
-          <span className="text-sm font-medium tracking-wide text-av-main">RookDuel Avikal</span>
-          <span
-            className={cn(
-              'h-2.5 w-2.5 rounded-full border',
-              backendRuntime.isReady
-                ? 'bg-emerald-500 border-emerald-400'
-                : backendRuntime.isUnavailable
-                  ? 'bg-red-500 border-red-400'
-                  : 'bg-amber-400 border-amber-300 animate-pulse',
-            )}
-            title={backendRuntime.detail}
-          />
-        </div>
-
-        <div
-          className={cn(
-            'hidden xl:flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
-            backendRuntime.isReady
-              ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
-              : backendRuntime.isUnavailable
-                ? 'border-red-500/25 bg-red-500/10 text-red-500'
-                : 'border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-300',
-          )}
-          title={backendRuntime.detail}
-        >
-          {backendRuntime.isReady ? (
-            <CheckCircle2 className="h-3.5 w-3.5" />
-          ) : backendRuntime.isUnavailable ? (
-            <AlertCircle className="h-3.5 w-3.5" />
-          ) : (
-            <PlugZap className="h-3.5 w-3.5 animate-pulse" />
-          )}
-          <span>{backendRuntime.label}</span>
-        </div>
-
-        <nav className="flex items-center gap-4 overflow-x-auto custom-scrollbar flex-1 px-6 h-full" style={NO_DRAG_REGION_STYLE}>
-          {[
-          { id: 'encrypt', icon: Lock, label: 'Encode' },
-          { id: 'decrypt', icon: Unlock, label: 'Decode' },
-          { id: 'rekey', icon: RotateCw, label: 'Rekey' },
-          { id: 'timecapsule', icon: Clock, label: 'Time-Capsule' },
-          { id: 'about', icon: Info, label: 'About' },
-        ].map((tab) => (
-            <motion.button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as Tab)}
+      <div className="sticky top-0 z-50 drag-region border-b border-av-border/30 bg-av-surface/46 backdrop-blur-3xl shadow-[0_8px_32px_rgba(0,0,0,0.06)] transition-all duration-300">
+        <div className="flex min-h-16 items-center gap-4 px-4 sm:px-5 lg:px-6">
+          <div className="flex min-w-0 items-center gap-3 pr-2 sm:pr-3 lg:pr-5 lg:border-r lg:border-av-border/20">
+            <BrandLockup compact />
+            <span
               className={cn(
-                'flex items-center gap-2 h-full font-medium transition-all relative shrink-0 group',
-                activeTab === tab.id
-                  ? 'text-av-main'
-                  : 'text-av-muted hover:text-av-main',
+                'h-2.5 w-2.5 shrink-0 rounded-full border',
+                backendRuntime.isReady
+                  ? 'bg-emerald-500 border-emerald-400'
+                  : backendRuntime.isUnavailable
+                    ? 'bg-red-500 border-red-400'
+                    : 'bg-amber-400 border-amber-300 animate-pulse',
               )}
-            >
-              <div className={cn(
-                'p-1.5 rounded-lg transition-colors',
-                activeTab === tab.id ? 'bg-av-main/10' : 'group-hover:bg-av-border/20',
-              )}>
-                <tab.icon className="w-4 h-4" />
-              </div>
-              <span className="text-sm font-medium tracking-wide">{tab.label}</span>
-
-              {activeTab === tab.id && (
-                <motion.div
-                  layoutId="activeNavTab"
-                  className="absolute bottom-0 left-0 right-0 h-[3px] bg-av-accent rounded-t-full"
-                  transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                />
-              )}
-            </motion.button>
-          ))}
-        </nav>
-
-        <div className="flex items-center h-full shrink-0" style={NO_DRAG_REGION_STYLE}>
-          <div className="flex items-center gap-3 pr-4">
-            {isAavritConnected ? (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setShowAuthModal(true)}
-                  className="flex items-center gap-3 px-3 py-1.5 bg-av-border/10 dark:bg-black/10 backdrop-blur-md rounded-xl border border-av-border/30 shadow-inner transition-colors hover:bg-av-border/20 dark:hover:bg-white/10"
-                  title="Manage Aavrit Connection"
-                >
-                  <div className="w-7 h-7 rounded-lg bg-emerald-500/15 flex items-center justify-center shadow-md border border-emerald-500/30">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                  </div>
-                  <div className="text-left hidden lg:block">
-                    <div className="text-sm font-medium tracking-wide text-av-main leading-tight">
-                      {aavritMode === 'private' ? (user?.name || 'Aavrit Connected') : 'Aavrit Connected'}
-                    </div>
-                    <div className="text-[11px] text-av-muted leading-tight">
-                      {aavritMode === 'private' ? 'Private session active' : 'Public server ready'}
-                    </div>
-                  </div>
-                </button>
-                {aavritMode === 'private' && (
-                  <motion.button
-                    type="button"
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={logout}
-                    className="flex items-center justify-center w-9 h-9 bg-av-border/10 dark:bg-black/10 backdrop-blur-md border border-av-border/30 text-av-muted rounded-xl hover:text-red-400 hover:bg-av-border/20 transition-all shadow-sm"
-                    title="Disconnect Aavrit"
-                  >
-                    <LogOut className="w-4 h-4" />
-                  </motion.button>
-                )}
-              </div>
-            ) : (
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setShowAuthModal(true)}
-                className="flex items-center gap-2 px-3 py-1.5 bg-av-main text-av-surface rounded-lg text-sm font-medium tracking-wide hover:opacity-90 transition-colors shadow-sm"
-              >
-                {aavritServerUrl ? <PlugZap className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
-                {aavritServerUrl && aavritMode === 'private' ? 'Reconnect Aavrit' : 'Connect Aavrit'}
-              </motion.button>
-            )}
-
-            <motion.button
-              whileHover={{ scale: 1.05, rotate: 15 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => setShowSecuritySettings(true)}
-              className="flex items-center justify-center w-9 h-9 bg-av-surface/40 backdrop-blur-md border border-av-border/30 text-av-muted rounded-xl hover:bg-av-border/50 hover:text-av-main transition-all shadow-sm"
-              title="Global Settings"
-            >
-              <Settings className="w-4 h-4" />
-            </motion.button>
+              title={backendRuntime.detail}
+            />
           </div>
 
-          <div className="flex h-full border-l border-av-border/20 pl-1">
-            <button
-              onClick={() => window.electron?.minimizeWindow()}
-              className="w-12 h-full flex items-center justify-center text-av-muted hover:bg-av-border/15 dark:hover:bg-white/10 transition-colors"
-              title="Minimize"
-            >
-              <Minus className="w-4 h-4" strokeWidth={1.5} />
-            </button>
-            <button
-              onClick={() => window.electron?.maximizeWindow()}
-              className="w-12 h-full flex items-center justify-center text-av-muted hover:bg-av-border/15 dark:hover:bg-white/10 transition-colors"
-              title="Maximize"
-            >
-              <Square className="w-4 h-4" strokeWidth={1.5} />
-            </button>
-            <button
-              onClick={() => window.electron?.closeWindow()}
-              className="w-12 h-full flex items-center justify-center text-av-muted hover:bg-red-500 hover:text-white transition-colors"
-              title="Close"
-            >
-              <X className="w-4 h-4 text-inherit" strokeWidth={1.5} />
-            </button>
+          <nav className="flex h-16 flex-1 items-center gap-3 overflow-x-auto custom-scrollbar px-1 sm:px-2" style={NO_DRAG_REGION_STYLE}>
+            {[
+              { id: 'encrypt', icon: Lock, label: 'Encode' },
+              { id: 'decrypt', icon: Unlock, label: 'Decode' },
+              { id: 'rekey', icon: RotateCw, label: 'Rekey' },
+              { id: 'timecapsule', icon: Clock, label: 'Time-Capsule' },
+              { id: 'about', icon: Info, label: 'About' },
+            ].map((tab) => (
+              <motion.button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as Tab)}
+                className={cn(
+                  'relative flex h-full shrink-0 items-center gap-2 font-medium transition-all group',
+                  activeTab === tab.id ? 'text-av-main' : 'text-av-muted hover:text-av-main',
+                )}
+              >
+                <div
+                  className={cn(
+                    'rounded-lg p-1.5 transition-colors',
+                    activeTab === tab.id ? 'bg-av-main/10' : 'group-hover:bg-av-border/20',
+                  )}
+                >
+                  <tab.icon className="w-4 h-4" />
+                </div>
+                <span className="text-sm font-medium tracking-wide">{tab.label}</span>
+
+                {activeTab === tab.id && (
+                  <motion.div
+                    layoutId="activeNavTab"
+                    className="absolute bottom-0 left-0 right-0 h-[3px] rounded-t-full bg-av-accent"
+                    transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                  />
+                )}
+              </motion.button>
+            ))}
+          </nav>
+
+          <div className="flex h-16 shrink-0 items-center" style={NO_DRAG_REGION_STYLE}>
+            <div className="flex items-center gap-2 sm:gap-3 pr-2 sm:pr-4">
+              {isAavritConnected ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowAuthModal(true)}
+                    className="flex items-center gap-3 rounded-xl border border-av-border/30 bg-av-border/10 px-3 py-1.5 shadow-inner backdrop-blur-md transition-colors hover:bg-av-border/20 dark:bg-black/10 dark:hover:bg-white/10"
+                    title="Manage Aavrit Connection"
+                  >
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/15 shadow-md">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                    </div>
+                    <div className="hidden text-left lg:block">
+                      <div className="text-sm font-medium leading-tight tracking-wide text-av-main">
+                        {aavritMode === 'private' ? (user?.name || 'Aavrit Connected') : 'Aavrit Connected'}
+                      </div>
+                      <div className="text-[11px] leading-tight text-av-muted">
+                        {aavritMode === 'private' ? 'Private session active' : 'Public server ready'}
+                      </div>
+                    </div>
+                  </button>
+                  {aavritMode === 'private' && (
+                    <motion.button
+                      type="button"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={logout}
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/30 bg-av-border/10 text-av-muted shadow-sm backdrop-blur-md transition-all hover:bg-av-border/20 hover:text-red-400 dark:bg-black/10"
+                      title="Disconnect Aavrit"
+                    >
+                      <LogOut className="w-4 h-4" />
+                    </motion.button>
+                  )}
+                </div>
+              ) : (
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => setShowAuthModal(true)}
+                  className="flex items-center gap-2 rounded-lg bg-av-main px-3 py-1.5 text-sm font-medium tracking-wide text-av-surface shadow-sm transition-colors hover:opacity-90"
+                >
+                  {aavritServerUrl ? <PlugZap className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
+                  {aavritServerUrl && aavritMode === 'private' ? 'Reconnect Aavrit' : 'Connect Aavrit'}
+                </motion.button>
+              )}
+
+              <motion.button
+                whileHover={{ scale: 1.05, rotate: 15 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setShowSecuritySettings(true)}
+                className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/30 bg-av-surface/40 text-av-muted shadow-sm backdrop-blur-md transition-all hover:bg-av-border/50 hover:text-av-main"
+                title="Global Settings"
+              >
+                <Settings className="w-4 h-4" />
+              </motion.button>
+            </div>
+
+            <div className="flex h-16 border-l border-av-border/20 pl-1">
+              <button
+                onClick={() => window.electron?.minimizeWindow()}
+                className="flex h-full w-11 items-center justify-center text-av-muted transition-colors hover:bg-av-border/15 dark:hover:bg-white/10 sm:w-12"
+                title="Minimize"
+              >
+                <Minus className="w-4 h-4" strokeWidth={1.5} />
+              </button>
+              <button
+                onClick={() => window.electron?.maximizeWindow()}
+                className="flex h-full w-11 items-center justify-center text-av-muted transition-colors hover:bg-av-border/15 dark:hover:bg-white/10 sm:w-12"
+                title="Maximize"
+              >
+                <Square className="w-4 h-4" strokeWidth={1.5} />
+              </button>
+              <button
+                onClick={() => window.electron?.closeWindow()}
+                className="flex h-full w-11 items-center justify-center text-av-muted transition-colors hover:bg-red-500 hover:text-white sm:w-12"
+                title="Close"
+              >
+                <X className="w-4 h-4 text-inherit" strokeWidth={1.5} />
+              </button>
+            </div>
           </div>
         </div>
       </div>

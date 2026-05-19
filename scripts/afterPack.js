@@ -1,6 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { stampExecutableMetadata } = require('./windowsMetadata');
+const { BRANDING, stampExecutableMetadata } = require('./windowsMetadata');
 
 async function removeIfExists(targetPath) {
   await fs.rm(targetPath, { recursive: true, force: true });
@@ -126,7 +126,7 @@ module.exports = async function afterPack(context) {
   await removeNestedDirectories(runtimeSitePackagesRoot, new Set(['tests', 'testing']));
 
   if (context.electronPlatformName === 'win32') {
-    const executablePath = path.join(context.appOutDir, 'RookDuel Avikal.exe');
+    const executablePath = path.join(context.appOutDir, BRANDING.originalFilename);
     await stampExecutableMetadata(executablePath, context.packager.appInfo.version);
   }
 };

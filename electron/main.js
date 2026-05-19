@@ -3,7 +3,7 @@
  * Manages window, Python backend, and IPC
  */
 
-const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, Menu, Tray } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -22,6 +22,7 @@ const MAX_SAVED_TEXT_BYTES = 5 * 1024 * 1024;
 
 let mainWindow;
 let pythonProcess;
+let tray = null;
 let pendingLaunchAction = parseLaunchAction(process.argv);
 let isQuitting = false;
 let backendHost = DEFAULT_BACKEND_HOST;
@@ -340,10 +341,34 @@ function parseLaunchAction(argv = []) {
 
 function focusMainWindow() {
   if (!mainWindow) return;
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
   }
   mainWindow.focus();
+}
+
+function showMainWindow() {
+  if (!mainWindow) {
+    void createWindow();
+    return;
+  }
+
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.focus();
+}
+
+function hideMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide();
+  }
 }
 
 function dispatchLaunchAction(action) {
@@ -363,6 +388,48 @@ function getAppIconPath() {
   return isDev
     ? path.join(__dirname, '../assets', iconFile)
     : path.join(process.resourcesPath, 'assets', iconFile);
+}
+
+function createTray() {
+  if (tray || process.platform !== 'win32') {
+    return;
+  }
+
+  tray = new Tray(getAppIconPath());
+  tray.setToolTip('RookDuel Avikal Beta');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Open Avikal',
+        click: () => {
+          showMainWindow();
+        },
+      },
+      {
+        type: 'separator',
+      },
+      {
+        label: 'Quit Avikal',
+        click: () => {
+          app.quit();
+        },
+      },
+    ]),
+  );
+
+  tray.on('click', () => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) {
+      showMainWindow();
+      return;
+    }
+
+    if (mainWindow.isFocused()) {
+      hideMainWindow();
+      return;
+    }
+
+    focusMainWindow();
+  });
 }
 
 function getBackendRoot() {
@@ -389,6 +456,15 @@ function getPythonExecutable(backendRoot) {
     : path.join(runtimeRoot, 'bin', 'python');
 }
 
+function getPackagedBackendExecutable(backendRoot) {
+  if (isDev) {
+    return null;
+  }
+  return process.platform === 'win32'
+    ? path.join(backendRoot, 'avikal-backend.exe')
+    : path.join(backendRoot, 'avikal-backend');
+}
+
 const gotTheLock = app.requestSingleInstanceLock()
 
 if (!gotTheLock) {
@@ -411,18 +487,28 @@ function startPythonBackend() {
 
   const backendRoot = getBackendRoot();
   const runtimeRoot = getPythonRuntimeRoot(backendRoot);
+  const packagedBackendExecutable = getPackagedBackendExecutable(backendRoot);
+  const usePackagedBackend = !isDev && packagedBackendExecutable && fs.existsSync(packagedBackendExecutable);
   const pythonScript = path.join(backendRoot, 'api_server.py');
   const pythonExecutable = getPythonExecutable(backendRoot);
+  let backendCommand = packagedBackendExecutable;
+  let backendArgs = [];
 
-  if (!fs.existsSync(pythonExecutable)) {
-    throw new Error(`Python runtime not found: ${pythonExecutable}`);
-  }
+  if (usePackagedBackend) {
+    console.log(`Starting packaged backend with: ${packagedBackendExecutable}`);
+  } else {
+    if (!fs.existsSync(pythonExecutable)) {
+      throw new Error(`Python runtime not found: ${pythonExecutable}`);
+    }
 
-  if (!fs.existsSync(pythonScript)) {
-    throw new Error(`Backend entrypoint not found: ${pythonScript}`);
+    if (!fs.existsSync(pythonScript)) {
+      throw new Error(`Backend entrypoint not found: ${pythonScript}`);
+    }
+
+    console.log(`Starting Python backend with: ${pythonExecutable}`);
+    backendCommand = pythonExecutable;
+    backendArgs = [pythonScript];
   }
-  
-  console.log(`Starting Python backend with: ${pythonExecutable}`);
   resetBackendStartupState();
 
   const pythonEnv = {
@@ -437,9 +523,10 @@ function startPythonBackend() {
     // using Electron's bundled Node.js runtime — no external Node.js installation needed.
     // This is the official Electron-documented pattern used by VS Code, Cursor, etc.
     AVIKAL_ELECTRON_EXEC: process.execPath,
+    AVIKAL_PQC_TEMP_DIR: path.join(app.getPath('userData'), 'pqc-work'),
   };
 
-  if (!isDev) {
+  if (!isDev && !usePackagedBackend) {
     pythonEnv.AVIKAL_USER_DATA_DIR = app.getPath('userData');
     pythonEnv.PYTHONHOME = runtimeRoot;
     pythonEnv.PYTHONPATH = [
@@ -449,11 +536,16 @@ function startPythonBackend() {
     ].join(path.delimiter);
     pythonEnv.PYTHONNOUSERSITE = '1';
   }
-  
-  pythonProcess = spawn(pythonExecutable, [pythonScript], {
+
+  if (!isDev && usePackagedBackend) {
+    pythonEnv.AVIKAL_USER_DATA_DIR = app.getPath('userData');
+  }
+
+  pythonProcess = spawn(backendCommand, backendArgs, {
     stdio: 'pipe',
     cwd: backendRoot,
-    env: pythonEnv
+    env: pythonEnv,
+    windowsHide: true
   });
 
   pythonProcess.on('error', (error) => {
@@ -511,6 +603,11 @@ async function cleanupBackendPreviewSessions() {
 
 // Create main window
 async function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    showMainWindow();
+    return;
+  }
+
   if (!pythonProcess || pythonProcess.exitCode !== null) {
     backendPort = await reserveBackendPort();
     backendAuthToken = crypto.randomBytes(32).toString('hex');
@@ -592,6 +689,15 @@ async function createWindow() {
   
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+
+  mainWindow.on('close', (event) => {
+    if (isQuitting) {
+      return;
+    }
+
+    event.preventDefault();
+    hideMainWindow();
   });
 }
 
@@ -745,7 +851,7 @@ ipcMain.handle('window:maximize', () => {
 });
 
 ipcMain.handle('window:close', () => {
-  mainWindow.close();
+  hideMainWindow();
 });
 
 ipcMain.handle('launchAction:getPending', async () => {
@@ -783,18 +889,22 @@ ipcMain.handle('safeStorage:isAvailable', async () => {
 })
 
 // App lifecycle
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createTray();
+  return createWindow();
+});
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // Keep the app and backend resident in the background until the user exits explicitly.
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+  if (BrowserWindow.getAllWindows().length === 0 || !mainWindow || mainWindow.isDestroyed()) {
+    void createWindow();
+    return;
   }
+
+  showMainWindow();
 });
 
 app.on('before-quit', (event) => {

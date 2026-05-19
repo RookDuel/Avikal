@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 _SRC_DIR = Path(__file__).resolve().parent / "src"
-if str(_SRC_DIR) not in sys.path:
+if not getattr(sys, "frozen", False) and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from avikal_backend.api.server import *  # noqa: F401,F403

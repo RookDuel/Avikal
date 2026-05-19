@@ -16,8 +16,8 @@ from .. import chess
 
 
 class ChessGenerator:
+
     """Encodes NUM into a single chess game with NESTED RECURSIVE variations."""
-    
     MAX_VAR_PLIES = 40  # Max plies for each variation branch (applies to all levels)
     MAX_MAINLINE_PLIES = 250  # Max plies for mainline (forces use of variations)
     VARIATIONS_PER_ROUND = 5  # Number of variations to add per position per round
