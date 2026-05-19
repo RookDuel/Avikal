@@ -19,8 +19,11 @@ $Sha256Path = Join-Path $DownloadsRoot "$ArchiveName.sha256"
 $ExtractedSource = Join-Path $SourceRoot "openssl-$Version"
 
 function Find-VcVars64 {
-  $candidates = @(
-    (if ($env:VSINSTALLDIR) { Join-Path $env:VSINSTALLDIR "VC\Auxiliary\Build\vcvars64.bat" } else { $null }),
+  $candidates = @()
+  if ($env:VSINSTALLDIR) {
+    $candidates += Join-Path $env:VSINSTALLDIR "VC\Auxiliary\Build\vcvars64.bat"
+  }
+  $candidates += @(
     "$env:ProgramFiles\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
     "$env:ProgramFiles\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
     "$env:ProgramFiles\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
