@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Tag of the GitHub release to attach installer assets to
+        description: Tag of the GitHub release to attach portable desktop assets to
         required: true
         type: string
 
@@ -14,10 +14,11 @@ permissions:
   contents: write
 
 jobs:
-  windows-installer:
+  windows-portable:
     runs-on: windows-latest
     env:
       OPENSSL_VERSION: "3.5.6"
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
     steps:
       - name: Checkout
@@ -98,10 +99,10 @@ jobs:
           echo '{"action":"seal","unlock_timestamp":9999999999,"key_b_base64":"dGVzdA=="}' | node backend/scripts/drand_timelock_helper.mjs
         shell: bash
 
-      - name: Build unsigned Windows installer
+      - name: Build unsigned Windows desktop package
         run: npm run package
 
-      - name: Verify packaged runtime and write release metadata
+      - name: Verify packaged runtime and prepare portable release assets
         shell: powershell
         run: |
           $packagedOpenSsl = Resolve-Path dist\win-unpacked\resources\backend-runtime\pqc\bin\openssl.exe
@@ -110,29 +111,48 @@ jobs:
             throw "Packaged OpenSSL runtime mismatch. Expected $env:AVIKAL_OPENSSL_VERSION but got $packagedVersion"
           }
 
-          $installer = Get-ChildItem -LiteralPath dist -Filter "*.exe" | Select-Object -First 1
-          if (-not $installer) {
-            throw "Installer .exe was not produced in dist."
+          $portableRoot = Resolve-Path dist\win-unpacked
+          $portableExe = Join-Path $portableRoot "RookDuel Avikal-beta.exe"
+          if (-not (Test-Path -LiteralPath $portableExe)) {
+            throw "Portable executable was not produced in dist\\win-unpacked."
           }
 
+          $releaseStem = "RookDuel-Avikal-beta-windows-portable-x64"
+          $archivePath = Join-Path (Resolve-Path dist) "$releaseStem.zip"
+          if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force
+          }
+
+          Compress-Archive -Path (Join-Path $portableRoot "*") -DestinationPath $archivePath -CompressionLevel Optimal
+
+          $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hashFilePath = "$archivePath.sha256"
+          "$archiveHash *$(Split-Path -Leaf $archivePath)" | Set-Content -LiteralPath $hashFilePath -NoNewline
+
           $metadata = [ordered]@{
-            product_version = '${{ github.ref_name }}'
-            installer_name = $installer.Name
+            product_version = $env:RELEASE_TAG
+            portable_archive_name = [System.IO.Path]::GetFileName($archivePath)
+            portable_executable_name = [System.IO.Path]::GetFileName($portableExe)
+            portable_archive_sha256 = $archiveHash
             openssl_runtime_version = $env:AVIKAL_OPENSSL_VERSION
             openssl_runtime_version_text = $packagedVersion
           }
           $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json
 
-      - name: Upload installer artifacts to workflow
+      - name: Upload portable desktop artifacts to workflow
         uses: actions/upload-artifact@v4
         with:
-          name: avikal-windows-installer
+          name: avikal-windows-portable
           path: |
-            dist/*.exe
+            dist/*portable-x64.zip
+            dist/*portable-x64.zip.sha256
+            dist/avikal-release-metadata.json
 
-      - name: Upload installer to GitHub Release
+      - name: Upload portable desktop bundle to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            dist/*.exe
+            dist/*portable-x64.zip
+            dist/*portable-x64.zip.sha256
+            dist/avikal-release-metadata.json
