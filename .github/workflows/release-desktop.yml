@@ -111,12 +111,18 @@ jobs:
         shell: powershell
         run: |
           $cliInstallerExe = (Resolve-Path "dist\RookDuel Avikal CLI-beta.exe").Path
-          & $cliInstallerExe /S
-          if ($LASTEXITCODE -ne 0) {
-            throw "CLI installer failed during smoke test."
+          $cliInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel Avikal CLI"
+          & $cliInstallerExe /S "/D=$cliInstallDir"
+          $installerExitCode = $LASTEXITCODE
+          Write-Host "CLI installer exit code: $installerExitCode"
+          if (Test-Path -LiteralPath $cliInstallDir) {
+            Get-ChildItem -LiteralPath $cliInstallDir -Force -Recurse -ErrorAction SilentlyContinue | Select-Object -First 80 FullName,Length | Format-Table -AutoSize
+          }
+          if ($installerExitCode -ne 0) {
+            throw "CLI installer failed during smoke test with exit code $installerExitCode."
           }
 
-          $cliLauncher = Join-Path $env:LOCALAPPDATA "Programs\RookDuel Avikal CLI\avikal.cmd"
+          $cliLauncher = Join-Path $cliInstallDir "avikal.cmd"
           if (-not (Test-Path -LiteralPath $cliLauncher)) {
             throw "CLI launcher was not installed: $cliLauncher"
           }
