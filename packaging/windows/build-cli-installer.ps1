@@ -23,6 +23,25 @@ function Copy-RequiredDirectory {
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($hashBytes) -replace "-", "").ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $Version = Get-ProjectVersion -ProjectRoot $projectRoot -ExplicitVersion $Version
 
@@ -181,7 +200,7 @@ public static class AvikalCliInstaller
         $payloadStream.Dispose()
     }
 
-    $hash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-Sha256Hex -Path $installerPath
     "$hash *$(Split-Path -Leaf $installerPath)" | Set-Content -LiteralPath "$installerPath.sha256" -NoNewline
 
     $metadata = [ordered]@{
