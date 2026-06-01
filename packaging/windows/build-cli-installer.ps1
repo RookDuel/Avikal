@@ -134,16 +134,14 @@ Section "Install"
   File /r "$payloadRootForNsis\*.*"
 
   DetailPrint "Installing shared Avikal core..."
-  nsExec::ExecToLog '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-shared-core.ps1" -SourceRoot "`$INSTDIR\payload" -Version "$versionForNsis"'
-  Pop `$0
+  ExecWait '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-shared-core.ps1" -SourceRoot "`$INSTDIR\payload" -Version "$versionForNsis"' `$0
   `${If} `$0 != "0"
     MessageBox MB_ICONSTOP "Shared Avikal core installation failed."
     Abort
   `${EndIf}
 
   DetailPrint "Installing Avikal CLI launcher..."
-  nsExec::ExecToLog '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-cli-launcher.ps1" -Version "$versionForNsis"'
-  Pop `$0
+  ExecWait '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-cli-launcher.ps1" -Version "$versionForNsis"' `$0
   `${If} `$0 != "0"
     MessageBox MB_ICONSTOP "Avikal CLI launcher installation failed."
     Abort
