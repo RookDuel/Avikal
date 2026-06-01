@@ -1,10 +1,4 @@
-"""
-OpenSSL-backed PQC provider boundary for Avikal.
-
-The archive pipeline intentionally talks to PQC through this module only. The
-production build bundles an OpenSSL 3.5+ runtime and this module invokes its
-openssl.exe with strict argument lists, no shell, isolated temporary files, and
-explicit suite validation. If the runtime is absent, PQC mode fails closed.
+"""OpenSSL-backed PQC provider boundary for Avikal.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -71,6 +65,10 @@ class PQCProviderError(RuntimeError):
     """Raised when OpenSSL returns malformed or failed output."""
 
 
+def _openssl_binary_name(platform_name: str | None = None) -> str:
+    return OPENSSL_EXE_NAME if (platform_name or sys.platform) == "win32" else "openssl"
+
+
 def _b64encode(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
@@ -94,6 +92,10 @@ def _backend_root() -> Path:
 
 def _project_root() -> Path:
     return runtime_project_root()
+
+
+def _package_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def _pqc_temp_root() -> Path:
@@ -120,35 +122,49 @@ def _pqc_work_dir():
 
 def _candidate_openssl_paths() -> list[Path]:
     candidates: list[Path] = []
+    openssl_binary_name = _openssl_binary_name()
 
     env_path = os.environ.get("AVIKAL_OPENSSL_EXEC")
     if env_path:
         candidates.append(Path(env_path))
 
+    runtime_dir = os.environ.get("AVIKAL_PQC_RUNTIME_DIR")
+    if runtime_dir:
+        runtime_root = Path(runtime_dir)
+        candidates.extend(
+            [
+                runtime_root / "bin" / openssl_binary_name,
+                runtime_root / openssl_binary_name,
+            ]
+        )
+
     executable_dir = Path(sys.executable).resolve().parent
     candidates.extend(
         [
-            executable_dir / "pqc" / OPENSSL_EXE_NAME,
-            executable_dir / "pqc" / "bin" / OPENSSL_EXE_NAME,
-            executable_dir / OPENSSL_EXE_NAME,
-            executable_dir.parent / "pqc" / OPENSSL_EXE_NAME,
-            executable_dir.parent / "pqc" / "bin" / OPENSSL_EXE_NAME,
-            executable_dir.parent / "backend-runtime" / "pqc" / OPENSSL_EXE_NAME,
-            executable_dir.parent / "backend-runtime" / "pqc" / "bin" / OPENSSL_EXE_NAME,
+            executable_dir / "pqc" / openssl_binary_name,
+            executable_dir / "pqc" / "bin" / openssl_binary_name,
+            executable_dir / openssl_binary_name,
+            executable_dir.parent / "pqc" / openssl_binary_name,
+            executable_dir.parent / "pqc" / "bin" / openssl_binary_name,
+            executable_dir.parent / "backend-runtime" / "pqc" / openssl_binary_name,
+            executable_dir.parent / "backend-runtime" / "pqc" / "bin" / openssl_binary_name,
         ]
     )
 
     project_root = _project_root()
+    package_root = _package_root()
     candidates.extend(
         [
-            project_root / "runtime" / "pqc" / OPENSSL_EXE_NAME,
-            project_root / "runtime" / "pqc" / "bin" / OPENSSL_EXE_NAME,
-            project_root / ".app-build" / "backend-runtime" / "pqc" / OPENSSL_EXE_NAME,
-            project_root / ".app-build" / "backend-runtime" / "pqc" / "bin" / OPENSSL_EXE_NAME,
-            _backend_root() / "runtime" / "pqc" / OPENSSL_EXE_NAME,
-            _backend_root() / "runtime" / "pqc" / "bin" / OPENSSL_EXE_NAME,
-            _backend_root() / "backend-runtime" / "pqc" / OPENSSL_EXE_NAME,
-            _backend_root() / "backend-runtime" / "pqc" / "bin" / OPENSSL_EXE_NAME,
+            package_root / "runtime" / "pqc" / openssl_binary_name,
+            package_root / "runtime" / "pqc" / "bin" / openssl_binary_name,
+            project_root / "runtime" / "pqc" / openssl_binary_name,
+            project_root / "runtime" / "pqc" / "bin" / openssl_binary_name,
+            project_root / ".app-build" / "backend-runtime" / "pqc" / openssl_binary_name,
+            project_root / ".app-build" / "backend-runtime" / "pqc" / "bin" / openssl_binary_name,
+            _backend_root() / "runtime" / "pqc" / openssl_binary_name,
+            _backend_root() / "runtime" / "pqc" / "bin" / openssl_binary_name,
+            _backend_root() / "backend-runtime" / "pqc" / openssl_binary_name,
+            _backend_root() / "backend-runtime" / "pqc" / "bin" / openssl_binary_name,
         ]
     )
     return candidates
@@ -224,7 +240,8 @@ def provider_status() -> dict[str, Any]:
             "suite": PQC_SUITE,
             "reason": (
                 "OpenSSL PQC provider is unavailable. Bundle OpenSSL 3.5+ "
-                f"{OPENSSL_EXE_NAME} under runtime/pqc or set AVIKAL_OPENSSL_EXEC."
+                f"{_openssl_binary_name()} under runtime/pqc or set AVIKAL_OPENSSL_EXEC "
+                "or AVIKAL_PQC_RUNTIME_DIR."
             ),
         }
 

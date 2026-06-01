@@ -1,6 +1,6 @@
 {
   "name": "avikal-desktop",
-  "version": "1.0.3-beta",
+  "version": "1.0.4-beta",
   "description": "RookDuel Avikal - Quantum-Resistant File Encryption",
   "main": "electron/main.js",
   "author": "RookDuel",
@@ -8,25 +8,38 @@
   "homepage": "https://avikal.rookduel.tech",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:electron\"",
+    "dev": "npm run dev:reset && concurrently \"npm run dev:frontend\" \"npm run dev:electron\"",
     "dev:frontend": "cd frontend && npm run dev",
-    "dev:electron": "wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .",
+    "dev:electron": "npm run build:native:quick && wait-on http://localhost:5173 && node scripts\\devElectron.js source",
+    "dev:electron:source": "npm run dev:electron",
+    "dev:electron:packaged": "npm run build:runtime && electron-builder --win --dir --publish never && wait-on http://localhost:5173 && node scripts\\devElectron.js packaged",
+    "dev:reset": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\cleanup-dev-processes.ps1",
+    "build:native:quick": "backend\\venv\\Scripts\\python.exe backend\\scripts\\build_native_extension.py",
     "build": "npm run build:frontend && npm run build:electron",
     "build:frontend": "cd frontend && npm run build",
     "build:openssl": "powershell -ExecutionPolicy Bypass -File scripts\\build_openssl_runtime.ps1",
     "install:pqc-runtime": "powershell -ExecutionPolicy Bypass -File scripts\\install_pqc_runtime.ps1",
-    "build:runtime": "backend\\venv\\Scripts\\python.exe scripts\\prepare_backend_runtime.py",
+    "build:native": "backend\\venv\\Scripts\\python.exe -m pip install -r backend\\requirements-build.txt && backend\\venv\\Scripts\\python.exe backend\\scripts\\build_native_extension.py",
+    "build:runtime": "backend\\venv\\Scripts\\python.exe -m pip install -r backend\\requirements-build.txt && backend\\venv\\Scripts\\python.exe scripts\\prepare_backend_runtime.py",
     "build:electron": "npm run build:runtime && electron-builder",
     "start": "electron .",
     "package": "npm run build:frontend && npm run build:runtime && electron-builder --win --publish never",
-    "package:portable": "npm run build:frontend && npm run build:runtime && electron-builder --win portable --publish never"
+    "package:windows": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\build-desktop.ps1",
+    "package:windows:core": "npm run build:runtime && powershell -ExecutionPolicy Bypass -File packaging\\windows\\install-shared-core.ps1",
+    "package:windows:gui": "npm run package:windows",
+    "verify:windows:core": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\verify-shared-core.ps1",
+    "verify:windows:gui": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\verify-shared-core.ps1",
+    "package:windows:cli": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\build-cli-installer.ps1",
+    "verify:windows:cli": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\verify-shared-core.ps1",
+    "package:cli": "powershell -ExecutionPolicy Bypass -File packaging\\cli\\build-wheel.ps1",
+    "verify:cli": "powershell -ExecutionPolicy Bypass -File packaging\\cli\\verify-wheel.ps1"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
     "electron": "^41.0.2",
     "electron-builder": "^26.8.1",
-    "wait-on": "^7.2.0"
+    "wait-on": "^9.0.10"
   },
   "build": {
     "appId": "tech.rookduel.avikal",
@@ -127,7 +140,10 @@
     }
   },
   "overrides": {
-    "@xmldom/xmldom": "0.8.13",
-    "follow-redirects": "1.16.0"
+    "@xmldom/xmldom": "0.9.10",
+    "axios": "1.16.1",
+    "brace-expansion": "5.0.6",
+    "follow-redirects": "1.16.0",
+    "ip-address": "10.2.0"
   }
 }

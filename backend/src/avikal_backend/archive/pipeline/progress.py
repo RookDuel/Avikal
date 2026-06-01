@@ -18,6 +18,25 @@ PROGRESS_PREFIX = "__AVIKAL_PROGRESS__"
 _thread_state = threading.local()
 
 
+class OperationCancelled(Exception):
+    """Raised when a user-cancelled archive operation should stop promptly."""
+
+
+class CancellationToken:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def throw_if_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise OperationCancelled("Operation cancelled by user.")
+
+
 class ProgressTracker:
     def __init__(self, operation: str, stages: list[tuple[str, float]], *, file_size: int | None = None):
         self.operation = operation
@@ -55,10 +74,13 @@ class ProgressTracker:
         compression_ratio: float | None = None,
         force: bool = False,
     ) -> None:
+        check_cancelled()
         stage_progress = max(0.0, min(1.0, float(stage_progress)))
         offset = self.stage_offsets.get(stage, 0.0)
         weight = dict(self.stages).get(stage, 0.0)
         fraction = max(0.0, min(1.0, offset + (weight * stage_progress)))
+        if self.last_emit_percent >= 0 and (fraction * 100) < self.last_emit_percent:
+            return
         elapsed = time.perf_counter() - self.start_time
         eta_seconds = None
         if fraction > 0.01:
@@ -109,6 +131,16 @@ def get_progress_tracker() -> ProgressTracker | None:
     return getattr(_thread_state, "progress_tracker", None)
 
 
+def get_cancellation_token() -> CancellationToken | None:
+    return getattr(_thread_state, "cancellation_token", None)
+
+
+def check_cancelled() -> None:
+    token = get_cancellation_token()
+    if token is not None:
+        token.throw_if_cancelled()
+
+
 @contextmanager
 def bind_progress_tracker(tracker: ProgressTracker):
     previous = get_progress_tracker()
@@ -117,3 +149,13 @@ def bind_progress_tracker(tracker: ProgressTracker):
         yield tracker
     finally:
         _thread_state.progress_tracker = previous
+
+
+@contextmanager
+def bind_cancellation_token(token: CancellationToken | None):
+    previous = get_cancellation_token()
+    _thread_state.cancellation_token = token
+    try:
+        yield token
+    finally:
+        _thread_state.cancellation_token = previous

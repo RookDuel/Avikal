@@ -1,6 +1,6 @@
 import type { BackendRuntimeStatus } from '../types/electron'
 
-const FALLBACK_BACKEND_BASE_URL = 'http://127.0.0.1:5000'
+const FALLBACK_BACKEND_BASE_URL = 'stdio://avikal-core'
 
 const DEFAULT_BROWSER_STATUS: BackendRuntimeStatus = {
   state: 'ready',
@@ -29,14 +29,14 @@ export async function waitForBackendReady(timeoutMs = 60_000): Promise<void> {
   const initialStatus = await getBackendStatus()
   if (initialStatus.state === 'ready') return
   if (initialStatus.state === 'error') {
-    throw new Error(initialStatus.error || 'Local backend failed to start')
+    throw new Error(initialStatus.error || 'Avikal core failed to start')
   }
 
   await new Promise<void>((resolve, reject) => {
     let unsubscribe: (() => void) | undefined
     const timer = window.setTimeout(() => {
       unsubscribe?.()
-      reject(new Error(`Local backend was not ready after ${Math.round(timeoutMs / 1000)}s`))
+      reject(new Error(`Avikal core was not ready after ${Math.round(timeoutMs / 1000)}s`))
     }, timeoutMs)
 
     const handleStatus = (status: BackendRuntimeStatus) => {
@@ -47,7 +47,7 @@ export async function waitForBackendReady(timeoutMs = 60_000): Promise<void> {
       } else if (status.state === 'error' || status.state === 'stopped') {
         window.clearTimeout(timer)
         unsubscribe?.()
-        reject(new Error(status.error || 'Local backend is unavailable'))
+        reject(new Error(status.error || 'Avikal core is unavailable'))
       }
     }
 

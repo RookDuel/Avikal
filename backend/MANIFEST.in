@@ -4,6 +4,8 @@ include requirements.txt
 include requirements-cli.txt
 include setup.py
 exclude avikal.cmd
+recursive-include native *.toml
+recursive-include native *.rs
 recursive-include src/avikal_backend/wordlists *.txt
 prune scripts
 prune tests

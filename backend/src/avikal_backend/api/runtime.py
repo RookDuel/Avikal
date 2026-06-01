@@ -20,7 +20,7 @@ class RuntimePaths:
 
 
 def configure_windows_stdio() -> None:
-    if sys.platform == "win32" and "pytest" not in sys.modules:
+    if sys.platform == "win32" and "pytest" not in sys.modules and os.getenv("AVIKAL_STDIO_RPC") != "1":
         import codecs
 
         sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())

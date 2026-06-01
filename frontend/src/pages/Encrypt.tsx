@@ -6,24 +6,22 @@ import {
   Fingerprint, ShieldAlert, File, Folder
 } from 'lucide-react'
 import { api } from '../lib/api'
-import { formatEta, parseBackendProgressChunk } from '../lib/backendProgress'
+import { parseBackendProgressChunk } from '../lib/backendProgress'
 import { getErrorMessage } from '../lib/errors'
 import { getDroppedPaths } from '../lib/electron'
 import { toast } from 'sonner'
 import { useProgress } from '../hooks/useProgress'
-import FileTree, { type FileNode } from '../components/FileTree'
+import FileTree, { pruneTreeByPaths, type FileNode } from '../components/FileTree'
 import type { PendingExternalLaunchAction } from '../lib/externalLaunch'
 import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
+import { getDefaultPqcStorageMode, USER_PREFERENCES_UPDATED_EVENT, type UserPreferences } from '../lib/preferences'
+import ProcessingOverlay from '../components/ProcessingOverlay'
+
+type PqcStorageMode = 'embedded' | 'external'
 
 function deriveSiblingKeyfilePath(archivePath: string): string {
   return archivePath.replace(/(\.avk)?$/i, '.avkkey')
-}
-
-function deriveDefaultKeyfileName(files: string[]): string {
-  const first = files[0]?.split(/[/\\]/).pop() || 'avikal-archive'
-  const base = first.replace(/\.[^.]+$/, '')
-  return `${base || 'avikal-archive'}.avkkey`
 }
 
 interface EncryptProps {
@@ -33,6 +31,8 @@ interface EncryptProps {
 export default function Encrypt({ externalLaunchAction }: EncryptProps) {
   const [files, setFiles] = useState<string[]>([])
   const [treeNodes, setTreeNodes] = useState<FileNode[]>([])
+  const [selectedTreePaths, setSelectedTreePaths] = useState<Set<string>>(() => new Set())
+  const [excludedInputPaths, setExcludedInputPaths] = useState<string[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [passwordEnabled, setPasswordEnabled] = useState(true)
   const [keyphraseEnabled, setKeyphraseEnabled] = useState(false)
@@ -43,14 +43,27 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
   const [isEncrypted, setIsEncrypted] = useState(false)
   const [outputFilePath, setOutputFilePath] = useState('')
   const [createdPqcKeyfilePath, setCreatedPqcKeyfilePath] = useState('')
+  const [createdPqcStorageMode, setCreatedPqcStorageMode] = useState<PqcStorageMode>(() => getDefaultPqcStorageMode())
   const [searchQuery, setSearchQuery] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [pqcEnabled, setPqcEnabled] = useState(false)
+  const [pqcStorageMode, setPqcStorageMode] = useState<PqcStorageMode>(() => getDefaultPqcStorageMode())
   const [pqcKeyfilePath, setPqcKeyfilePath] = useState('')
+  const [pqcKeyfilePasswordEnabled, setPqcKeyfilePasswordEnabled] = useState(false)
+  const [pqcKeyfilePassword, setPqcKeyfilePassword] = useState('')
+  const [showPqcKeyfilePassword, setShowPqcKeyfilePassword] = useState(false)
+  const [pqcModeOverridden, setPqcModeOverridden] = useState(false)
   const progress = useProgress()
   const [isCopied, setIsCopied] = useState(false)
   const filesRef = useRef<string[]>([])
   const backendRuntime = useBackendRuntime()
+
+  const normalizeUiPath = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const isSameOrChildPath = (candidate: string, parent: string) => {
+    const candidatePath = normalizeUiPath(candidate)
+    const parentPath = normalizeUiPath(parent)
+    return candidatePath === parentPath || candidatePath.startsWith(`${parentPath}/`)
+  }
 
   const resetProtectionPanel = useCallback(() => {
     setPassword('')
@@ -60,12 +73,46 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
     setPasswordEnabled(true)
     setKeyphraseEnabled(false)
     setPqcEnabled(false)
+    setPqcStorageMode(getDefaultPqcStorageMode())
     setPqcKeyfilePath('')
+    setPqcKeyfilePasswordEnabled(false)
+    setPqcKeyfilePassword('')
+    setShowPqcKeyfilePassword(false)
+    setPqcModeOverridden(false)
   }, [])
 
   useEffect(() => {
     filesRef.current = files
   }, [files])
+
+  useEffect(() => {
+    if (!pqcEnabled || pqcStorageMode !== 'external') {
+      setPqcKeyfilePasswordEnabled(false)
+      setPqcKeyfilePassword('')
+      setShowPqcKeyfilePassword(false)
+    }
+  }, [pqcEnabled, pqcStorageMode])
+
+  useEffect(() => {
+    const applyDefault = (mode: PqcStorageMode) => {
+      setPqcStorageMode(current => pqcModeOverridden ? current : mode)
+    }
+
+    const onPreferencesUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<UserPreferences>).detail
+      const mode = detail?.archive_defaults?.pqc_storage_mode
+      if (mode === 'embedded' || mode === 'external') applyDefault(mode)
+    }
+
+    const onFocus = () => applyDefault(getDefaultPqcStorageMode())
+
+    window.addEventListener(USER_PREFERENCES_UPDATED_EVENT, onPreferencesUpdated)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.removeEventListener(USER_PREFERENCES_UPDATED_EVENT, onPreferencesUpdated)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [pqcModeOverridden])
 
   useEffect(() => {
     const unsubscribe = window.electron?.onBackendLog?.((message) => {
@@ -88,6 +135,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
   }, [loading, progress.status, progress.update])
 
   const isBoth = passwordEnabled && keyphraseEnabled
+  const isTrioProtection = isBoth && pqcEnabled
   const usePass = passwordEnabled
   const useKeyp = keyphraseEnabled
   const hasSecretLock = usePass || useKeyp
@@ -99,6 +147,17 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
   const hasNumber = /[0-9]/.test(password)
   const hasSpecial = /[^A-Za-z0-9]/.test(password)
   const isValidPassword = hasMinLen && hasUpper && hasLower && hasNumber && hasSpecial
+  const needsPqcKeyfilePassword = pqcEnabled && pqcStorageMode === 'external' && pqcKeyfilePasswordEnabled
+  const isValidPqcKeyfilePassword =
+    !needsPqcKeyfilePassword ||
+    (
+      pqcKeyfilePassword.length >= 12 &&
+      /[A-Z]/.test(pqcKeyfilePassword) &&
+      /[a-z]/.test(pqcKeyfilePassword) &&
+      /[0-9]/.test(pqcKeyfilePassword) &&
+      /[^A-Za-z0-9]/.test(pqcKeyfilePassword) &&
+      (!usePass || pqcKeyfilePassword !== password)
+    )
 
   const getStrength = (pass: string) => {
     if (!pass) return 0
@@ -150,6 +209,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
     }
 
     setFiles((prev) => [...prev, ...newPaths])
+    setSelectedTreePaths(new Set())
     newPaths.forEach((item) => {
       void scanAndAddPath(item)
     })
@@ -168,13 +228,8 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
     const dropped = getDroppedPaths(e.dataTransfer.files)
     const newPaths = dropped.filter(f => !files.includes(f))
     if (dropped.length - newPaths.length > 0) toast.error(`${dropped.length - newPaths.length} duplicate(s) skipped`)
-    if (newPaths.length > 0) {
-      setFiles(prev => [...prev, ...newPaths])
-      newPaths.forEach(p => {
-        void scanAndAddPath(p)
-      })
-    }
-  }, [files])
+    addPathsToSelection(newPaths)
+  }, [addPathsToSelection, files])
 
   // Browse FILES only (Windows-safe: openFile shows files)
   const handleBrowseFiles = async () => {
@@ -184,12 +239,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
       if (selected?.length) {
         const newPaths = selected.filter(f => !files.includes(f))
         if (selected.length - newPaths.length > 0) toast.error(`${selected.length - newPaths.length} duplicate(s) skipped`)
-        if (newPaths.length > 0) {
-          setFiles(prev => [...prev, ...newPaths])
-          newPaths.forEach(p => {
-            void scanAndAddPath(p)
-          })
-        }
+        addPathsToSelection(newPaths)
       }
     } catch (error) { console.error(error) }
   }
@@ -202,19 +252,51 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
       if (selected?.length) {
         const newPaths = selected.filter(f => !files.includes(f))
         if (selected.length - newPaths.length > 0) toast.error(`${selected.length - newPaths.length} duplicate(s) skipped`)
-        if (newPaths.length > 0) {
-          setFiles(prev => [...prev, ...newPaths])
-          newPaths.forEach(p => {
-            void scanAndAddPath(p)
-          })
-        }
+        addPathsToSelection(newPaths)
       }
     } catch (error) { console.error(error) }
   }
 
-  const handleRemoveRoot = (rootPath: string) => {
-    setFiles(prev => prev.filter(f => f !== rootPath))
-    setTreeNodes(prev => prev.filter(n => n.path !== rootPath))
+  const handleTreeSelectionChange = (paths: string[], selected: boolean) => {
+    setSelectedTreePaths(prev => {
+      const next = new Set(prev)
+      for (const path of paths) {
+        if (selected) next.add(path)
+        else next.delete(path)
+      }
+      return next
+    })
+  }
+
+  const handleRemoveTreePaths = (paths: string[]) => {
+    const removeSet = new Set(paths)
+    const removedRoots = files.filter(rootPath => removeSet.has(rootPath))
+    setFiles(prev => prev.filter(rootPath => !removeSet.has(rootPath)))
+    setTreeNodes(prev => pruneTreeByPaths(prev, removeSet))
+    setSelectedTreePaths(prev => {
+      const next = new Set(prev)
+      for (const path of paths) next.delete(path)
+      return next
+    })
+    const nestedExclusions = paths.filter(path =>
+      !files.includes(path)
+      && !removedRoots.some(rootPath => isSameOrChildPath(path, rootPath))
+    )
+    setExcludedInputPaths(prev => {
+      const next = prev.filter(existing =>
+        !removeSet.has(existing)
+        && !removedRoots.some(rootPath => isSameOrChildPath(existing, rootPath))
+      )
+      return Array.from(new Set([...next, ...nestedExclusions]))
+    })
+  }
+
+  const handleClearAllStagedInputs = () => {
+    setFiles([])
+    setTreeNodes([])
+    setSelectedTreePaths(new Set())
+    setExcludedInputPaths([])
+    setSearchQuery('')
   }
 
   const handleGenerateKeyphrase = async () => {
@@ -234,20 +316,12 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
     setTimeout(() => setIsCopied(false), 2000)
   }
 
-  const handleChoosePqcKeyfile = async () => {
-    const electron = window.electron
-    const selected = await electron?.saveFile({
-      defaultPath: pqcKeyfilePath || deriveDefaultKeyfileName(files),
-      filters: [{ name: 'RookDuel Avikal PQC Keyfile', extensions: ['avkkey'] }]
-    })
-    if (selected) setPqcKeyfilePath(selected)
-  }
-
   const keyphraseWordCount = keyphrase.trim().split(/\s+/).filter(Boolean).length
   const canEncrypt = backendRuntime.isReady && files.length > 0 && !loading &&
     (!pqcEnabled || hasSecretLock) &&
     (!usePass || isValidPassword) &&
-    (!useKeyp || keyphraseWordCount === 21)
+    (!useKeyp || keyphraseWordCount === 21) &&
+    isValidPqcKeyfilePassword
 
   const handleEncrypt = async () => {
     if (!canEncrypt) return
@@ -259,7 +333,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
     if (!outputFile) return
 
     let nextPqcKeyfilePath = ''
-    if (pqcEnabled) {
+    if (pqcEnabled && pqcStorageMode === 'external') {
       nextPqcKeyfilePath = pqcKeyfilePath
       if (!nextPqcKeyfilePath) {
         const selectedKeyfilePath = await electron?.saveFile({
@@ -284,17 +358,22 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
       setIsEncrypted(false)
       setOutputFilePath(outputFile)
       setCreatedPqcKeyfilePath('')
+      setCreatedPqcStorageMode(pqcStorageMode)
       progress.reset()
       progress.update({ status: 'running', currentOperation: 'Initializing Encryption Engine...', percentage: 0 })
 
       const result = await api.encrypt({
         input_files: files,
+        excluded_input_paths: excludedInputPaths.length > 0 ? excludedInputPaths : undefined,
         output_file: outputFile,
         password: usePass ? password : undefined,
         keyphrase: useKeyp ? keyphrase.trim().split(/\s+/).filter(Boolean) : undefined,
         use_timecapsule: false,
         pqc_enabled: pqcEnabled,
-        pqc_keyfile_output: pqcEnabled ? nextPqcKeyfilePath : undefined,
+        pqc_storage_mode: pqcEnabled ? pqcStorageMode : undefined,
+        pqc_keyfile_output: pqcEnabled && pqcStorageMode === 'external' ? nextPqcKeyfilePath : undefined,
+        pqc_keyfile_protection_mode: needsPqcKeyfilePassword ? 'dual_password' : 'archive_secret',
+        pqc_keyfile_password: needsPqcKeyfilePassword ? pqcKeyfilePassword : undefined,
       })
 
       setCreatedPqcKeyfilePath(result?.result?.pqc?.keyfile || nextPqcKeyfilePath || '')
@@ -303,27 +382,36 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
       if (!hasSecretLock) {
         toast.success('Archive created without password or keyphrase protection.')
       } else {
-        toast.success(pqcEnabled ? 'Protected archive created and PQC keyfile saved.' : 'Protected archive created successfully.')
+        toast.success(
+          pqcEnabled
+            ? pqcStorageMode === 'embedded'
+              ? 'Protected archive created with embedded quantum protection.'
+              : 'Protected archive created and PQC keyfile saved.'
+            : 'Protected archive created successfully.',
+        )
       }
       resetProtectionPanel()
     } catch (error: unknown) {
       progress.update({ status: 'error', currentOperation: 'Encryption failed', percentage: progress.percentage || 0 })
       toast.error(getErrorMessage(error, 'Encryption failed'))
     } finally {
+      setPassword('')
+      setKeyphrase('')
+      setPqcKeyfilePassword('')
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-full w-full max-w-[1600px] mx-auto p-6 lg:p-10 box-border">
+    <div className="av-page-shell">
 
       {/* 60/40 Split Architecture */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
+      <div className="av-work-grid">
 
         {/* ── Left Panel: File Staging (60%) ─────────────────────────────────────── */}
-        <div className="lg:col-span-3 min-h-[550px] bg-av-surface/60 backdrop-blur-3xl rounded-[24px] shadow-[0_8px_40px_rgba(0,0,0,0.06)] border border-av-border/30 flex flex-col overflow-hidden relative transition-colors duration-300">
+        <div className="av-primary-panel lg:col-span-3 flex flex-col overflow-hidden relative">
 
-          <div className="px-8 py-7 border-b border-av-border/30 bg-gradient-to-b from-av-surface/80 to-av-surface/40 z-10 shrink-0">
+          <div className="av-panel-header z-10 shrink-0">
             <h2 className="text-[28px] font-medium tracking-tight text-av-main mb-1.5 flex items-center gap-3">
               Create Archive <span className="font-light text-av-muted">Package Files</span>
             </h2>
@@ -331,51 +419,25 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
           </div>
 
           <div
-            className="flex-1 flex flex-col relative overflow-hidden bg-av-border/10 dark:bg-white/[0.01]"
+            className="av-left-workspace flex-1 flex flex-col relative overflow-hidden"
             onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}
           >
             {loading && !isEncrypted && (
-              <div className="absolute inset-0 z-20 bg-av-surface/80 backdrop-blur-xl flex flex-col items-center justify-center p-8">
-                <div className="w-full max-w-md rounded-3xl bg-av-surface/90 border border-av-border/40 p-8 shadow-[0_20px_60px_rgba(0,0,0,0.12)]">
-                  <div className="flex items-center gap-3 mb-5">
-                    <div className="p-3 rounded-2xl bg-av-accent/10 border border-av-accent/30">
-                      <RefreshCw className="w-6 h-6 text-av-accent" strokeWidth={1.5} />
-                    </div>
-                    <div>
-                      <h3 className="text-xl font-medium tracking-tight text-av-main">Creating Archive</h3>
-                      <p className="text-sm text-av-muted font-light">{progress.currentOperation || 'Preparing archive...'}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-av-muted mb-2">
-                    <span>{progress.percentage !== null ? `${Math.round(progress.percentage)}% complete` : 'Working...'}</span>
-                    <span>{formatEta(progress.etaSeconds)}</span>
-                  </div>
-                  <div className="h-2.5 w-full bg-av-border/30 rounded-full overflow-hidden">
-                    {progress.percentage !== null ? (
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: `${Math.max(0, Math.min(100, progress.percentage))}%` }}
-                        className="h-full bg-av-accent rounded-full"
-                      />
-                    ) : (
-                      <motion.div
-                        className="h-full w-1/3 rounded-full bg-gradient-to-r from-transparent via-av-accent to-transparent"
-                        animate={{ x: ['0%', '300%'] }}
-                        transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
-                      />
-                    )}
-                  </div>
-                  <div className="mt-4 flex items-center justify-between text-xs text-av-muted">
-                    <span>Elapsed {progress.elapsedSeconds}s</span>
-                    {progress.fileSize !== null && <span>{Math.round(progress.fileSize / (1024 * 1024))} MB source</span>}
-                  </div>
-                </div>
-              </div>
+              <ProcessingOverlay
+                title="Creating Archive"
+                description={progress.currentOperation || 'Preparing archive...'}
+                icon={<Shield className="h-5 w-5 text-av-accent" strokeWidth={1.7} />}
+                percentage={progress.percentage}
+                etaSeconds={progress.etaSeconds}
+                elapsedSeconds={progress.elapsedSeconds}
+                fileSize={progress.fileSize}
+                indeterminateText="Building protected archive"
+              />
             )}
 
             {isEncrypted && (
-              <div className="absolute inset-0 z-20 bg-av-surface/80 backdrop-blur-xl flex flex-col items-center justify-center p-8">
-                <div className="w-full max-w-lg p-10 rounded-[24px] bg-av-surface/90 backdrop-blur-2xl border border-emerald-500/20 shadow-[0_20px_60px_rgba(16,185,129,0.1)] flex flex-col items-center text-center">
+              <div className="av-processing-overlay absolute inset-0 z-20 flex flex-col items-center justify-center p-8">
+                <div className="av-result-card w-full max-w-lg rounded-[24px] p-10 flex flex-col items-center text-center">
                   <div className="relative mb-8">
                     <div className="absolute inset-0 bg-emerald-500/20 rounded-full blur-2xl" />
                     <div className="w-20 h-20 rounded-full bg-emerald-500/10 flex items-center justify-center border border-emerald-500/30 relative z-10 shadow-inner">
@@ -395,6 +457,19 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
                     </div>
                   </div>
 
+                  {createdPqcStorageMode === 'embedded' && pqcEnabled && !createdPqcKeyfilePath && (
+                    <div className="w-full mt-4 p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 flex items-center gap-4 transition-all shadow-inner">
+                      <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                        <Fingerprint className="w-5 h-5 text-emerald-500" strokeWidth={1.5} />
+                      </div>
+                      <div className="text-left truncate flex-1">
+                        <p className="text-[10px] font-semibold text-emerald-500 uppercase tracking-[0.2em] mb-1">Embedded Quantum Protection</p>
+                        <p className="text-sm font-medium text-av-main truncate">Stored inside the .avk archive</p>
+                        <p className="text-[11px] text-av-muted mt-1">The archive still requires the correct password or keyphrase before quantum unlock can continue.</p>
+                      </div>
+                    </div>
+                  )}
+
                   {createdPqcKeyfilePath && (
                     <div className="w-full mt-4 p-4 rounded-xl bg-amber-500/5 border border-amber-500/20 flex items-center gap-4 transition-all shadow-inner">
                       <div className="w-10 h-10 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
@@ -412,7 +487,10 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
                     setIsEncrypted(false)
                     setFiles([])
                     setTreeNodes([])
+                    setSelectedTreePaths(new Set())
+                    setExcludedInputPaths([])
                     setPqcEnabled(false)
+                    setPqcStorageMode('embedded')
                     setPqcKeyfilePath('')
                     setCreatedPqcKeyfilePath('')
                     setPasswordEnabled(true)
@@ -428,16 +506,16 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
               files.length === 0 ? (
                 <div className="flex-1 p-8 flex flex-col relative">
                   <div
-                    className={`flex-1 rounded-[20px] border-[1.5px] border-dashed flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden group ${isDragging ? 'border-av-accent bg-av-accent/5' : 'border-av-border/60 bg-av-surface/20 hover:border-av-accent/40 hover:bg-av-surface/40 text-av-muted'
+                    className={`av-drop-zone flex-1 rounded-[20px] flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden group ${isDragging ? 'av-drop-zone-active' : 'text-av-muted'
                       }`}
                   >
-                    <div className="absolute inset-0 bg-gradient-to-b from-transparent to-av-border/15 dark:to-white/5 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+                    <div className="pointer-events-none absolute inset-0 opacity-0" />
 
                     <div className={`z-10 flex flex-col items-center transition-transform duration-300 ease-out ${isDragging ? '-translate-y-2 scale-105' : ''}`}>
                       <div className="relative mb-6">
-                        <div className="absolute inset-0 bg-av-accent/10 rounded-2xl blur-xl transition-all duration-500 group-hover:bg-av-accent/20" />
+                        <div className="absolute inset-0 rounded-2xl bg-av-border/10" />
                         <div className="w-20 h-20 rounded-2xl bg-av-surface/80 backdrop-blur-sm flex items-center justify-center border border-av-border/30 shadow-[0_4px_20px_rgba(0,0,0,0.05)] text-av-main relative z-10 transition-transform duration-300">
-                          <Upload className="w-8 h-8 text-av-accent" strokeWidth={1.25} />
+                          <Upload className="w-8 h-8 text-av-muted" strokeWidth={1.25} />
                         </div>
                       </div>
                       <h3 className="text-xl font-medium text-av-main mb-2 tracking-tight">
@@ -453,9 +531,9 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
                         </button>
                         <button
                           onClick={handleBrowseFolders}
-                          className="flex items-center gap-2 text-xs bg-av-surface/80 border border-av-border/60 text-av-main font-semibold px-5 py-2.5 rounded-xl transition-all shadow-sm hover:border-av-accent/40 hover:-translate-y-0.5 active:scale-95"
+                          className="flex items-center gap-2 text-xs bg-av-surface/80 border border-av-border/60 text-av-main font-semibold px-5 py-2.5 rounded-xl transition-all shadow-sm hover:border-av-border hover:-translate-y-0.5 active:scale-95"
                         >
-                          <Folder className="w-3.5 h-3.5 text-amber-400" /> Add Folders
+                          <Folder className="w-3.5 h-3.5 text-av-muted" /> Add Folders
                         </button>
                       </div>
                     </div>
@@ -465,23 +543,23 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
                 <div className="flex-1 flex flex-col relative overflow-hidden backdrop-blur-sm">
 
                   {/* Toolbar */}
-                  <div className="px-6 py-4 flex items-center justify-between border-b border-av-border/30 bg-av-surface/30 backdrop-blur-md shrink-0">
+                  <div className="av-explorer-toolbar px-6 py-4 flex items-center justify-between shrink-0">
                     <div className="flex items-center gap-3 shrink-0">
                       <span className="text-sm font-medium text-av-main tracking-tight">Explorer</span>
                       <span className="bg-av-border/15 border border-av-main/20 text-av-main text-[11px] font-semibold px-2.5 py-0.5 rounded-md">{files.length}</span>
                     </div>
                     <div className="flex-1 max-w-[200px] mx-4">
                       <div className="relative group">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-av-muted group-focus-within:text-av-accent transition-colors" />
-                        <input type="text" placeholder="Filter..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="w-full pl-8 pr-3 py-1.5 bg-av-surface/50 border border-av-border/50 rounded-lg text-xs focus:outline-none focus:border-av-accent/50 focus:ring-1 focus:ring-av-accent/10 transition-all text-av-main shadow-inner placeholder:font-light" />
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-av-muted group-focus-within:text-av-main transition-colors" />
+                        <input type="text" placeholder="Filter..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="w-full pl-8 pr-3 py-1.5 bg-av-surface/50 border border-av-border/50 rounded-lg text-xs focus:outline-none focus:border-av-border focus:ring-1 focus:ring-av-border/20 transition-all text-av-main shadow-inner placeholder:font-light" />
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <button onClick={handleBrowseFiles} className="flex items-center gap-1.5 text-[11px] bg-av-surface/60 border border-av-border/50 text-av-muted hover:text-av-main hover:border-av-accent/40 font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
+                      <button onClick={handleBrowseFiles} className="flex items-center gap-1.5 text-[11px] bg-av-surface/60 border border-av-border/50 text-av-muted hover:text-av-main hover:border-av-border font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
                         <File className="w-3 h-3" /> Files
                       </button>
-                      <button onClick={handleBrowseFolders} className="flex items-center gap-1.5 text-[11px] bg-av-surface/60 border border-av-border/50 text-av-muted hover:text-av-main hover:border-av-accent/40 font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
-                        <Folder className="w-3 h-3 text-amber-400" /> Folders
+                      <button onClick={handleBrowseFolders} className="flex items-center gap-1.5 text-[11px] bg-av-surface/60 border border-av-border/50 text-av-muted hover:text-av-main hover:border-av-border font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
+                        <Folder className="w-3 h-3 text-av-muted" /> Folders
                       </button>
                     </div>
                   </div>
@@ -491,7 +569,10 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
                     <FileTree
                       nodes={treeNodes}
                       searchQuery={searchQuery}
-                      onRemoveRoot={handleRemoveRoot}
+                      selectedPaths={selectedTreePaths}
+                      onSelectionChange={handleTreeSelectionChange}
+                      onRemovePaths={handleRemoveTreePaths}
+                      onClearAll={handleClearAllStagedInputs}
                     />
                   </div>
                 </div>
@@ -501,7 +582,7 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
         </div>
 
         {/* ── Right Panel: Security Architecture (40%) ──────────────────────────────── */}
-        <div className={`lg:col-span-2 flex flex-col gap-5 pb-6 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
+        <div className={`av-side-stack av-natural-side-stack lg:col-span-2 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
           <div className="px-2 mb-1">
             <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Encryption Settings</h3>
@@ -682,8 +763,8 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
                   <Fingerprint className={`w-[18px] h-[18px] ${pqcEnabled ? 'text-amber-500' : 'text-av-muted'}`} strokeWidth={1.5} />
                 </div>
                 <div>
-                  <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Quantum Keyfile</h3>
-                  <p className="text-av-muted text-[13px] font-light">Create a separate `.avkkey` file that must travel with the archive</p>
+                  <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Quantum Protection</h3>
+                  <p className="text-av-muted text-[13px] font-light">{pqcStorageMode === 'embedded' ? 'Embedded PQC bundle' : 'External .avkkey bundle'}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2 pr-1">
@@ -697,82 +778,114 @@ export default function Encrypt({ externalLaunchAction }: EncryptProps) {
             </div>
 
             {pqcEnabled && (
-              <div className="px-5 pb-5 space-y-4 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
-                <div className="security-pqc-info rounded-2xl p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="security-pqc-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
-                      <Fingerprint className="h-4 w-4" />
-                    </div>
-                    <p className="text-[12px] leading-relaxed">
-                      RookDuel Avikal will generate an encrypted <span className="font-semibold">.avkkey</span> file and protect the payload with a fixed hybrid quantum suite while keeping private material outside the <span className="font-semibold">.avk</span> archive.
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
+              <div className="px-5 pb-5 space-y-3 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
+                <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={handleChoosePqcKeyfile}
-                    className="flex-1 py-3 rounded-xl bg-av-main text-av-surface border border-av-main text-sm font-semibold hover:opacity-90 transition-all shadow-sm"
+                    onClick={() => { setPqcStorageMode('embedded'); setPqcModeOverridden(true); setPqcKeyfilePath(''); setPqcKeyfilePasswordEnabled(false); setPqcKeyfilePassword('') }}
+                    className={`rounded-2xl border px-4 py-4 text-left transition-all ${
+                      pqcStorageMode === 'embedded'
+                        ? 'border-emerald-500/35 bg-emerald-500/10 shadow-sm'
+                        : 'border-av-border/40 bg-av-surface/60 hover:border-av-border/70'
+                    }`}
                   >
-                    {pqcKeyfilePath ? 'Change .avkkey Destination' : 'Choose .avkkey Destination'}
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-av-main">Embedded in .avk</p>
+                        <p className="mt-1 text-[11px] text-av-muted">Single archive file</p>
+                      </div>
+                      {pqcStorageMode === 'embedded' && <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300">Selected</span>}
+                    </div>
                   </button>
-                  {pqcKeyfilePath && (
-                    <button
-                      onClick={() => setPqcKeyfilePath('')}
-                      className="py-3 px-4 rounded-xl bg-av-surface border border-av-border/70 text-av-main text-sm font-semibold hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300 transition-all"
-                    >
-                      Clear
-                    </button>
-                  )}
+                  <button
+                    onClick={() => { setPqcStorageMode('external'); setPqcModeOverridden(true); setPqcKeyfilePath('') }}
+                    className={`rounded-2xl border px-4 py-4 text-left transition-all ${
+                      pqcStorageMode === 'external'
+                        ? 'border-amber-500/35 bg-amber-500/10 shadow-sm'
+                        : 'border-av-border/40 bg-av-surface/60 hover:border-av-border/70'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-av-main">Separate .avkkey</p>
+                        <p className="mt-1 text-[11px] text-av-muted">Split key material</p>
+                      </div>
+                      {pqcStorageMode === 'external' && <span className="rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">Selected</span>}
+                    </div>
+                  </button>
                 </div>
-                <div className="security-keyfile-destination rounded-xl p-3">
-                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-1">Keyfile Destination</p>
-                  <p className="break-all text-sm">{pqcKeyfilePath || 'You will be prompted before encryption starts.'}</p>
-                </div>
-                <p className="security-keyfile-warning rounded-xl px-3 py-2 text-[11px] leading-relaxed">
-                  Losing the `.avkkey` means permanent loss of the archive, even with the correct password or keyphrase.
-                </p>
+                {pqcStorageMode === 'external' && (
+                  <div className="rounded-xl border border-av-border/35 bg-av-surface/60 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold text-av-main">Add .avkkey password</p>
+                        <p className="mt-0.5 text-[11px] text-av-muted">Optional second unlock layer</p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setPqcKeyfilePasswordEnabled(value => {
+                            const next = !value
+                            if (!next) {
+                              setPqcKeyfilePassword('')
+                              setShowPqcKeyfilePassword(false)
+                            }
+                            return next
+                          })
+                        }}
+                        className={`relative h-6 w-11 rounded-full border transition-all ${pqcKeyfilePasswordEnabled ? 'border-amber-500 bg-amber-500' : 'border-av-border/40 bg-av-border/20 dark:bg-white/10'}`}
+                      >
+                        <span className={`absolute left-[1px] top-[1px] h-5 w-5 rounded-full bg-white shadow transition-transform ${pqcKeyfilePasswordEnabled ? 'translate-x-5' : ''}`} />
+                      </button>
+                    </div>
+                    {pqcKeyfilePasswordEnabled && (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex items-center gap-2 rounded-xl border border-av-border/35 bg-av-border/10 px-3 py-2">
+                          <input
+                            type={showPqcKeyfilePassword ? 'text' : 'password'}
+                            value={pqcKeyfilePassword}
+                            onChange={(event) => setPqcKeyfilePassword(event.target.value)}
+                            placeholder=".avkkey password"
+                            className="min-w-0 flex-1 bg-transparent text-sm text-av-main outline-none placeholder:text-av-muted"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPqcKeyfilePassword(value => !value)}
+                            className="text-av-muted transition hover:text-av-main"
+                          >
+                            {showPqcKeyfilePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </button>
+                        </div>
+                        <p className={`text-[11px] ${isValidPqcKeyfilePassword ? 'text-emerald-500' : 'text-amber-500'}`}>
+                          {pqcKeyfilePassword && usePass && pqcKeyfilePassword === password
+                            ? 'Must be different from archive password.'
+                            : 'Use 12+ chars with upper, lower, number, and symbol.'}
+                        </p>
+                      </div>
+                    )}
+                    {!pqcKeyfilePasswordEnabled && (
+                      <p className="mt-2 text-[11px] text-av-muted">`.avkkey` location is chosen when creation starts.</p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
 
           {/* Execution Block */}
-          <div className="shrink-0 flex flex-col gap-3 mt-auto pt-2">
+          <div className="shrink-0 flex flex-col gap-3 pt-2">
 
-            {/* Dual Layer High-Protect Warning */}
+            {/* Multi-layer High-Protect Warning */}
             {isBoth && (
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-[16px] bg-red-500/10 border border-red-500/30 flex items-start gap-3 backdrop-blur-md shadow-inner mb-2">
                 <ShieldAlert className="w-5 h-5 text-red-500 shrink-0 mt-0.5 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
                 <div>
-                  <p className="text-[13px] font-bold text-red-500 uppercase tracking-wide mb-1 drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]">Dual High Protection Enabled</p>
-                  <p className="text-xs text-red-400/90 font-medium leading-relaxed">
-                    This archive will require both the access password and the 21-word keyphrase during unlock.
-                    Keep both stored safely before you continue.
+                  <p className="text-[13px] font-bold text-red-500 uppercase tracking-wide mb-1 drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]">
+                    {isTrioProtection ? 'Trio High Protection Enabled' : 'Dual High Protection Enabled'}
                   </p>
-                </div>
-              </motion.div>
-            )}
-
-            {pqcEnabled && (
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="security-external-keyfile-card mb-2 overflow-hidden rounded-[18px]">
-                <div className="h-1.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-400" />
-                <div className="flex items-start gap-3 p-4">
-                  <div className="security-pqc-icon flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl">
-                    <Fingerprint className="h-5 w-5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      <p className="text-[13px] font-bold uppercase tracking-[0.18em] text-av-main">External Keyfile Required</p>
-                      <span className="rounded-full border border-av-border/60 bg-av-border/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-av-muted">
-                        Required
-                      </span>
-                    </div>
-                    <p className="text-[13px] leading-relaxed text-av-main">
-                      This archive will require a separate <span className="font-semibold">.avkkey</span> file during decryption. Keep that file stored away from the <span className="font-semibold">.avk</span>.
-                    </p>
-                    <p className="mt-2 text-[11px] leading-relaxed text-av-muted">
-                      Without the matching keyfile, the archive cannot be opened even with the correct user secret.
-                    </p>
-                  </div>
+                  <p className="text-xs text-red-400/90 font-medium leading-relaxed">
+                    {isTrioProtection
+                      ? 'This archive will require password, 21-word keyphrase, and PQC material during unlock. Store every required secret carefully before you continue.'
+                      : 'This archive will require both the access password and the 21-word keyphrase during unlock. Keep both stored safely before you continue.'}
+                  </p>
                 </div>
               </motion.div>
             )}

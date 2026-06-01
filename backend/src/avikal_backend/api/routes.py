@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from pydantic import BaseModel, Field
 
+from avikal_backend.archive.security.crypto import secure_zero
 
 from avikal_backend.services.ntp_service import get_clock_skew_warning, get_ntp_datetime_utc, get_ntp_timestamp
 
@@ -70,6 +71,30 @@ def _run_with_crypto_lock(func, *args, **kwargs):
     """Run a blocking crypto operation while holding the process crypto lock."""
     with api._crypto_lock:
         return func(*args, **kwargs)
+
+
+def _best_effort_scrub_model_secrets(model, *field_names: str) -> None:
+    """Reduce the lifetime of request-bound secret references after use."""
+    for field_name in field_names:
+        value = getattr(model, field_name, None)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            secure_zero(bytearray(value.encode("utf-8")))
+            try:
+                setattr(model, field_name, None)
+            except Exception:
+                pass
+            continue
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, str):
+                    secure_zero(bytearray(item.encode("utf-8")))
+                    value[index] = ""
+            try:
+                setattr(model, field_name, None)
+            except Exception:
+                pass
 
 @router.get("/health")
 async def health_check():
@@ -148,8 +173,7 @@ async def check_aavrit_server(body: AavritServerCheckRequest):
         payload = api.fetch_aavrit_capabilities(aavrit_url)
 
         api.set_current_aavrit_server_url(aavrit_url)
-
-        api.current_aavrit_mode = payload["mode"]
+        api.set_current_aavrit_mode(payload["mode"])
 
         return {
 
@@ -183,7 +207,7 @@ async def check_aavrit_server(body: AavritServerCheckRequest):
 
 async def authenticate_user(body: AavritLoginRequest):
 
-    """Login to a private Aavrit server and store the returned Aavrit session locally."""
+    """Login to a private Aavrit server and return the session to the local client."""
 
     try:
 
@@ -251,11 +275,8 @@ async def authenticate_user(body: AavritLoginRequest):
 
 
 
-        api.current_aavrit_session_token = session_token
-
         api.set_current_aavrit_server_url(aavrit_url)
-
-        api.current_aavrit_mode = mode
+        api.set_current_aavrit_mode(mode)
 
 
 
@@ -298,6 +319,8 @@ async def authenticate_user(body: AavritLoginRequest):
         api.log.error("Aavrit login failed: %s", exc, exc_info=True)
 
         raise HTTPException(status_code=500, detail="Aavrit login failed.")
+    finally:
+        _best_effort_scrub_model_secrets(body, "password")
 
 
 
@@ -307,7 +330,7 @@ async def authenticate_user(body: AavritLoginRequest):
 
 async def verify_session(body: VerifySessionRequest):
 
-    """Verify an Aavrit session and restore the current Aavrit session."""
+    """Verify an Aavrit session without persisting the bearer token on the backend."""
 
     api.log.debug("verify_session called")
 
@@ -323,9 +346,8 @@ async def verify_session(body: VerifySessionRequest):
 
 
 
-        api.current_aavrit_session_token = body.session_token
-
-        api.current_aavrit_mode = api.fetch_aavrit_capabilities(aavrit_url)["mode"]
+        mode = api.fetch_aavrit_capabilities(aavrit_url)["mode"]
+        api.set_current_aavrit_mode(mode)
 
 
 
@@ -341,7 +363,7 @@ async def verify_session(body: VerifySessionRequest):
 
             "aavrit_url": aavrit_url,
 
-            "mode": api.current_aavrit_mode,
+            "mode": mode,
 
             "user": _build_aavrit_user_payload(
 
@@ -366,6 +388,8 @@ async def verify_session(body: VerifySessionRequest):
         api.log.error("Unexpected exception in verify_session: %s", e, exc_info=True)
 
         raise HTTPException(status_code=500, detail=f"Session verification failed: {str(e)}")
+    finally:
+        _best_effort_scrub_model_secrets(body, "session_token")
 
 
 
@@ -373,13 +397,16 @@ async def verify_session(body: VerifySessionRequest):
 
 @router.get("/api/auth/profile")
 
-async def get_user_profile(session_token: str = Depends(api.get_aavrit_session_token)):
+async def get_user_profile(
+    session_token: str = Depends(api.get_aavrit_session_token),
+    x_aavrit_server_url: str | None = Header(default=None, alias="X-Aavrit-Server-URL"),
+):
 
     """Get user profile from the connected Aavrit server."""
 
     try:
 
-        aavrit_url = api.get_aavrit_server_url()
+        aavrit_url = api.get_aavrit_server_url(x_aavrit_server_url)
 
         decoded = api.verify_aavrit_session_token(session_token, aavrit_url)
 
@@ -409,17 +436,26 @@ async def get_user_profile(session_token: str = Depends(api.get_aavrit_session_t
 
 @router.post("/api/auth/logout")
 
-async def logout():
+async def logout(
+    authorization: str | None = Header(default=None),
+    x_aavrit_session: str | None = Header(default=None, alias="X-Aavrit-Session"),
+    x_aavrit_server_url: str | None = Header(default=None, alias="X-Aavrit-Server-URL"),
+):
 
     """Logout user and clear the current Aavrit session."""
 
-    session_token = api.current_aavrit_session_token
+    session_token = None
+    if authorization and authorization.startswith("Bearer "):
+        session_token = authorization.split(" ", 1)[1].strip()
+    elif isinstance(x_aavrit_session, str):
+        session_token = x_aavrit_session.strip() or None
 
-    aavrit_url = api.get_aavrit_server_url(required=False)
+    aavrit_url = api.get_aavrit_server_url(x_aavrit_server_url, required=False)
+    aavrit_mode = api.get_current_aavrit_mode()
 
 
 
-    if session_token and aavrit_url and api.current_aavrit_mode == "private":
+    if session_token and aavrit_url and aavrit_mode == "private":
 
         try:
 
@@ -576,6 +612,8 @@ async def encrypt_files(request: EncryptRequest, authorization: str = Header(Non
         api.log.error("Encrypt endpoint error: %s", e, exc_info=True)
 
         raise HTTPException(status_code=500, detail=user_message)
+    finally:
+        _best_effort_scrub_model_secrets(request, "password", "keyphrase")
 
 
 
@@ -597,7 +635,7 @@ async def decrypt_file(request: DecryptRequest, authorization: str = Header(None
 
 
 
-        # Validate .avk file structure before attempting decryption (Requirement 7.9)
+        # Validate container structure before decrypting.
         api.log.info("Received decrypt request for %s", request.input_file)
 
         from avikal_backend.archive.format.header import ARCHIVE_MODE_MULTI
@@ -749,6 +787,8 @@ async def decrypt_file(request: DecryptRequest, authorization: str = Header(None
         api.log.error("Decrypt endpoint error: %s", e, exc_info=True)
 
         raise HTTPException(status_code=500, detail=api.friendly_error(str(e)))
+    finally:
+        _best_effort_scrub_model_secrets(request, "password", "keyphrase")
 
 
 
@@ -787,6 +827,7 @@ async def inspect_archive(request: ArchiveInspectRequest):
             "keyphrase_hint": route_hints.get("requires_keyphrase"),
 
             "pqc_required": route_hints.get("requires_pqc"),
+            "pqc_storage_mode": route_hints.get("pqc_storage_mode"),
 
             "unlock_timestamp": route_hints.get("unlock_timestamp"),
 
@@ -835,7 +876,7 @@ async def rekey_archive(request: RekeyRequest):
 
         if route_hints.get("requires_pqc"):
 
-            raise HTTPException(status_code=400, detail="PQC keyfile rekey is not supported in this phase.")
+            raise HTTPException(status_code=400, detail="PQC rekey is not supported in this phase.")
 
         if not route_hints.get("requires_password") and not route_hints.get("requires_keyphrase"):
 
@@ -857,11 +898,11 @@ async def rekey_archive(request: RekeyRequest):
 
             old_password=request.old_password,
 
-            old_keyphrase=request.old_keyphrase,
+            old_keyphrase=list(request.old_keyphrase) if request.old_keyphrase else None,
 
             new_password=request.new_password,
 
-            new_keyphrase=request.new_keyphrase,
+            new_keyphrase=list(request.new_keyphrase) if request.new_keyphrase else None,
 
             output_filepath=request.output_file,
 
@@ -884,6 +925,14 @@ async def rekey_archive(request: RekeyRequest):
         api.log.error("Archive rekey failed: %s", e, exc_info=True)
 
         raise HTTPException(status_code=500, detail=api.friendly_error(str(e)))
+    finally:
+        _best_effort_scrub_model_secrets(
+            request,
+            "old_password",
+            "old_keyphrase",
+            "new_password",
+            "new_keyphrase",
+        )
 
 
 

@@ -1,94 +1,87 @@
 # Contributing to Avikal
 
-Thanks for taking the time to contribute. Avikal is a security-sensitive project with a shared archive core used by both the desktop app and the CLI, so changes need to stay focused and well explained.
+Avikal is an open-source, maintainer-led security project. External review, issue reports, and focused contributions are welcome, but final design, security, roadmap, and release decisions remain with the maintainer.
 
-## Before you start
+Contributions should be focused, reviewable, and clear about user impact. Opening an issue or pull request does not guarantee acceptance or merge.
 
-Open an issue or start a discussion before working on large changes, especially if they affect:
+## Before You Start
 
-- archive format structure
-- encryption or key-derivation behavior
+Open an issue or discussion before large changes, especially changes affecting:
+
+- archive format behavior
+- cryptography, key derivation, or PQC handling
 - TimeCapsule provider contracts
-- Electron security boundaries
-- packaging or distribution flow
+- Electron preload or filesystem boundaries
+- packaging, installer, or update behavior
+- CLI and desktop compatibility
 
-Small fixes, documentation corrections, and isolated bug fixes can usually go straight to a pull request.
+Small bug fixes, documentation corrections, and isolated UI fixes can usually go directly to a pull request. Maintainers may still close pull requests that do not fit the project direction, risk model, or review capacity.
 
-## Design rules for contributions
+## Maintainer-Led Areas
 
-Please follow these project boundaries:
+The following areas are restricted and require maintainer approval before implementation:
 
-- Do not duplicate archive logic between the CLI and the API.
-- Keep the shared archive core in `backend/src/avikal_backend/archive` as the single source of truth.
-- Do not change archive format semantics casually. Archive compatibility matters.
-- Do not change Aavrit API expectations in this repository without coordinating the matching server-side change separately.
-- Keep UI, API, and CLI behavior aligned when they rely on the same archive rule.
+- archive format changes
+- cryptography, key derivation, PQC, and signing behavior
+- TimeCapsule release authority behavior
+- Aavrit protocol integration
+- Electron IPC, preload, filesystem, and process boundaries
+- packaging, installer, shared-core, and update behavior
+- public release workflows and distribution assets
 
-## Local setup
+Unsolicited rewrites of these areas may be closed without merge, even if technically functional.
 
-### 1. Install JavaScript dependencies
+## Architecture Rules
 
-From the repository root:
+- Keep archive behavior in the shared backend core.
+- Do not duplicate archive logic between desktop, CLI, and compatibility layers.
+- Do not change archive semantics casually. Compatibility matters.
+- Keep the Rust native crypto path mandatory for production crypto flows.
+- Keep renderer-to-core communication behind Electron IPC and the stdio JSON-RPC core bridge.
+- Coordinate Aavrit protocol changes with the separate Aavrit server project.
+
+## Local Setup
 
 ```powershell
 npm install
 cd frontend
 npm install
 cd ..
-```
-
-### 2. Install backend dependencies
-
-```powershell
 cd backend
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
+pip install -r requirements-build.txt
 pip install -e .
 cd ..
+npm run build:native:quick
 ```
 
-This gives you:
-
-- the local FastAPI backend dependencies
-- the `avikal` CLI command
-- editable installs for backend Python code
-
-## Running the project
-
-### Desktop app
+Run the desktop app:
 
 ```powershell
 npm run dev
 ```
 
-This starts:
-
-- the Vite frontend dev server
-- the Electron shell
-- the local Python backend launched by Electron
-
-### CLI
+Run the CLI:
 
 ```powershell
 avikal --help
 ```
 
-The CLI does not require the Electron app or the FastAPI server to be running.
+## Recommended Checks
 
-## Recommended checks
+Run checks that match your change.
 
-Run the checks that match your change.
-
-### Frontend build
+Frontend:
 
 ```powershell
 cd frontend
-npm run build
+npm run build:check
 cd ..
 ```
 
-### Backend test suite
+Backend:
 
 ```powershell
 cd backend
@@ -96,47 +89,48 @@ venv\Scripts\python.exe -m pytest -p no:cacheprovider
 cd ..
 ```
 
-### Backend import/compile sanity check
+Native module:
 
 ```powershell
-cd backend
-venv\Scripts\python.exe -m compileall src\avikal_backend
-cd ..
+npm run build:native:quick
 ```
 
-If your change touches only one subsystem, note which checks you ran and why that scope was sufficient.
+Packaging:
 
-## Pull request checklist
+```powershell
+npm run package:windows
+npm run package:cli
+npm run verify:cli
+```
+
+If you run a narrower check, explain why that scope is sufficient.
+
+## Pull Request Checklist
 
 Each pull request should include:
 
-- a short description of the change
-- the user-visible or developer-visible impact
-- any archive-format impact
-- any security impact
-- the checks you ran
+- summary of the change
+- user-visible impact
+- security impact, if any
+- archive-format impact, if any
+- tests or checks performed
+- documentation updates, if behavior changed
 
-Also update documentation when you change:
+## High-Risk Areas
 
-- command names or CLI behavior
-- API routes or request shapes
-- TimeCapsule provider expectations
-- packaging steps
-- security assumptions
-
-## Areas that need extra care
-
-Please call out changes clearly if they affect:
+Call out changes clearly when they affect:
 
 - `backend/src/avikal_backend/archive/security`
 - `backend/src/avikal_backend/archive/format`
-- `backend/src/avikal_backend/api/server.py`
-- `backend/src/avikal_backend/api/aavrit_client.py`
-- Electron preload or native file access behavior
+- `backend/src/avikal_backend/archive/pipeline`
+- `backend/native/avikal_backend_native`
+- `electron/main.js`
+- `electron/preload.js`
+- packaging scripts
 
-## Commit and review style
+## Review Style
 
 - Keep commits focused.
-- Avoid unrelated refactors in the same change.
-- Prefer explicit, reviewable patches over broad rewrites.
-- When in doubt, choose the simplest change that matches the current architecture.
+- Avoid unrelated refactors.
+- Prefer explicit patches over broad rewrites.
+- Do not include generated files, caches, virtual environments, build outputs, private keys, `.env` files, or local archives.

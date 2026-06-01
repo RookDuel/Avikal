@@ -1,175 +1,183 @@
 <p align="center">
-  <strong>ROOKDUEL</strong>
+  <img src="./assets/logo.png" alt="RookDuel Avikal logo" width="96" />
 </p>
 
 <h1 align="center">RookDuel Avikal</h1>
 
 <p align="center">
-  Secure <code>.avk</code> archives for long-term desktop and terminal workflows.
+  Secure <code>.avk</code> archives for files, folders, TimeCapsule releases, and post-quantum protected workflows.
 </p>
 
 <p align="center">
-  Chess-rooted archive design, post-quantum-aware protection, custom Devanagari keyphrases, and TimeCapsule workflows with drand today and broader Aavrit flows on the roadmap.
+  <a href="https://github.com/RookDuel/Avikal/stargazers"><img src="https://img.shields.io/github/stars/RookDuel/Avikal?style=for-the-badge&label=Stars&color=2563eb" alt="GitHub stars" /></a>
+  <a href="https://github.com/RookDuel/Avikal/forks"><img src="https://img.shields.io/github/forks/RookDuel/Avikal?style=for-the-badge&label=Forks&color=0f172a" alt="GitHub forks" /></a>
+  <a href="https://github.com/RookDuel/Avikal/issues"><img src="https://img.shields.io/github/issues/RookDuel/Avikal?style=for-the-badge&label=Issues&color=b45309" alt="GitHub issues" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-2563eb?style=for-the-badge" alt="Apache-2.0 license" /></a>
+  <img src="https://img.shields.io/badge/Status-Beta-0f172a?style=for-the-badge" alt="Beta status" />
+  <img src="https://img.shields.io/badge/Desktop-Windows%20First-111827?style=for-the-badge" alt="Windows-first desktop" />
+  <img src="https://img.shields.io/badge/Core-Python%20%2B%20Rust-b45309?style=for-the-badge" alt="Python and Rust core" />
+  <img src="https://img.shields.io/badge/Format-.avk-334155?style=for-the-badge" alt=".avk archive format" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/RookDuel/Avikal/stargazers"><img src="https://img.shields.io/github/stars/RookDuel/Avikal?style=for-the-badge&label=Stars&color=1f6feb" alt="GitHub stars" /></a>
-  <a href="https://github.com/RookDuel/Avikal/forks"><img src="https://img.shields.io/github/forks/RookDuel/Avikal?style=for-the-badge&label=Forks&color=6d28d9" alt="GitHub forks" /></a>
-  <a href="https://github.com/RookDuel/Avikal/issues"><img src="https://img.shields.io/github/issues/RookDuel/Avikal?style=for-the-badge&label=Issues&color=dc2626" alt="GitHub issues" /></a>
-  <a href="https://github.com/RookDuel/Avikal/commits"><img src="https://img.shields.io/github/last-commit/RookDuel/Avikal?style=for-the-badge&label=Last%20Commit&color=0f172a" alt="GitHub last commit" /></a>
-  <a href="https://github.com/RookDuel/Avikal/blob/main/LICENSE"><img src="https://img.shields.io/github/license/RookDuel/Avikal?style=for-the-badge&label=License&color=238636" alt="GitHub license" /></a>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Build-Verified-1f6feb?style=for-the-badge" alt="Build Verified" />
-  <img src="https://img.shields.io/badge/Desktop-Electron-0f172a?style=for-the-badge&logo=electron&logoColor=white" alt="Electron Desktop" />
-  <img src="https://img.shields.io/badge/Frontend-React-0f172a?style=for-the-badge&logo=react&logoColor=61dafb" alt="React Frontend" />
-  <img src="https://img.shields.io/badge/Backend-FastAPI-0f172a?style=for-the-badge&logo=fastapi&logoColor=10b981" alt="FastAPI Backend" />
-  <img src="https://img.shields.io/badge/CLI-Python-0f172a?style=for-the-badge&logo=python&logoColor=facc15" alt="Python CLI" />
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Languages-Python%20%7C%20TypeScript-7c3aed?style=for-the-badge" alt="Languages used" />
-  <img src="https://img.shields.io/badge/Format-.avk-bd561d?style=for-the-badge" alt="AVK archive format" />
-  <img src="https://img.shields.io/badge/Encryption-AES--256--GCM-9a3412?style=for-the-badge" alt="AES-256-GCM encryption" />
-  <img src="https://img.shields.io/badge/Protection-Password%20%7C%20Keyphrase%20%7C%20PQC-334155?style=for-the-badge" alt="Protection modes" />
-  <img src="https://img.shields.io/badge/TimeCapsule-drand%20%7C%20Aavrit-334155?style=for-the-badge" alt="TimeCapsule providers" />
-</p>
-
-<p align="center">
-  <a href="https://github.com/RookDuel/Avikal"><strong>Repository</strong></a>
+  <a href="#features"><strong>Features</strong></a>
   &nbsp;|&nbsp;
-  <a href="./ARCHITECTURE.md"><strong>Architecture</strong></a>
+  <a href="#how-avikal-protects-files"><strong>Protection Model</strong></a>
+  &nbsp;|&nbsp;
+  <a href="#quick-start"><strong>Quick Start</strong></a>
   &nbsp;|&nbsp;
   <a href="./SECURITY.md"><strong>Security</strong></a>
   &nbsp;|&nbsp;
-  <a href="./CONTRIBUTING.md"><strong>Contributing</strong></a>
-  &nbsp;|&nbsp;
-  <a href="./CLI_USAGE.md"><strong>CLI Usage</strong></a>
+  <a href="./CLI_USAGE.md"><strong>CLI</strong></a>
 </p>
 
 ---
 
 <p align="center">
-  <img src="./assets/Encode.png" alt="Avikal Encode UI" width="1100" />
+  <img src="./assets/Encode.png" alt="Avikal encode screen" width="1000" />
 </p>
 
-<p align="center">
-  <sub>Encode view shown in both dark and light themes.</sub>
-</p>
+## What Is Avikal?
 
-## Overview
+Avikal is a desktop and command-line archival security tool. It packages files and folders into `.avk` archives and lets the user choose how those archives should be protected, unlocked, previewed, and recovered.
 
-Avikal is a secure archive system built around the `.avk` format. It is designed for files that should stay private, controlled, and recoverable over time.
+It is designed for people who want more than a normal compressed file:
 
-It brings together four unusual ideas in one archive project:
+- stronger access controls than a plain ZIP workflow
+- optional post-quantum protection
+- delayed unlock through TimeCapsule mode
+- reversible Chess-PGN metadata encoding
+- a shared desktop and CLI core for consistent behavior
 
-- chess-rooted archive identity
-- post-quantum-aware protection
-- a custom Devanagari keyphrase system
-- TimeCapsule future-unlock workflows
+Avikal is currently Windows-first for packaged desktop releases. The codebase is structured so CLI and future cross-platform packaging can use the same archive core.
 
-You can use Avikal in two ways:
+Avikal is an open-source, maintainer-led archival security project. External review, issue reports, and focused contributions are welcome, but final design, security, and release decisions remain with the maintainer.
 
-- a desktop app built with Electron and React
-- a standalone Python CLI exposed as `avikal`
+## Features
 
-Both use the same shared archive core.
+### File and Folder Archives
 
-## Why Avikal
+- Create `.avk` archives from a single file, many files, or folders.
+- Preview decrypted content inside temporary preview sessions.
+- Extract only when the user chooses to keep the decoded files.
+- Rekey supported archives without rewriting the encrypted payload stream.
 
-Avikal is not meant to be just another encrypted container.
+### Password and Keyphrase Protection
 
-It is built for people who want stronger control over important files:
+- Use a normal access password.
+- Use a generated 21-word Hindi keyphrase.
+- Use both password and keyphrase together for stronger unlock requirements.
+- Use romanized typing helpers for the Hindi/Devanagari keyphrase system.
 
-- password-based protection
-- Devanagari 21-word keyphrase protection
-- optional external PQC keyfile support
-- future-unlock archive workflows
-- one archive system shared between GUI and CLI
+### Chess-PGN Metadata Carrier
 
-The goal is to make long-term private storage feel serious, not casual.
+Avikal stores protected archive control metadata through a reversible Chess-PGN carrier.
 
-## Product surfaces
+In simple terms:
 
-- **Desktop app** for interactive archive creation, opening, preview, extraction, and TimeCapsule use
-- **CLI package** for developers, scripting, CI, and direct local archive work
-- **Shared archive core** reused by both surfaces so the archive rules stay aligned
+- the archive metadata is packed into bytes
+- protected metadata is encrypted
+- the encrypted metadata is encoded as legal chess moves
+- the result is stored in `keychain.pgn`
 
-## UI walkthrough
+The chess layer is an identity feature of Avikal and a reversible carrier. The actual confidentiality comes from encryption, not from claiming that PGN is mathematically indistinguishable from human chess games.
 
-### Encode
+### Post-Quantum Protection
 
-The app opens on the archive creation flow. Users can package files, apply password or keyphrase protection, and optionally create a separate `.avkkey` file for PQC-assisted recovery.
+Avikal supports optional PQC-backed archive protection.
 
-![Avikal Encode page](./assets/Encode.png)
+Current PQC workflows include:
 
-### Decode
+- embedded PQC material inside the `.avk`
+- external `.avkkey` keyfiles
+- optional second-password protection for external `.avkkey` files
+- hybrid post-quantum/classical key material handling in the backend core
 
-The decrypt flow verifies the archive, collects the required access material, and opens the decrypted result through a controlled preview-session workflow before cleanup or extraction.
-
-![Avikal Decode page](./assets/Decode.png)
+The practical benefit is separation of access material. For example, an archive can require the normal user secret and matching PQC key material before it opens.
 
 ### TimeCapsule
 
-TimeCapsule supports two release authorities:
+TimeCapsule mode lets an archive stay locked until a release condition is met.
 
-- `drand` for public time-based unlocks
-- `Aavrit` for signed commit/reveal verification through an external authority
+Supported release authorities:
 
-![Avikal TimeCapsule page](./assets/Time.png)
+- `drand` for public time-based release
+- `Aavrit` for signed external release authority workflows
 
-## How the system is structured
+This is useful when data should exist now but should not become unlockable until a specific time or authority condition is satisfied.
 
-At a high level:
+### Aavrit Integration
+
+Avikal can connect to Aavrit from Settings. Aavrit is treated as an external release authority that can be integrated with TimeCapsule workflows.
+
+The Aavrit server is a separate project. This repository contains the Avikal client-side integration.
+
+### Desktop and CLI
+
+Avikal has two surfaces:
+
+| Surface | Best for |
+|---|---|
+| Desktop app | Interactive archive creation, preview, TimeCapsule, Aavrit connection, and guided workflows |
+| CLI | Automation, scripting, diagnostics, server-side workflows, and developer usage |
+
+Both use the same backend archive core.
+
+## How Avikal Protects Files
+
+Avikal separates the user interface from the archive engine.
 
 ```text
-Desktop app
--> Electron shell
--> local FastAPI backend
--> shared archive core
+Desktop UI
+-> Electron IPC
+-> Avikal core over JSON-RPC/stdin-stdout
+-> Python orchestration + Rust native crypto
 
 CLI
--> shared archive core
-
-Aavrit
--> external service used only through HTTP
+-> same Python/Rust archive core
 ```
 
-This separation keeps the product clean:
+The desktop runtime does not use a local HTTP server for normal app communication. Electron launches the Avikal core process and communicates with it through framed JSON-RPC over standard I/O.
 
-- the desktop app gets native dialogs, session UX, and preview workflows
-- the CLI stays lightweight and does not require Electron or the desktop API service package
-- archive behavior remains consistent because both surfaces reuse the same core
+Protected archives use:
 
-More detail is available in [ARCHITECTURE.md](./ARCHITECTURE.md).
+- AES-256-GCM for authenticated encryption
+- Argon2id for password and keyphrase hardening
+- HKDF-based key separation
+- Rust native crypto for production paths
+- strict archive container validation
+- path traversal defenses during extraction
+- optional OpenSSL-backed PQC primitives
 
-## Key features
+Avikal does not claim protection against malware already running on the same machine, keyloggers, memory scraping, weak passwords, or lost recovery material. Read [SECURITY.md](./SECURITY.md) before relying on Avikal for sensitive use.
 
-### Archive protection
+## Screenshots
 
-- password-protected archives
-- 21-word Hindi keyphrase-protected archives
-- optional external `.avkkey` generation for PQC-assisted unlock
+### Encode
 
-### TimeCapsule modes
+<p align="center">
+  <img src="./assets/Encode.png" alt="Avikal encode page" width="1000" />
+</p>
 
-- `drand`: public delayed unlock path
-- `Aavrit`: external signed commit/reveal authority used through HTTP
+### Decode
 
-### Shared-core design
+<p align="center">
+  <img src="./assets/Decode.png" alt="Avikal decode page" width="1000" />
+</p>
 
-- one archive engine for the GUI and the CLI
-- consistent encryption, validation, and extraction rules
-- no duplicate archive logic across surfaces
+### TimeCapsule
 
-## Installation
+<p align="center">
+  <img src="./assets/Time.png" alt="Avikal TimeCapsule page" width="1000" />
+</p>
 
-### Desktop users
+## Quick Start
 
-Use a published desktop release when available.
+### Desktop Users
 
-If you are running from source instead:
+Use a published Windows desktop release when available.
+
+For source development, use Windows PowerShell from the repository root:
 
 ```powershell
 npm install
@@ -180,164 +188,78 @@ cd backend
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
+pip install -r requirements-build.txt
+pip install -e .
 cd ..
+npm run build:native:quick
 npm run dev
 ```
 
-### CLI users
+### CLI Users
 
-Install the CLI from the backend package:
+Install locally from a checkout:
 
 ```powershell
 pip install .\backend
 avikal --help
 ```
 
-That installation publishes the CLI and shared archive core only. It does not install the desktop app.
-
-Important PQC note:
-
-- the desktop app bundles its OpenSSL PQC runtime
-- the plain CLI package does not currently bundle that runtime by itself
-- PQC CLI use therefore requires an OpenSSL 3.5+ runtime with the needed PQC algorithms available
-- the CLI expects that runtime through `AVIKAL_OPENSSL_EXEC` when PQC features are used
-
-Important TimeCapsule note:
-
-- the CLI already supports the current shared-engine time-lock flow used for drand-style future unlock behavior
-- full Aavrit capsule creation and reveal workflows are not available in the CLI today
-- bundled PQC convenience for CLI and broader TimeCapsule expansion are planned for future versions
-
-Module entry points also work:
+Common commands:
 
 ```powershell
-python -m avikal_backend --help
-python -m avikal_backend.cli --help
+avikal enc document.pdf --password-prompt
+avikal dec locked.avk --output-dir output --password-prompt
+avikal info locked.avk
+avikal ls locked.avk --password-prompt
+avikal rekey locked.avk --old-password-prompt --new-password-prompt
+avikal doctor
 ```
 
-If a package index release is published separately, the install command becomes:
+See [CLI_USAGE.md](./CLI_USAGE.md) for the full CLI guide.
 
-```powershell
-pip install avikal
+## Repository Layout
+
+```text
+assets/                    App logo, icons, and screenshots
+backend/                   Python package, CLI, archive core, native Rust module
+build/                     Windows installer integration files
+electron/                  Electron main process and preload bridge
+frontend/                  React renderer
+packaging/                 Windows and CLI packaging helpers
+runtime/                   Runtime support layout
+scripts/                   Build and release preparation scripts
 ```
 
-### Contributors
-
-For local development with editable backend installs:
-
-```powershell
-npm install
-cd frontend
-npm install
-cd ..
-cd backend
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
-cd ..
-```
-
-Run the desktop app:
+## Development Commands
 
 ```powershell
 npm run dev
+npm run build:frontend
+npm run build:native:quick
+npm run package:windows
+npm run package:cli
+npm run verify:cli
 ```
 
-Run the CLI:
-
-```powershell
-avikal --help
-```
-
-## CLI quick start
-
-| Task | Command |
-| --- | --- |
-| Create a protected archive | `avikal enc document.pdf --password-prompt` |
-| Create with keyphrase | `avikal enc document.pdf --keyphrase "word1 word2 ... word21"` |
-| Create with PQC keyfile | `avikal enc document.pdf --password-prompt --pqc` |
-| Create a time-locked archive | `avikal enc reports --timecapsule -u "2026-05-01 12:00" -p "StrongPass#123"` |
-| Rotate credentials | `avikal rekey locked.avk --old-password-prompt --new-password-prompt` |
-| Inspect archive metadata | `avikal info locked.avk` |
-| List contents | `avikal ls locked.avk -p "StrongPass#123"` |
-| Extract archive | `avikal dec locked.avk -d output -p "StrongPass#123"` |
-
-Full CLI usage is documented in [CLI_USAGE.md](./CLI_USAGE.md).
-
-## Repository layout
-
-```text
-OpenSource/
-+-- electron/                  # Electron main process and preload bridge
-+-- frontend/                  # React renderer
-+-- backend/
-|   +-- api_server.py          # Electron-facing backend launcher
-|   +-- pyproject.toml         # Python package definition for the CLI
-|   \-- src/avikal_backend/
-|       +-- api/               # FastAPI layer for the desktop app
-|       +-- archive/           # shared archive core
-|       +-- cli/               # standalone CLI
-|       +-- mnemonic/          # Hindi keyphrase generation and validation
-|       \-- services/          # trusted time helpers
-\-- scripts/                   # packaging and runtime preparation
-```
-
-## Security notes
-
-- Losing the password, keyphrase, or required `.avkkey` can make recovery impossible.
-- Quantum Keyfile archives require the external `.avkkey` file during unlock and use Avikal's fixed hybrid suite: ML-KEM-1024 + X25519 with ML-DSA-87 and SLH-DSA-SHA2-256s.
-- Aavrit-backed TimeCapsule relies on the security and integrity of the external Aavrit deployment.
-- The desktop app decrypts into temporary preview-session directories before cleanup or final extraction.
-- In the CLI today, regular archive workflows are available, drand-style time-lock support exists in the shared engine, and broader bundled PQC convenience plus fuller Aavrit capsule flows are planned for future versions.
-
-See [SECURITY.md](./SECURITY.md) for the current trust model and reporting guidance.
-
-## Libraries and Credits
-
-Avikal is built on top of open-source software and research ecosystems. Credit belongs to the original maintainers and authors of the components that make this project possible.
-
-Main components used in this project include:
-
-- **OpenSSL** - for the bundled PQC runtime used by the desktop app and for PQC-backed archive operations where configured  
-  Copyright The OpenSSL Project Authors  
-  Licensed under Apache License 2.0
-- **Electron** - desktop application shell  
-  Copyright OpenJS Foundation contributors
-- **React** - desktop UI layer  
-  Copyright Meta and contributors
-- **FastAPI** - local backend API for the desktop app  
-  Copyright Sebastián Ramírez and contributors
-- **Uvicorn** - ASGI runtime used by the backend  
-  Copyright Uvicorn contributors
-- **drand / tlock-js** - time-based unlock path for TimeCapsule workflows  
-  Copyright drand authors and contributors
-
-Avikal itself remains an independent project built on top of these tools. Their names, licenses, and rights remain with their original owners.
-
-## Legal
-
-Avikal is a privacy and archival security tool. It is meant for lawful file protection, legitimate private storage, research, backup, and controlled future release workflows.
-
-It must not be used for:
-
-- unlawful concealment of stolen or illegal data
-- malware delivery or ransomware activity
-- extortion, coercion, or blackmail
-- unauthorized access, evasion, or surveillance abuse
-- any use that violates local law, national law, or international law
-
-Users are responsible for how they use this software.
-
-Third-party libraries and runtimes included with Avikal remain under their own licenses. If you redistribute Avikal builds, bundled runtimes, or modified versions, you are responsible for preserving the required third-party license notices and attribution.
+More setup details are in [SETUP.md](./SETUP.md).
 
 ## Documentation
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) - system design, runtime flow, and Aavrit integration
-- [SECURITY.md](./SECURITY.md) - security boundaries, trust model, and reporting process
-- [CONTRIBUTING.md](./CONTRIBUTING.md) - contributor workflow and review expectations
-- [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) - participation standards
-- [CLI_USAGE.md](./CLI_USAGE.md) - standalone CLI guide and examples
+- [SETUP.md](./SETUP.md) - source setup and build commands
+- [CLI_USAGE.md](./CLI_USAGE.md) - CLI usage guide
+- [SECURITY.md](./SECURITY.md) - security model and vulnerability reporting
+- [CONTRIBUTING.md](./CONTRIBUTING.md) - contribution workflow
+- [ROADMAP.md](./ROADMAP.md) - project direction
+- [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) - third-party license notes
+- [updates.md](./updates.md) - v1.0.4 update summary
+
+## Project Status
+
+Avikal is in active beta development. Windows desktop packaging is the primary supported production target. CLI and future Linux/macOS packaging are part of the project direction, but they require separate release verification.
+
+## Responsible Use
+
+Avikal is intended for lawful file protection, backup, research, and controlled release workflows. Users are responsible for complying with applicable laws and for protecting their passwords, keyphrases, and `.avkkey` files.
 
 ## License
 

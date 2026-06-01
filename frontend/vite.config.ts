@@ -13,7 +13,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    strictPort: false,
+    // Keep the dev contract deterministic for Electron and wait-on.
+    strictPort: true,
   },
   build: {
     outDir: 'dist',

@@ -1,6 +1,4 @@
-"""
-Adaptive Brotli compression for Avikal format.
-Optimized to avoid wasting CPU on already-compressed inputs.
+"""Adaptive Brotli compression for Avikal archives.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -49,35 +47,13 @@ def _choose_brotli_quality(data_length: int, source_name: str = None, hint: str 
 
 
 def compress_data(data: bytes, source_name: str = None, hint: str = None) -> bytes:
-    """
-    Compress using adaptive Brotli quality.
-
-    Args:
-        data: Raw bytes to compress
-        source_name: Optional source filename for compression heuristics
-        hint: Optional logical hint such as "container"
-
-    Returns:
-        Compressed bytes
-    """
+    """Compress data using adaptive Brotli quality."""
     quality = _choose_brotli_quality(len(data), source_name=source_name, hint=hint)
     return brotli.compress(data, quality=quality)
 
 
 def decompress_data(data: bytes, max_size: int = None) -> bytes:
-    """
-    Decompress Brotli compressed data with a fixed safety ceiling.
-
-    Args:
-        data: Compressed bytes
-        max_size: Maximum allowed decompressed size
-
-    Returns:
-        Original decompressed bytes
-
-    Raises:
-        ValueError: If decompressed size exceeds max_size (compression bomb protection)
-    """
+    """Decompress data with a fixed safety ceiling."""
     if max_size is None:
         max_size = FIXED_MAX_DECOMPRESSED_SIZE
 

@@ -2,162 +2,133 @@
 
 ## Scope
 
-This repository currently covers three security-relevant surfaces:
+This repository covers:
 
-- the desktop application
+- the Windows desktop application
 - the standalone CLI package
-- the shared Python archive core used by both
+- the shared Python/Rust archive core
+- Avikal client-side Aavrit integration
 
-`Aavrit` server-side code is **not** part of this repository. Avikal's client-side Aavrit integration is in scope here. The Aavrit authority service itself belongs to that separate project.
+The Aavrit server implementation is a separate project and is not covered by this repository.
 
-## Supported code
+## Supported Code
 
-Security fixes are handled on:
+Security fixes target:
 
 - the current default branch
-- the latest published desktop release, if one exists
-- the latest published CLI package release, if one exists
+- the latest published desktop release, if available
+- the latest published CLI release, if available
 
 Older snapshots may not receive backported fixes.
 
-## Current security model
+## Current Security Model
 
-### Core archive protection
+Protected `.avk` archives use:
 
-Protected `.avk` archives currently rely on:
+- AES-256-GCM for authenticated encryption
+- Argon2id for password and keyphrase hardening
+- HKDF-based key separation
+- native Rust-backed crypto for production paths
+- strict container validation before deeper decode work
+- path traversal defenses during extraction
+- bounded decompression and payload streaming checks
 
-- **AES-256-GCM** for authenticated encryption
-- **Argon2id** for password and keyphrase hardening  
-  Current default: **256 MiB**, **t=3**, **p=4**
-- **HKDF-based key separation** so payload, metadata, and helper keys are not reused directly
-- **strict container validation** before deeper decode work begins
-- **header-bound authentication** so header and ciphertext cannot be swapped freely
+Newer protected archives use a random payload data-encryption key wrapped through protected metadata. This allows supported rekey operations without rewriting the encrypted payload stream.
 
-Newer protected archives use a **random payload data-encryption key** wrapped inside `keychain.pgn`. That design enables rekey for supported archives without rewriting `payload.enc`.
-
-### Password and keyphrase protection
+## Password and Keyphrase Handling
 
 Avikal supports:
 
 - password-only protection
-- 21-word Devanagari keyphrase protection
-- password + keyphrase together
+- 21-word Hindi keyphrase protection
+- password and keyphrase together
 
-The keyphrase is normalized before derivation, then hardened through the same Argon2id path used for passwords.
+Passwords and keyphrases are not intentionally persisted. They still exist temporarily in UI/runtime memory while an operation is active. Avikal does not claim protection against a compromised endpoint, keylogger, debugger, or memory-scraping malware.
 
-### Chess metadata layer
+## PQC Mode
 
-Avikal stores protected archive metadata in `keychain.pgn`.
+Optional PQC protection uses OpenSSL-backed primitives, including:
 
-Important distinction:
+- ML-KEM-1024
+- X25519
+- ML-DSA-87
+- SLH-DSA-SHA2-256s
 
-- the PGN route hints used for fast checks are **advisory**
-- the encrypted metadata inside the chess keychain is **authoritative**
+External `.avkkey` files can optionally be protected by an additional keyfile password. Embedded PQC behavior remains separate.
 
-If the public PGN hints are modified, the real decrypt path still depends on the protected metadata and authenticated decrypt checks.
+## TimeCapsule Mode
 
-### PQC mode
+Avikal supports TimeCapsule workflows through:
 
-Optional PQC mode adds a required external `.avkkey` file.
+- drand for public time-based release
+- Aavrit for signed authority-based release
 
-Current PQC implementation uses an OpenSSL 3.5+ provider-backed suite built around:
+TimeCapsule protection depends on network availability and the integrity of the selected release authority. Aavrit-backed workflows additionally depend on the correct operation and trustworthiness of the Aavrit deployment.
 
-- **ML-KEM-1024**
-- **X25519**
-- **ML-DSA-87**
-- **SLH-DSA-SHA2-256s**
+## Desktop Runtime Boundary
 
-The desktop app bundles the PQC runtime. The plain CLI package does **not** bundle it today, so CLI PQC requires a configured OpenSSL runtime path.
+The desktop app uses:
 
-### TimeCapsule mode
+- Electron renderer
+- Electron IPC
+- Electron main process
+- Avikal core process over JSON-RPC/stdin-stdout
+- shared Python orchestration and Rust native crypto
 
-Avikal currently supports two TimeCapsule directions:
+The desktop runtime does not rely on a local HTTP API for normal app communication.
 
-- **drand**: public future-unlock path
-- **Aavrit**: signed authority path
+## Non-Claims
 
-Current product shape:
+Avikal does not claim protection against:
 
-- desktop app: full drand flow and the main Aavrit client flow
-- CLI: shared-engine time-lock support, but not the full Aavrit session / commit / reveal workflow surface
-
-## Trust model
-
-### Desktop app
-
-The desktop app runs:
-
-- Electron shell
-- React frontend
-- local FastAPI backend
-- shared archive core
-
-The local backend is part of the trusted runtime boundary.
-
-### drand
-
-`drand` is the public TimeCapsule release path.
-
-- unlock depends on external drand round availability
-- availability depends on network access
-- release timing is external to this repository
-
-### Aavrit
-
-`Aavrit` is the managed authority path.
-
-- Avikal verifies signed authority material locally
-- the external Aavrit deployment still matters to the overall guarantee
-- misconfiguration or compromise of the Aavrit operator can weaken Aavrit-backed release guarantees independently of the local archive engine
-
-## What this project does not claim to protect against
-
-This project does not claim to protect against:
-
-- malware, spyware, or a compromised host
+- malware or spyware on the same machine
 - keyloggers
-- memory scraping on an already-compromised machine
-- weak user passwords or careless keyphrase handling
-- loss of required secrets or `.avkkey` material
+- memory scraping on a compromised host
+- weak user passwords
+- lost passwords, keyphrases, or `.avkkey` files
 - drand or Aavrit outages
-- legal or operational misuse by the user
+- malicious use by the user
+- information-theoretic secrecy
+- formal steganographic indistinguishability of generated PGN
 
-## Operational guidance
+## Operational Guidance
 
-- Treat `.avkkey` files as critical recovery material.
-- Store the archive and its `.avkkey` separately.
-- Keep system time correct when using TimeCapsule, especially drand.
-- Do not depend on Aavrit-backed archives without understanding the trust placed in the Aavrit operator.
-- The desktop app may use temporary preview-session directories during decryption before cleanup or export.
-- Rekey currently supports regular rekey-capable archives only. PQC and provider time-capsule rekey are intentionally rejected in the current phase.
+- Store `.avkkey` files separately from their matching `.avk` archives.
+- Back up passwords, keyphrases, and keyfiles carefully.
+- Keep system time reliable when using TimeCapsule.
+- Treat decrypted preview files as temporary plaintext.
+- Use the activity export only after confirming it contains no sensitive operational detail for your environment.
+- Use `avikal doctor` to verify CLI runtime readiness.
 
-## Reporting a vulnerability
+## Reporting a Vulnerability
 
 Please report suspected vulnerabilities privately before public disclosure.
 
 Preferred process:
 
-1. Use GitHub private vulnerability reporting if it is enabled.
-2. If that is not available, contact the maintainer through a private channel.
+1. Use GitHub private vulnerability reporting if enabled.
+2. If unavailable, contact the maintainer privately.
 3. Include:
    - affected version, release, or commit
-   - operating system and runtime details
-   - whether the issue affects the desktop app, CLI, or shared archive core
+   - operating system and architecture
+   - affected surface: desktop, CLI, archive core, TimeCapsule, Aavrit client, or packaging
    - reproduction steps
-   - expected behavior and actual behavior
+   - expected behavior
+   - actual behavior
    - proof-of-concept material only when necessary
 
-Please do not open a public issue with exploit details before the maintainer has had a reasonable chance to reproduce and address the problem.
+Do not open a public issue with exploit details before the maintainer has had a reasonable opportunity to reproduce and address the issue.
 
-## High-value report areas
+## High-Value Report Areas
 
 Reports are especially useful for:
 
 - archive encryption and decryption
 - `keychain.pgn` parsing and protected metadata handling
+- payload streaming and chunk authentication
 - payload key wrapping and rekey behavior
-- `.avkkey` generation and validation
-- TimeCapsule verification and unlock routing
-- preview-session handling and local filesystem boundaries
-- Electron-to-backend trust boundaries
-- bundled runtime and OpenSSL PQC integration
+- `.avkkey` generation, wrapping, and validation
+- TimeCapsule unlock routing and authority verification
+- preview-session cleanup and filesystem boundaries
+- Electron preload and IPC boundaries
+- bundled OpenSSL PQC runtime integration

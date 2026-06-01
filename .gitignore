@@ -12,7 +12,17 @@ dist-ssr/
 
 # Local Python runtime and build staging
 .app-build/
+.tmp_build/
+.tmp_wheels_phase2/
+.tmp_backend_smoke_user/
+.tmp_pqc_provider/
+.tmp_electron_probe/
+.tmp_electron_probe2/
+.pytest_tmp_payload/
 native/_build/
+backend/build/
+*.egg-info/
+backend/native/avikal_backend_native/target/
 runtime/pqc/
 backend/venv/
 backend/__pycache__/
@@ -24,7 +34,10 @@ backend/tests/__pycache__/
 
 # Local test and runtime artifacts
 .pytest_cache/
+backend/.tmp_pip/
+backend/.tmp_rekey_tests/
 backend/.tmp_test_runs/
+backend/pytest-cache-files-*/
 .avikal-doctor/
 .avikal-doctor-probe.txt
 logs/

@@ -66,7 +66,13 @@ function inferErrorCode(message: string): ErrorCode {
   const text = message.toLowerCase()
   if (text.includes('authentication failed') || text.includes('session expired') || text.includes('unauthorized')) return 'auth_failed'
   if (text.includes('time-capsule locked') || text.includes('still locked') || text.includes('unlocks in')) return 'time_locked'
-  if (text.includes('incorrect password') || text.includes('wrong password') || text.includes('keyphrase') || text.includes('pqc keyfile')) return 'wrong_password'
+  if (
+    text.includes('incorrect password')
+    || text.includes('wrong password')
+    || text.includes('keyphrase')
+    || text.includes('pqc keyfile')
+    || text.includes('embedded pqc')
+  ) return 'wrong_password'
   if (text.includes('integrity') || text.includes('corrupt') || text.includes('capsule verification failed')) return 'file_corrupted'
   if (text.includes('network error') || text.includes('fetch failed') || text.includes('timed out') || text.includes('service unavailable')) return 'network_error'
   if (text.includes('ntp') || text.includes('trusted time') || text.includes('trusted network time') || text.includes('time verification failed')) return 'ntp_failed'

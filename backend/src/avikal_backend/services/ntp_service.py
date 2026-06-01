@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-NTP Time Service for Avikal Desktop Backend
-Fetches trusted time from time.google.com exclusively.
-Implements 60-second caching and raises errors if NTP sync fails.
-Requirements: 9.1, 9.2, 9.3, 9.6, 9.7, 9.8
+"""Trusted time service backed by time.google.com.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -21,14 +17,12 @@ from typing import Optional
 
 log = logging.getLogger("avikal.ntp")
 
-# Configuration
 NTP_SERVER = "time.google.com"
 NTP_URL = f"https://{NTP_SERVER}"
-CACHE_DURATION_SECONDS = 60  # 60-second cache (Requirement 9.7)
-CLOCK_SKEW_WARNING_SECONDS = 5 * 60  # 5 minutes (Requirement 9.8)
+CACHE_DURATION_SECONDS = 60
+CLOCK_SKEW_WARNING_SECONDS = 5 * 60
 REQUEST_TIMEOUT_SECONDS = 15
 
-# Cache state
 _cached_time_ms: Optional[float] = None
 _cache_timestamp_ms: Optional[float] = None
 _cache_lock = threading.Lock()
@@ -42,11 +36,7 @@ def _now_ms() -> float:
 
 
 def _fetch_ntp_time() -> float:
-    """
-    Fetch current time from time.google.com via HTTP HEAD request.
-    Returns time as Unix timestamp in milliseconds.
-    Raises RuntimeError if NTP synchronization fails (Requirement 9.6).
-    """
+    """Fetch trusted time as a Unix timestamp in milliseconds."""
     try:
         req = urllib.request.Request(NTP_URL, method="HEAD")
         req.add_header("User-Agent", "Avikal-Desktop/1.0")
@@ -68,27 +58,20 @@ def _fetch_ntp_time() -> float:
 
 
 def get_ntp_time_ms() -> float:
-    """
-    Get trusted NTP time in milliseconds.
-    Uses 60-second cache to avoid excessive requests (Requirement 9.7).
-    Raises RuntimeError if NTP synchronization fails (Requirement 9.6).
-    """
+    """Get trusted time in milliseconds."""
     global _cached_time_ms, _cache_timestamp_ms
 
     with _cache_lock:
         now = _now_ms()
 
-        # Check cache
         if _cached_time_ms is not None and _cache_timestamp_ms is not None:
             age_ms = now - _cache_timestamp_ms
             if age_ms < CACHE_DURATION_SECONDS * 1000:
                 # Interpolate elapsed time since last NTP sync
                 return _cached_time_ms + age_ms
 
-        # Fetch fresh NTP time
         ntp_time_ms = _fetch_ntp_time()
 
-        # Check system clock skew (Requirement 9.8)
         system_time_ms = time.time() * 1000
         skew_ms = abs(system_time_ms - ntp_time_ms)
         if skew_ms > CLOCK_SKEW_WARNING_SECONDS * 1000:
@@ -101,7 +84,6 @@ def get_ntp_time_ms() -> float:
                 datetime.fromtimestamp(ntp_time_ms / 1000, tz=timezone.utc).isoformat(),
             )
 
-        # Update cache
         _cached_time_ms = ntp_time_ms
         _cache_timestamp_ms = now
 
@@ -137,28 +119,18 @@ def prime_ntp_cache_async() -> bool:
 
 
 def get_ntp_timestamp() -> int:
-    """
-    Get trusted NTP time as Unix timestamp in seconds.
-    Raises RuntimeError if NTP synchronization fails.
-    """
+    """Get trusted time as a Unix timestamp in seconds."""
     return int(get_ntp_time_ms() / 1000)
 
 
 def get_ntp_datetime_utc() -> datetime:
-    """
-    Get trusted NTP time as a UTC datetime object.
-    Raises RuntimeError if NTP synchronization fails.
-    """
+    """Get trusted time as a UTC datetime."""
     ts = get_ntp_time_ms() / 1000
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
 def get_clock_skew_warning() -> Optional[str]:
-    """
-    Check if system clock differs from NTP time by more than 5 minutes.
-    Returns a warning string if skew is detected, None otherwise.
-    Does NOT raise on NTP failure - returns None instead.
-    """
+    """Return a clock-skew warning when trusted time is available."""
     try:
         ntp_time_ms = get_ntp_time_ms()
         system_time_ms = time.time() * 1000

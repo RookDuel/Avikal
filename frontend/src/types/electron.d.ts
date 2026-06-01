@@ -62,10 +62,31 @@ export interface BackendRuntimeStatus {
   updatedAt: number
 }
 
-export interface BackendRequestConfig {
-  baseUrl: string
-  authHeader: string
-  authToken: string | null
+export interface AppInfo {
+  name: string
+  version: string
+  platform: string
+  arch: string
+  packaged: boolean
+  updateFeed: string
+}
+
+export interface UpdateAsset {
+  name: string
+  size: number
+  url: string
+}
+
+export interface UpdateCheckResult {
+  success: boolean
+  currentVersion: string
+  latestVersion: string
+  updateAvailable: boolean
+  releaseName: string
+  releaseUrl: string
+  publishedAt?: string | null
+  prerelease?: boolean
+  assets?: UpdateAsset[]
 }
 
 declare global {
@@ -82,7 +103,10 @@ declare global {
     openExternal?: (url: string) => Promise<void>
     onBackendLog?: (callback: (message: string) => void) => () => void
     getBackendStatus?: () => Promise<BackendRuntimeStatus>
-    getBackendRequestConfig?: () => Promise<BackendRequestConfig>
+    getAppInfo?: () => Promise<AppInfo>
+    checkForUpdates?: () => Promise<UpdateCheckResult>
+    openLatestRelease?: () => Promise<boolean>
+    invokeCore?: <T = unknown>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
     onBackendStatus?: (callback: (status: BackendRuntimeStatus) => void) => () => void
     minimizeWindow: () => Promise<void>
     maximizeWindow: () => Promise<void>

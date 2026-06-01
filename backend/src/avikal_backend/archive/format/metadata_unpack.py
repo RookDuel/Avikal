@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import struct
 
-from .metadata_pack import METADATA_FORMAT_VERSION
+from ..security.pqc_keyfile import PQC_STORAGE_MODE_EXTERNAL
+from .metadata_pack import METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED
 from .metadata_validation import validate_cascade_metadata_dict
 
 
@@ -28,7 +29,7 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
 
     reader = _MetadataReader(packed)
     version = reader.read_u8("metadata version")
-    if version != METADATA_FORMAT_VERSION:
+    if version not in {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED}:
         raise ValueError(f"Unsupported metadata version: {version}")
 
     flags = reader.read_u8("metadata flags")
@@ -57,6 +58,11 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
     pqc_required = bool(reader.read_u8("PQC required flag"))
     pqc_algorithm = reader.read_short_text("PQC algorithm") or None
     pqc_key_id = reader.read_short_text("PQC key ID") or None
+    pqc_storage_mode = None
+    if version == METADATA_FORMAT_VERSION_EMBEDDED:
+        pqc_storage_mode = reader.read_short_text("PQC storage mode") or None
+    elif pqc_required:
+        pqc_storage_mode = PQC_STORAGE_MODE_EXTERNAL
 
     archive_type = reader.read_short_text("archive type") or None
     entry_count = reader.read_u32("entry count")
@@ -101,6 +107,7 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
         "pqc_required": pqc_required,
         "pqc_algorithm": pqc_algorithm,
         "pqc_key_id": pqc_key_id,
+        "pqc_storage_mode": pqc_storage_mode,
         "keyphrase_format_version": keyphrase_format_version,
         "keyphrase_wordlist_id": keyphrase_wordlist_id,
         "archive_type": archive_type,

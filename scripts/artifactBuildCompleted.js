@@ -1,16 +1,14 @@
 const path = require("path");
+const { stampExecutableMetadata } = require("./windowsMetadata");
 
 module.exports = async function artifactBuildCompleted(context) {
-  if (!context || !context.file) {
+  if (process.platform !== "win32") {
     return;
   }
 
-  const fileName = path.basename(context.file).toLowerCase();
-
-  // The unpacked app executable is already stamped safely in afterPack.
-  // Re-stamping final NSIS installer artifacts here can corrupt the bundled payload
-  // and produce the tiny non-working setup stub. Leave release .exe artifacts untouched.
-  if (fileName !== "rookduel avikal.exe") {
+  if (!context || !context.file || path.extname(context.file).toLowerCase() !== ".exe") {
     return;
   }
+
+  await stampExecutableMetadata(context.file, context.packager.appInfo.version);
 };

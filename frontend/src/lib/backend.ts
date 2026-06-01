@@ -1,75 +1,122 @@
-import type { BackendRequestConfig } from '../types/electron'
 import { waitForBackendReady } from './backendStatus'
+import { invokeCore } from './coreRpc'
 
-export const DEFAULT_BACKEND_BASE_URL = 'http://127.0.0.1:5000'
-export const DEFAULT_BACKEND_AUTH_HEADER = 'X-Avikal-Backend-Token'
-
-const DEFAULT_BACKEND_REQUEST_CONFIG: BackendRequestConfig = {
-  baseUrl: DEFAULT_BACKEND_BASE_URL,
-  authHeader: DEFAULT_BACKEND_AUTH_HEADER,
-  authToken: null,
-}
-
-function normalizeBackendPath(pathname: string): string {
-  return pathname.startsWith('/') ? pathname : `/${pathname}`
-}
-
-export async function getBackendRequestConfig(): Promise<BackendRequestConfig> {
-  if (typeof window === 'undefined' || !window.electron?.getBackendRequestConfig) {
-    return DEFAULT_BACKEND_REQUEST_CONFIG
-  }
-
-  try {
-    const config = await window.electron.getBackendRequestConfig()
-    if (!config?.baseUrl || !config?.authHeader) {
-      return DEFAULT_BACKEND_REQUEST_CONFIG
-    }
-    return config
-  } catch {
-    return DEFAULT_BACKEND_REQUEST_CONFIG
-  }
-}
-
-export async function buildBackendUrl(pathname: string): Promise<string> {
-  const config = await getBackendRequestConfig()
-  return `${config.baseUrl}${normalizeBackendPath(pathname)}`
-}
+export const DEFAULT_BACKEND_BASE_URL = 'stdio://avikal-core'
 
 export async function createBackendHeaders(
   initialHeaders?: HeadersInit,
-  overrides?: { includeAuthToken?: boolean },
+  _overrides?: { includeAuthToken?: boolean },
 ): Promise<Headers> {
-  const config = await getBackendRequestConfig()
-  const headers = new Headers(initialHeaders ?? {})
-  const includeAuthToken = overrides?.includeAuthToken ?? true
-
-  if (includeAuthToken && config.authToken && !headers.has(config.authHeader)) {
-    headers.set(config.authHeader, config.authToken)
-  }
-
-  return headers
+  return new Headers(initialHeaders ?? {})
 }
 
-export async function fetchBackend(
+export async function callCoreResponse(
   pathname: string,
   init: RequestInit = {},
   timeoutMs = 30_000,
 ): Promise<Response> {
   await waitForBackendReady()
-
-  const url = await buildBackendUrl(pathname)
-  const headers = await createBackendHeaders(init.headers)
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
-
   try {
-    return await fetch(url, { ...init, headers, signal: controller.signal })
+    if (init.signal?.aborted) {
+      throw abortError()
+    }
+    const { method, params } = await mapBackendRequestToCore(pathname, init)
+    const coreRequest = invokeCore(method, params, timeoutMs)
+    const result = init.signal
+      ? await Promise.race([coreRequest, rejectOnAbort(init.signal)])
+      : await coreRequest
+    return jsonResponse(result, 200)
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Network error: request timed out after ${Math.round(timeoutMs / 1000)}s`)
+      throw error
     }
-    throw error
-  } finally {
-    window.clearTimeout(timer)
+    const status = typeof (error as { code?: unknown }).code === 'number'
+      ? normalizeStatus((error as { code: number }).code)
+      : 500
+    const message = error instanceof Error ? error.message : 'Avikal core request failed'
+    return jsonResponse({ detail: message, error: message }, status)
   }
+}
+
+function abortError(): Error {
+  const error = new Error('The operation was aborted.')
+  error.name = 'AbortError'
+  return error
+}
+
+function rejectOnAbort(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError())
+      return
+    }
+    signal.addEventListener('abort', () => reject(abortError()), { once: true })
+  })
+}
+
+function jsonResponse(payload: unknown, status: number): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+function normalizeStatus(code: number): number {
+  return code >= 400 && code <= 599 ? code : 500
+}
+
+async function parseJsonBody(init: RequestInit): Promise<Record<string, unknown>> {
+  if (!init.body) return {}
+  if (typeof init.body === 'string') {
+    const parsed = JSON.parse(init.body)
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
+  }
+  throw new Error('Unsupported Avikal core request body')
+}
+
+function headersToRecord(headersInit?: HeadersInit): Record<string, string> {
+  const headers = new Headers(headersInit ?? {})
+  const record: Record<string, string> = {}
+  headers.forEach((value, key) => {
+    record[key.toLowerCase()] = value
+  })
+  return record
+}
+
+async function mapBackendRequestToCore(
+  pathname: string,
+  init: RequestInit,
+): Promise<{ method: string; params: Record<string, unknown> }> {
+  const method = (init.method || 'GET').toUpperCase()
+  const headers = headersToRecord(init.headers)
+
+  if (!pathname.startsWith('/')) {
+    const body = method === 'GET' ? {} : await parseJsonBody(init)
+    if (pathname === 'auth.profile') {
+      return {
+        method: pathname,
+        params: {
+          session_token: headers['x-aavrit-session'] || '',
+          aavrit_url: headers['x-aavrit-server-url'] || undefined,
+        },
+      }
+    }
+    if (pathname === 'auth.logout') {
+      const auth = headers.authorization || ''
+      return {
+        method: pathname,
+        params: {
+          session_token: auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : headers['x-aavrit-session'] || '',
+          aavrit_url: headers['x-aavrit-server-url'] || undefined,
+        },
+      }
+    }
+    if (pathname === 'archive.encrypt' || pathname === 'archive.decrypt') {
+      const auth = headers.authorization || ''
+      if (auth.toLowerCase().startsWith('bearer ')) body.session_token = auth.slice(7).trim()
+    }
+    return { method: pathname, params: body }
+  }
+
+  throw new Error(`Unsupported Avikal core request: ${method} ${pathname}`)
 }

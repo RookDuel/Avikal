@@ -1,1 +1,2 @@
 pyinstaller==6.17.0
+setuptools-rust==1.10.2

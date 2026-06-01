@@ -19,44 +19,17 @@ $Sha256Path = Join-Path $DownloadsRoot "$ArchiveName.sha256"
 $ExtractedSource = Join-Path $SourceRoot "openssl-$Version"
 
 function Find-VcVars64 {
-  $candidates = @()
-  if ($env:VSINSTALLDIR) {
-    $candidates += Join-Path $env:VSINSTALLDIR "VC\Auxiliary\Build\vcvars64.bat"
-  }
-  $candidates += @(
+  $candidates = @(
     "$env:ProgramFiles\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
     "$env:ProgramFiles\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
     "$env:ProgramFiles\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
-    "$env:ProgramFiles\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
-    "$env:ProgramFiles\Microsoft Visual Studio\2026\Community\VC\Auxiliary\Build\vcvars64.bat",
-    "$env:ProgramFiles\Microsoft Visual Studio\2026\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
-    "$env:ProgramFiles\Microsoft Visual Studio\2026\Professional\VC\Auxiliary\Build\vcvars64.bat",
-    "$env:ProgramFiles\Microsoft Visual Studio\2026\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+    "$env:ProgramFiles\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
   )
   foreach ($candidate in $candidates) {
     if (Test-Path -LiteralPath $candidate) {
       return $candidate
     }
   }
-
-  $vswhereCandidates = @(
-    "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe",
-    "$env:ProgramFiles\Microsoft Visual Studio\Installer\vswhere.exe"
-  )
-  foreach ($vswhere in $vswhereCandidates) {
-    if (-not (Test-Path -LiteralPath $vswhere)) {
-      continue
-    }
-
-    $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (-not [string]::IsNullOrWhiteSpace($installPath)) {
-      $vcvars = Join-Path $installPath.Trim() "VC\Auxiliary\Build\vcvars64.bat"
-      if (Test-Path -LiteralPath $vcvars) {
-        return $vcvars
-      }
-    }
-  }
-
   throw "Could not find Visual Studio vcvars64.bat. Install Visual Studio Build Tools 2022 with C++ tools."
 }
 
@@ -155,6 +128,18 @@ if (-not (Test-Path -LiteralPath $opensslExe)) {
 }
 
 $versionOutput = & $opensslExe version
+$licenseFiles = @("LICENSE.txt", "NOTICE.txt", "ACKNOWLEDGEMENTS.md")
+$copiedLicenseFiles = @()
+foreach ($licenseFile in $licenseFiles) {
+  $sourceLicense = Join-Path $ExtractedSource $licenseFile
+  if (Test-Path -LiteralPath $sourceLicense) {
+    Copy-Item -LiteralPath $sourceLicense -Destination (Join-Path $RuntimeRoot $licenseFile) -Force
+    $copiedLicenseFiles += $licenseFile
+  }
+}
+if (-not ($copiedLicenseFiles -contains "LICENSE.txt")) {
+  throw "OpenSSL runtime packaging did not find LICENSE.txt in $ExtractedSource"
+}
 $manifest = [ordered]@{
   version = $Version
   source_url = $SourceUrl
@@ -162,6 +147,8 @@ $manifest = [ordered]@{
   built_at_utc = (Get-Date).ToUniversalTime().ToString("o")
   openssl_version = $versionOutput
   runtime_root = $RuntimeRoot
+  license = "Apache-2.0"
+  license_files = $copiedLicenseFiles
 }
 $manifestPath = Join-Path $RuntimeRoot "avikal-openssl-runtime.json"
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8

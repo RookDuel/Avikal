@@ -37,4 +37,10 @@ def project_root() -> Path:
 
 
 def drand_helper_path() -> Path:
+    source_layout_path = backend_root() / "scripts" / "drand_timelock_helper.mjs"
+    if source_layout_path.exists():
+        return source_layout_path
+    packaged_path = Path(__file__).resolve().parent / "runtime" / "scripts" / "drand_timelock_helper.mjs"
+    if packaged_path.exists():
+        return packaged_path
     return bundle_internal_root() / "scripts" / "drand_timelock_helper.mjs"

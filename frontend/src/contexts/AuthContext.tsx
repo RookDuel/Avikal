@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
-import { fetchBackend } from '../lib/backend'
+import { callCoreResponse } from '../lib/backend'
 
 export interface User {
   id: string
@@ -183,10 +183,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers['X-Aavrit-Session'] = resolvedToken
         headers['X-Aavrit-Server-URL'] = resolvedUrl
 
-        const response = await fetchBackend('/api/auth/profile', { headers })
+        const response = await callCoreResponse('auth.profile', { headers })
         if (!response.ok) {
           const errText = await response.text().catch(() => '(no body)')
-          console.error(`[AuthContext] /api/auth/profile failed: HTTP ${response.status} - ${errText}`)
+          console.error(`[AuthContext] auth.profile failed: ${response.status} - ${errText}`)
           return
         }
 
@@ -214,7 +214,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const connectServer = async (rawAavritUrl: string): Promise<AavritMode> => {
-    const response = await fetchBackend('/api/auth/check-aavrit-server', {
+    const response = await callCoreResponse('auth.checkAavritServer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ aavrit_url: rawAavritUrl.trim() }),
@@ -242,7 +242,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const login = async (credentials: LoginRequest): Promise<boolean> => {
-    const response = await fetchBackend('/api/auth/login', {
+    const response = await callCoreResponse('auth.login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(credentials),
@@ -290,7 +290,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = async () => {
     try {
-      await fetchBackend('/api/auth/logout', { method: 'POST' })
+      const headers: Record<string, string> = {}
+      if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`
+      if (aavritServerUrl) headers['X-Aavrit-Server-URL'] = aavritServerUrl
+      await callCoreResponse('auth.logout', { method: 'POST', headers })
     } catch (error) {
       console.error('Logout request failed:', error)
     }
@@ -313,7 +316,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return
       }
 
-      const serverCheck = await fetchBackend('/api/auth/check-aavrit-server', {
+      const serverCheck = await callCoreResponse('auth.checkAavritServer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ aavrit_url: storedAavritUrl }),
@@ -366,7 +369,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const verifyAndSetSession = async (token: string, url?: string): Promise<boolean> => {
     try {
       const resolvedUrl = url ?? aavritServerUrl ?? loadAavritServerUrl() ?? undefined
-      const response = await fetchBackend('/api/auth/verify-session', {
+      const response = await callCoreResponse('auth.verifySession', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_token: token, aavrit_url: resolvedUrl }),

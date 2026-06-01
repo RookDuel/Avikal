@@ -3,23 +3,23 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Unlock, FolderOpen, FileText, Key, Shield, X, Eye, EyeOff, Download,
   Archive, Upload, Search, CheckCircle2, File, Folder,
-  ChevronRight, ChevronDown, RefreshCw, Fingerprint, Lock, StopCircle
+  ChevronLeft, ChevronRight, ChevronDown, Fingerprint, Lock, StopCircle
 } from 'lucide-react'
 import { api, cancelDecrypt } from '../lib/api'
 import type { KeyphraseWordPair } from '../lib/api'
-import { fetchBackend } from '../lib/backend'
+import { callCoreResponse } from '../lib/backend'
 import { waitForBackendReady } from '../lib/backendStatus'
-import { formatEta, parseBackendProgressChunk } from '../lib/backendProgress'
+import { parseBackendProgressChunk } from '../lib/backendProgress'
 import { getErrorMessage } from '../lib/errors'
 import { getDroppedPaths } from '../lib/electron'
 import { toast } from 'sonner'
 import { useAuth } from '../contexts/AuthContext'
 import { useProgress } from '../hooks/useProgress'
 import SecuritySettings from '../components/SecuritySettings'
-import AuthModal from '../components/AuthModal'
 import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
 import KeyphraseAssistInput, { splitKeyphraseWords } from '../components/KeyphraseAssistInput'
+import ProcessingOverlay from '../components/ProcessingOverlay'
 
 // ── Result Tree Types ─────────────────────────────────────────────
 interface ExtractedFile {
@@ -49,6 +49,13 @@ interface DecryptResponseEnvelope {
   result?: DecryptResultPayload
 }
 
+interface PreviewTab {
+  id: string
+  title: string
+  archivePath: string
+  result: DecryptResponseEnvelope
+}
+
 interface ArchiveInspectHints {
   provider?: 'aavrit' | 'drand' | null
   archive_type?: 'single_file' | 'multi_file' | null
@@ -57,6 +64,7 @@ interface ArchiveInspectHints {
   password_hint?: boolean | null
   keyphrase_hint?: boolean | null
   pqc_required?: boolean | null
+  pqc_storage_mode?: 'embedded' | 'external' | null
   unlock_timestamp?: number | null
   drand_round?: number | null
   keyphrase_wordlist_id?: string | null
@@ -165,9 +173,9 @@ function ResultNode({
   return (
     <div>
       <div
-        className={`flex items-center gap-1.5 py-[6px] pr-3 rounded-md transition-colors duration-150 group cursor-default
-          ${node.isDir ? 'hover:bg-av-border/10 dark:hover:bg-white/[0.04]' : 'hover:bg-av-border/10 dark:hover:bg-white/[0.03]'}
-          ${matchesSearch && searchQuery ? 'bg-av-accent/5' : ''}`}
+        className={`flex items-center gap-2 py-1.5 pr-3 rounded-xl transition-colors duration-150 group cursor-default
+          ${node.isDir ? 'hover:bg-av-border/12' : 'hover:bg-av-border/8'}
+          ${matchesSearch && searchQuery ? 'bg-av-accent/10 ring-1 ring-av-accent/15' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={() => node.isDir && setExpanded(e => !e)}
       >
@@ -179,13 +187,15 @@ function ResultNode({
         ) : <span className="w-4 h-4 shrink-0" />}
 
         {/* Icon */}
-        {node.isDir ? (
-          isExpandedOrForced
-            ? <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" strokeWidth={1.5} />
-            : <Folder className="w-4 h-4 text-amber-400/70 shrink-0" strokeWidth={1.5} />
-        ) : (
-          <FileText className={`w-4 h-4 shrink-0 ${getFileColor(ext)}`} strokeWidth={1.5} />
-        )}
+        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${node.isDir ? 'border-amber-500/20 bg-amber-500/10' : 'border-av-border/45 bg-av-surface/45'}`}>
+          {node.isDir ? (
+            isExpandedOrForced
+              ? <FolderOpen className="w-4 h-4 text-amber-400" strokeWidth={1.5} />
+              : <Folder className="w-4 h-4 text-amber-400/70" strokeWidth={1.5} />
+          ) : (
+            <FileText className={`w-4 h-4 ${getFileColor(ext)}`} strokeWidth={1.5} />
+          )}
+        </div>
 
         {/* Name */}
         <span className={`text-[12.5px] truncate ${node.isDir ? 'text-av-main font-medium' : 'text-av-muted font-normal'}`}>
@@ -193,7 +203,7 @@ function ResultNode({
         </span>
 
         {/* Size */}
-        <span className="text-[10px] text-av-muted/40 font-mono shrink-0 ml-auto mr-1">
+        <span className="text-[10px] text-av-muted/55 font-mono shrink-0 ml-auto mr-1 rounded-md border border-av-border/30 bg-av-border/8 px-2 py-0.5">
           {formatSize(node.size)}
         </span>
 
@@ -252,25 +262,40 @@ export default function Decrypt() {
   const [keyphrase, setKeyphrase] = useState('')
   const [keyphraseWordPairs, setKeyphraseWordPairs] = useState<KeyphraseWordPair[]>([])
   const [pqcKeyfile, setPqcKeyfile] = useState('')
+  const [pqcKeyfileRequiresPassword, setPqcKeyfileRequiresPassword] = useState(false)
+  const [pqcKeyfileInspecting, setPqcKeyfileInspecting] = useState(false)
+  const [pqcKeyfilePassword, setPqcKeyfilePassword] = useState('')
+  const [showPqcKeyfilePassword, setShowPqcKeyfilePassword] = useState(false)
   const [loading, setLoading] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
-  const [decryptionResult, setDecryptionResult] = useState<DecryptResponseEnvelope | null>(null)
+  const [previewTabs, setPreviewTabs] = useState<PreviewTab[]>([])
+  const [activePreviewId, setActivePreviewId] = useState<string | null>(null)
   const [previewFile, setPreviewFile] = useState<ExtractedFile | null>(null)
   const [showSecuritySettings, setShowSecuritySettings] = useState(false)
-  const [showAuthModal, setShowAuthModal] = useState(false)
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'appearance' | 'aavrit' | 'privacy' | 'defaults' | 'runtime' | 'diagnostics'>('appearance')
   const [searchQuery, setSearchQuery] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [archiveHints, setArchiveHints] = useState<ArchiveInspectHints | null>(null)
   // Ref holds the preview session ID that may be created server-side during a decrypt
   const activeSessionIdRef = useRef<string | null>(null)
+  const previewTabsRef = useRef<PreviewTab[]>([])
+  const previewTabStripRef = useRef<HTMLDivElement | null>(null)
   const progress = useProgress()
   const backendRuntime = useBackendRuntime()
-  const canDecrypt = backendRuntime.isReady && file.length > 0 && !loading && !decryptionResult
+  const activePreview = useMemo(() => previewTabs.find(tab => tab.id === activePreviewId) ?? null, [previewTabs, activePreviewId])
+  const decryptionResult = activePreview?.result ?? null
+  const canDecrypt = backendRuntime.isReady && file.length > 0 && !loading && !pqcKeyfileInspecting && (!pqcKeyfileRequiresPassword || pqcKeyfilePassword.trim().length > 0)
+  const expectsEmbeddedPqc = Boolean(archiveHints?.pqc_required && archiveHints?.pqc_storage_mode === 'embedded')
+  const expectsExternalPqc = Boolean(archiveHints?.pqc_required && archiveHints?.pqc_storage_mode !== 'embedded')
 
   const resetUnlockInputs = useCallback(() => {
     setPassword('')
     setKeyphrase('')
     setPqcKeyfile('')
+    setPqcKeyfileRequiresPassword(false)
+    setPqcKeyfileInspecting(false)
+    setPqcKeyfilePassword('')
+    setShowPqcKeyfilePassword(false)
     setShowPassword(false)
   }, [])
 
@@ -320,6 +345,10 @@ export default function Decrypt() {
     }
   }, [])
 
+  useEffect(() => {
+    previewTabsRef.current = previewTabs
+  }, [previewTabs])
+
   const previewFileContent = async (fileObj: ExtractedFile) => {
     const ext = fileObj.filename.split('.').pop()?.toLowerCase()
     if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'txt', 'md', 'json', 'xml', 'csv'].includes(ext || '')) {
@@ -360,8 +389,10 @@ export default function Decrypt() {
   const handleFileSelected = (paths: string[]) => {
     if (paths?.length > 0) {
       setFile([paths[0]])
+      setActivePreviewId(null)
       resetUnlockInputs()
-      setDecryptionResult(null)
+      setPreviewFile(null)
+      setSearchQuery('')
       setArchiveHints(null)
     }
   }
@@ -397,7 +428,21 @@ export default function Decrypt() {
         filters: [{ name: 'RookDuel Avikal PQC Keyfile', extensions: ['avkkey'] }]
       })
       if (selected && selected.length > 0) {
-        setPqcKeyfile(selected[0])
+        const keyfilePath = selected[0]
+        setPqcKeyfile(keyfilePath)
+        setPqcKeyfileRequiresPassword(false)
+        setPqcKeyfileInspecting(true)
+        setPqcKeyfilePassword('')
+        setShowPqcKeyfilePassword(false)
+        try {
+          const info = await api.inspectPqcKeyfile({ keyfile_path: keyfilePath })
+          setPqcKeyfileRequiresPassword(Boolean(info?.requires_keyfile_password))
+        } catch (error) {
+          setPqcKeyfile('')
+          toast.error(getErrorMessage(error, 'Invalid PQC keyfile'))
+        } finally {
+          setPqcKeyfileInspecting(false)
+        }
       }
     } catch (error) {
       console.error('Error selecting PQC keyfile:', error)
@@ -413,7 +458,7 @@ export default function Decrypt() {
     // 2. Tell the backend to clean up any partial preview session dir
     try {
       await waitForBackendReady()
-      await fetchBackend('/api/decrypt/cancel', {
+      await callCoreResponse('preview.cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: activeSessionIdRef.current }),
@@ -433,8 +478,31 @@ export default function Decrypt() {
       toast.info(backendRuntime.detail)
       return
     }
+    if (loading) {
+      toast.info('Another archive is already being decoded. Wait for it to finish before starting the next one.')
+      return
+    }
     if (file.length === 0) {
       toast.error('Please select an encrypted file')
+      return
+    }
+    let keyfileRequiresPassword = pqcKeyfileRequiresPassword
+    if (pqcKeyfile) {
+      try {
+        setPqcKeyfileInspecting(true)
+        const info = await api.inspectPqcKeyfile({ keyfile_path: pqcKeyfile })
+        keyfileRequiresPassword = Boolean(info?.requires_keyfile_password)
+        setPqcKeyfileRequiresPassword(keyfileRequiresPassword)
+      } catch (error) {
+        toast.error(getErrorMessage(error, 'Invalid PQC keyfile'))
+        setPqcKeyfileInspecting(false)
+        return
+      } finally {
+        setPqcKeyfileInspecting(false)
+      }
+    }
+    if (keyfileRequiresPassword && !pqcKeyfilePassword.trim()) {
+      toast.error('Enter the .avkkey password before unlocking.')
       return
     }
     try {
@@ -444,13 +512,15 @@ export default function Decrypt() {
       progress.reset()
       let initialOperation = 'Contacting secure engine...'
       if (archiveHints?.provider === 'drand') {
-        initialOperation = archiveHints.pqc_required
+        initialOperation = expectsExternalPqc
           ? 'Checking release time and required keys...'
+          : expectsEmbeddedPqc
+          ? 'Checking release time and embedded quantum lock...'
           : 'Checking release time and required protections...'
       } else if (archiveHints?.provider === 'aavrit') {
         initialOperation = 'Checking capsule access requirements...'
       } else if (archiveHints?.pqc_required || archiveHints?.password_hint || archiveHints?.keyphrase_hint) {
-        initialOperation = 'Checking required protections...'
+        initialOperation = expectsEmbeddedPqc ? 'Checking embedded quantum protection...' : 'Checking required protections...'
       }
       progress.update({ status: 'running', currentOperation: initialOperation, percentage: null })
 
@@ -460,6 +530,7 @@ export default function Decrypt() {
           password: password || undefined,
           keyphrase: keyphrase ? splitKeyphraseWords(keyphrase) : undefined,
           pqc_keyfile: pqcKeyfile || undefined,
+          pqc_keyfile_password: keyfileRequiresPassword ? pqcKeyfilePassword.trim() : undefined,
         },
         sessionToken || undefined,
       )
@@ -471,7 +542,22 @@ export default function Decrypt() {
         }
         const fileCount = result.result?.file_count || 1
         toast.success(fileCount > 1 ? `${fileCount} files ready for preview` : 'File ready for preview')
-        setDecryptionResult(result)
+        const tabId = result.preview_session_id || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+        const tabTitle = file[0].split('\\').pop()?.split('/').pop() || 'Decoded archive'
+        const nextTab: PreviewTab = {
+          id: tabId,
+          title: tabTitle,
+          archivePath: file[0],
+          result,
+        }
+        setPreviewTabs(current => {
+          const withoutDuplicate = current.filter(tab => tab.id !== tabId)
+          return [...withoutDuplicate, nextTab]
+        })
+        setActivePreviewId(tabId)
+        setFile([])
+        setArchiveHints(null)
+        setSearchQuery('')
         resetUnlockInputs()
         progress.update({ status: 'completed', currentOperation: 'Preview ready', percentage: 100 })
       }
@@ -488,10 +574,14 @@ export default function Decrypt() {
         toast.error(normalizedLockMessage)
       } else if (message.includes('Not authenticated') || message.includes('Please login first')) {
         toast.error('Private Aavrit mode requires a valid session before reveal can continue.')
-        setShowAuthModal(true)
+        setSettingsInitialTab('aavrit')
+        setShowSecuritySettings(true)
       } else if (message.includes('Authentication failed')) toast.error('Authentication failed. Please try again.')
       else if (message.includes('Session expired')) toast.error('Session expired. Please login again.')
       else if (message.includes('requires the matching .avkkey file')) toast.error('This archive requires its matching .avkkey file before decryption can continue.')
+      else if (message.includes('.avkkey requires its keyfile password')) toast.error('This .avkkey requires its keyfile password.')
+      else if (message.includes('Incorrect .avkkey password')) toast.error('Incorrect .avkkey password or corrupted keyfile.')
+      else if (message.includes('embedded PQC') || message.includes('embedded quantum')) toast.error('The embedded quantum protection could not be unlocked. Check the password or keyphrase, or verify that the archive is not corrupted.')
       else if (message.includes('requires both its password and 21-word keyphrase')) toast.error('This archive requires both its password and 21-word keyphrase before decryption can continue.')
       else if (message.includes('requires its password before decryption can continue')) toast.error('This archive requires its password before decryption can continue.')
       else if (message.includes('requires its 21-word keyphrase before decryption can continue')) toast.error('This archive requires its 21-word keyphrase before decryption can continue.')
@@ -503,6 +593,9 @@ export default function Decrypt() {
       else if (message.includes('service unavailable')) toast.error('Time-capsule service unavailable. Try again later.')
       else toast.error(message)
     } finally {
+      setPassword('')
+      setKeyphrase('')
+      setShowPassword(false)
       setLoading(false)
     }
   }
@@ -539,15 +632,33 @@ export default function Decrypt() {
     }
   }
 
-  const handleReset = () => {
-    void cleanupPreviewSession(decryptionResult?.preview_session_id)
-    setDecryptionResult(null)
+  const closePreviewTab = useCallback((tabId: string) => {
+    const tab = previewTabsRef.current.find(item => item.id === tabId)
+    void cleanupPreviewSession(tab?.result.preview_session_id)
+    setPreviewTabs(current => current.filter(item => item.id !== tabId))
+    setActivePreviewId(current => {
+      if (current !== tabId) return current
+      const remaining = previewTabsRef.current.filter(item => item.id !== tabId)
+      return remaining.length > 0 ? remaining[remaining.length - 1].id : null
+    })
     setPreviewFile(null)
+    setSearchQuery('')
+  }, [cleanupPreviewSession])
+
+  const handleNewDecode = useCallback(() => {
     setFile([])
     setSearchQuery('')
     resetUnlockInputs()
     setArchiveHints(null)
-  }
+    setActivePreviewId(null)
+    setPreviewFile(null)
+  }, [resetUnlockInputs])
+
+  const scrollPreviewTabs = useCallback((direction: -1 | 1) => {
+    const strip = previewTabStripRef.current
+    if (!strip) return
+    strip.scrollBy({ left: direction * Math.max(180, strip.clientWidth * 0.55), behavior: 'smooth' })
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -579,27 +690,29 @@ export default function Decrypt() {
 
   useEffect(() => {
     return () => {
-      void cleanupPreviewSession(decryptionResult?.preview_session_id)
+      for (const tab of previewTabsRef.current) {
+        void cleanupPreviewSession(tab.result.preview_session_id)
+      }
     }
-  }, [cleanupPreviewSession, decryptionResult?.preview_session_id])
+  }, [cleanupPreviewSession])
 
   const selectedFileName = file.length > 0 ? (file[0].split('\\').pop()?.split('/').pop() || file[0]) : null
 
   return (
-    <div className="min-h-full w-full max-w-[1600px] mx-auto p-6 lg:p-10 box-border">
+    <div className="av-page-shell">
 
       {/* 60/40 Split Architecture */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
+      <div className="av-work-grid">
 
       {/* ── Left Panel: File / Result Tree (60%) ──────────────────────── */}
       <div
-        className="lg:col-span-3 min-h-[550px] bg-av-surface/60 backdrop-blur-3xl rounded-[24px] shadow-[0_8px_40px_rgba(0,0,0,0.06)] border border-av-border/30 flex flex-col overflow-hidden relative transition-colors duration-300"
+        className="av-primary-panel lg:col-span-3 flex flex-col overflow-hidden relative"
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
         {/* Header */}
-        <div className="px-8 py-7 border-b border-av-border/30 bg-gradient-to-b from-av-surface/80 to-av-surface/40 z-10 shrink-0">
+        <div className="av-panel-header z-10 shrink-0">
           <h2 className="text-[28px] font-medium tracking-tight text-av-main mb-1.5 flex items-center gap-3">
             Unlock Archive <span className="font-light text-av-muted">Open Secure Contents</span>
           </h2>
@@ -608,96 +721,142 @@ export default function Decrypt() {
 
         {/* Loading Overlay */}
         {loading && (
-          <div className="absolute inset-0 z-20 bg-av-surface/80 backdrop-blur-xl flex flex-col items-center justify-center p-8">
-            <div className="w-full max-w-md rounded-3xl bg-av-surface/90 border border-av-border/40 p-8 shadow-[0_20px_60px_rgba(0,0,0,0.12)]">
-              <div className="flex items-center gap-3 mb-5">
-                <div className="p-3 rounded-2xl bg-av-accent/10 border border-av-accent/30">
+          <ProcessingOverlay
+            title="Unlocking Archive"
+            description={progress.currentOperation || 'Preparing secure preview...'}
+            icon={<Unlock className="h-5 w-5 text-av-accent" strokeWidth={1.7} />}
+            percentage={progress.percentage}
+            etaSeconds={progress.etaSeconds}
+            elapsedSeconds={progress.elapsedSeconds}
+            fileSize={progress.fileSize}
+            indeterminateText="Working in secure preview session"
+          >
+            <button
+              id="decrypt-stop-btn"
+              onClick={handleCancelDecrypt}
+              disabled={isCancelling}
+              className="w-full flex items-center justify-center gap-2.5 py-2.5 px-4 rounded-xl bg-red-500/10 border border-red-500/25 text-red-400 text-sm font-medium transition-all hover:bg-red-500/20 hover:border-red-500/50 hover:text-red-300 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isCancelling ? (
+                <>
                   <motion.div
                     animate={{ rotate: 360 }}
-                    transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
-                  >
-                    <RefreshCw className="w-6 h-6 text-av-accent" strokeWidth={1.5} />
-                  </motion.div>
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-xl font-medium tracking-tight text-av-main">Unlocking Archive</h3>
-                  <p className="text-sm text-av-muted font-light">{progress.currentOperation || 'Preparing secure preview...'}</p>
-                </div>
-              </div>
-              <div className="flex items-center justify-between text-xs text-av-muted mb-2">
-                <span>{progress.percentage !== null ? `${Math.round(progress.percentage)}% complete` : 'Working...'}</span>
-                <span>{formatEta(progress.etaSeconds)}</span>
-              </div>
-              <div className="h-2.5 w-full bg-av-border/30 rounded-full overflow-hidden">
-                {progress.percentage !== null ? (
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${Math.max(0, Math.min(100, progress.percentage))}%` }}
-                    className="h-full bg-av-accent rounded-full"
+                    transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
+                    className="w-4 h-4 border-2 border-red-400/30 border-t-red-400 rounded-full"
                   />
-                ) : (
-                  <motion.div
-                    className="h-full w-1/3 rounded-full bg-gradient-to-r from-transparent via-av-accent to-transparent"
-                    animate={{ x: ['0%', '300%'] }}
-                    transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
-                  />
-                )}
-              </div>
-              <div className="mt-4 flex items-center justify-between text-xs text-av-muted">
-                <span>Elapsed {progress.elapsedSeconds}s</span>
-                {progress.fileSize !== null && <span>{Math.round(progress.fileSize / (1024 * 1024))} MB source</span>}
-              </div>
-
-              {/* Stop Button */}
-              <div className="mt-5 pt-4 border-t border-av-border/20">
-                <button
-                  id="decrypt-stop-btn"
-                  onClick={handleCancelDecrypt}
-                  disabled={isCancelling}
-                  className="w-full flex items-center justify-center gap-2.5 py-2.5 px-4 rounded-xl bg-red-500/10 border border-red-500/25 text-red-400 text-sm font-medium transition-all hover:bg-red-500/20 hover:border-red-500/50 hover:text-red-300 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isCancelling ? (
-                    <>
-                      <motion.div
-                        animate={{ rotate: 360 }}
-                        transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
-                        className="w-4 h-4 border-2 border-red-400/30 border-t-red-400 rounded-full"
-                      />
-                      Stopping...
-                    </>
-                  ) : (
-                    <>
-                      <StopCircle className="w-4 h-4" strokeWidth={1.5} />
-                      Stop Decryption
-                    </>
-                  )}
-                </button>
-                <p className="text-[10px] text-av-muted/50 text-center mt-2 font-light">
-                  Stopping will discard any partially decrypted data
-                </p>
-              </div>
-            </div>
-          </div>
+                  Stopping...
+                </>
+              ) : (
+                <>
+                  <StopCircle className="w-4 h-4" strokeWidth={1.5} />
+                  Stop Decryption
+                </>
+              )}
+            </button>
+            <p className="text-[10px] text-av-muted/50 text-center mt-2 font-light">
+              Stopping will discard any partially decrypted data
+            </p>
+          </ProcessingOverlay>
         )}
 
         {/* State 1: Before Decryption — Drop Zone */}
+        {previewTabs.length > 0 && (
+          <div className="av-explorer-toolbar flex items-center gap-2 px-3 py-2.5">
+            <button
+              onClick={() => scrollPreviewTabs(-1)}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-av-border/40 bg-av-surface/65 text-av-muted transition-all hover:border-av-border/70 hover:text-av-main"
+              title="Scroll preview tabs left"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+
+            <div
+              ref={previewTabStripRef}
+              onWheel={(event) => {
+                if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+                event.currentTarget.scrollLeft += event.deltaY
+              }}
+              className="flex min-w-0 flex-1 items-end gap-1.5 overflow-x-auto overflow-y-hidden px-1 pb-1 custom-scrollbar"
+            >
+              {previewTabs.map(tab => {
+                const isActive = tab.id === activePreviewId
+                const fileCount = tab.result.result?.file_count ?? tab.result.result?.files?.length ?? 1
+                return (
+                  <div
+                    key={tab.id}
+                    className={`group flex h-11 min-w-[92px] flex-[1_1_150px] max-w-[210px] items-center rounded-t-2xl rounded-b-xl border transition-all ${
+                      isActive
+                        ? 'border-av-accent/45 bg-av-accent/10 text-av-main shadow-[0_8px_24px_rgba(59,130,246,0.08)]'
+                        : 'border-av-border/35 bg-av-surface/45 text-av-muted hover:border-av-border/70 hover:bg-av-surface/70 hover:text-av-main'
+                    }`}
+                    title={tab.archivePath}
+                  >
+                    <button
+                      onClick={() => {
+                        setActivePreviewId(tab.id)
+                        setFile([])
+                        setSearchQuery('')
+                        setArchiveHints(null)
+                        setPreviewFile(null)
+                      }}
+                      className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left"
+                    >
+                      <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${isActive ? 'text-green-500' : 'text-av-muted/80'}`} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[11.5px] font-semibold leading-tight">{tab.title}</span>
+                        <span className="block truncate text-[9.5px] leading-tight text-av-muted">{fileCount} file{fileCount !== 1 ? 's' : ''}</span>
+                      </span>
+                    </button>
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        closePreviewTab(tab.id)
+                      }}
+                      className="mr-1.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-av-muted opacity-70 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100"
+                      title="Close and wipe preview files"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+
+            <button
+              onClick={() => scrollPreviewTabs(1)}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-av-border/40 bg-av-surface/65 text-av-muted transition-all hover:border-av-border/70 hover:text-av-main"
+              title="Scroll preview tabs right"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+
+            <button
+              onClick={handleNewDecode}
+              disabled={loading}
+              className="shrink-0 rounded-xl border border-av-border/50 bg-av-surface/60 px-3.5 py-2 text-xs font-semibold text-av-main transition-all hover:border-av-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Decode Another
+            </button>
+          </div>
+        )}
+
         {!decryptionResult && (
-          <div className="flex-1 flex flex-col relative overflow-hidden bg-av-border/10 dark:bg-white/[0.01]">
+          <div className="av-left-workspace flex-1 flex flex-col relative overflow-hidden">
             <div className="flex-1 p-8 flex flex-col relative">
               <div
-                className={`flex-1 rounded-2xl border-2 border-dashed flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden cursor-pointer ${
+                  className={`av-drop-zone flex-1 rounded-2xl flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden cursor-pointer ${
                   isDragging
-                    ? 'border-av-accent bg-av-accent/5'
+                    ? 'av-drop-zone-active'
                     : file.length > 0
-                      ? 'border-av-accent/50 bg-av-surface/80'
-                      : 'border-av-border/30 bg-av-surface/40 hover:border-av-accent/30 hover:bg-av-surface/60 text-av-muted'
+                      ? 'border-av-accent/50'
+                      : 'text-av-muted'
                 }`}
                 onClick={!file.length ? handleBrowse : undefined}
               >
-                <div className="absolute inset-0 bg-gradient-to-b from-transparent to-av-border/10 pointer-events-none" />
+                <div className="pointer-events-none absolute inset-0 opacity-0" />
                 <motion.div animate={{ y: isDragging ? -10 : 0 }} className="z-10 flex flex-col items-center">
                   <div className="relative mb-6">
-                    <div className={`absolute inset-0 rounded-2xl blur-xl transition-all duration-500 ${file.length > 0 ? 'bg-av-accent/15' : 'bg-av-border/10'}`} />
+                    <div className="absolute inset-0 rounded-2xl bg-av-border/10" />
                     <div className="w-20 h-20 rounded-2xl bg-av-surface/80 backdrop-blur-sm flex items-center justify-center border border-av-border/30 shadow-[0_4px_20px_rgba(0,0,0,0.05)] text-av-main relative z-10">
                       {file.length > 0
                         ? <Shield className="w-8 h-8 text-av-accent" strokeWidth={1.25} />
@@ -728,7 +887,11 @@ export default function Decrypt() {
                         {archiveHints.provider === 'drand' && <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-[11px] text-av-main">drand time-capsule</span>}
                         {archiveHints.password_hint && <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[11px] text-av-main">Password</span>}
                         {archiveHints.keyphrase_hint && <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-[11px] text-av-main">21-word keyphrase</span>}
-                        {archiveHints.pqc_required && <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-av-main">PQC keyfile</span>}
+                        {archiveHints.pqc_required && (
+                          <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-av-main">
+                            {archiveHints.pqc_storage_mode === 'embedded' ? 'Embedded PQC' : 'External PQC Keyfile'}
+                          </span>
+                        )}
                         {archiveHints.metadata_requires_secret && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">More details unlock after password or keyphrase</span>}
                       </div>
                     </div>
@@ -743,7 +906,7 @@ export default function Decrypt() {
                         <File className="w-3.5 h-3.5" /> Change File
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); setFile([]); setDecryptionResult(null); setPqcKeyfile(''); setArchiveHints(null) }}
+                        onClick={(e) => { e.stopPropagation(); setFile([]); setPqcKeyfile(''); setArchiveHints(null) }}
                         className="flex items-center gap-2 text-xs bg-red-500/10 border border-red-500/20 text-red-400 font-semibold px-4 py-2.5 rounded-xl transition-all shadow-sm hover:bg-red-500/20 active:scale-95"
                       >
                         <X className="w-3.5 h-3.5" /> Remove
@@ -767,14 +930,14 @@ export default function Decrypt() {
         {decryptionResult && extractedFiles.length > 0 && (
           <div className="flex-1 flex flex-col relative overflow-hidden">
             {/* Success Header */}
-            <div className="px-6 py-4 flex items-center justify-between border-b border-av-border bg-av-border/10 shrink-0">
+            <div className="av-explorer-toolbar px-6 py-4 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-3 shrink-0">
                 <div className="w-8 h-8 rounded-lg bg-green-500/10 border border-green-500/20 flex items-center justify-center">
                   <CheckCircle2 className="w-4 h-4 text-green-500" />
                 </div>
                 <div>
                   <span className="text-sm font-medium text-av-main block leading-tight">Unlocked Preview Ready</span>
-                  <span className="text-[10px] text-av-muted font-light">{extractedFiles.length} file{extractedFiles.length !== 1 ? 's' : ''} � {formatSize(totalSize)}</span>
+                  <span className="text-[10px] text-av-muted font-light">{extractedFiles.length} file{extractedFiles.length !== 1 ? 's' : ''} - {formatSize(totalSize)}</span>
                 </div>
               </div>
 
@@ -799,9 +962,9 @@ export default function Decrypt() {
                   <Archive className="w-3 h-3" /> Extract All
                 </button>
                 <button
-                  onClick={handleReset}
+                  onClick={() => activePreviewId && closePreviewTab(activePreviewId)}
                   className="w-8 h-8 rounded-lg flex items-center justify-center bg-av-border/10 hover:bg-av-border/20 transition-colors text-av-main"
-                  title="Decrypt Another"
+                  title="Close and wipe this preview"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -809,7 +972,7 @@ export default function Decrypt() {
             </div>
 
             {/* Tree View */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar px-3 py-3">
+            <div className="av-tree-surface flex-1 overflow-y-auto custom-scrollbar px-3 py-3">
               {resultTree.length > 0 ? (
                 resultTree.map(node => (
                   <ResultNode
@@ -833,7 +996,7 @@ export default function Decrypt() {
       </div>
 
       {/* ── Right Panel: Security Protocol (40%) ─────────────────────── */}
-      <div className={`lg:col-span-2 flex flex-col gap-5 pb-6 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
+      <div className={`av-side-stack av-natural-side-stack lg:col-span-2 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
         <div className="px-2 mb-1">
           <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Unlocking Settings</h3>
@@ -847,8 +1010,8 @@ export default function Decrypt() {
         }`}>
           {password.length > 0 && <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-emerald-500/5 to-transparent pointer-events-none" />}
           <div className="p-5 relative z-10">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex min-w-0 items-start gap-4">
                 <div className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-all duration-300 ${
                   password.length > 0
                     ? 'bg-emerald-500/10 border-emerald-500/30 shadow-inner'
@@ -948,43 +1111,90 @@ export default function Decrypt() {
                   <Fingerprint className={`w-[18px] h-[18px] ${pqcKeyfile.trim().length > 0 ? 'text-amber-500' : 'text-av-muted'}`} strokeWidth={1.5} />
                 </div>
                 <div>
-                  <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Quantum Keyfile</h3>
-                  <p className="text-av-muted text-[13px] font-light">Choose only if this archive was created with an external `.avkkey` file</p>
+                  <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">
+                    {expectsEmbeddedPqc ? 'Embedded Quantum Protection' : 'Quantum Keyfile'}
+                  </h3>
+                  <p className="text-av-muted text-[13px] font-light leading-relaxed">
+                    {expectsEmbeddedPqc
+                      ? 'No external keyfile needed.'
+                      : pqcKeyfileInspecting
+                      ? 'Checking keyfile...'
+                      : pqcKeyfile
+                      ? pqcKeyfile.split(/[\\/]/).pop()
+                      : 'Optional external PQC key.'}
+                  </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleBrowsePqcKeyfile}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-500 hover:bg-amber-500/20 hover:border-amber-500/30 transition-all shadow-sm"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  Browse .avkkey
-                </button>
-                {pqcKeyfile && (
+              {!expectsEmbeddedPqc && (
+                <div className="flex shrink-0 items-center gap-2">
                   <button
-                    onClick={() => setPqcKeyfile('')}
-                    className="w-8 h-8 rounded-lg flex items-center justify-center bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-all"
-                    title="Clear keyfile"
+                    onClick={handleBrowsePqcKeyfile}
+                    className="flex items-center gap-1.5 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] font-semibold text-amber-600 shadow-sm transition-all hover:border-amber-500/35 hover:bg-amber-500/15 dark:text-amber-300"
                   >
-                    <X className="w-4 h-4" />
+                    <Upload className="w-3.5 h-3.5" />
+                    {pqcKeyfile ? 'Change' : 'Browse'}
                   </button>
+                  {pqcKeyfile && (
+                    <button
+                      onClick={() => {
+                        setPqcKeyfile('')
+                        setPqcKeyfileRequiresPassword(false)
+                        setPqcKeyfileInspecting(false)
+                        setPqcKeyfilePassword('')
+                        setShowPqcKeyfilePassword(false)
+                      }}
+                      className="w-8 h-8 rounded-lg flex items-center justify-center bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-all"
+                      title="Clear keyfile"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {expectsEmbeddedPqc ? (
+              <div className="mt-4 flex items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                <p className="text-xs font-medium text-av-main">Embedded PQC will unlock from the `.avk` file.</p>
+              </div>
+            ) : (
+              <div className="mt-4 rounded-xl border border-av-border/35 bg-av-border/10 px-3 py-2.5">
+                <div className="flex items-center gap-2">
+                  <File className="h-4 w-4 shrink-0 text-av-muted" />
+                  <p className={`min-w-0 flex-1 truncate text-xs font-medium ${pqcKeyfile ? 'text-av-main' : 'text-av-muted'}`}>
+                    {pqcKeyfile || 'No .avkkey selected'}
+                  </p>
+                </div>
+                {pqcKeyfileRequiresPassword && (
+                  <div className="mt-3 space-y-2 border-t border-av-border/25 pt-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-500">Keyfile password required</p>
+                    <div className="flex items-center gap-2 rounded-xl border border-av-border/35 bg-av-surface/70 px-3 py-2">
+                      <Lock className="h-4 w-4 text-av-muted" />
+                      <input
+                        type={showPqcKeyfilePassword ? 'text' : 'password'}
+                        value={pqcKeyfilePassword}
+                        onChange={(event) => setPqcKeyfilePassword(event.target.value)}
+                        placeholder=".avkkey password"
+                        className="min-w-0 flex-1 bg-transparent text-sm text-av-main outline-none placeholder:text-av-muted"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPqcKeyfilePassword(value => !value)}
+                        className="text-av-muted transition hover:text-av-main"
+                      >
+                        {showPqcKeyfilePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
-            </div>
-
-            <div className="p-3 rounded-xl bg-av-border/10 dark:bg-white/5 border border-av-border/40">
-              <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-1">Selected Keyfile</p>
-              <p className="text-sm text-av-main break-all">{pqcKeyfile || 'Optional. Choose a `.avkkey` only if this archive was created with PQC protection.'}</p>
-            </div>
-
-            <p className="mt-3 text-[11px] text-amber-500 leading-relaxed">
-              If the archive was created in PQC mode, the wrong keyfile or a missing keyfile will stop decryption completely.
-            </p>
+            )}
           </div>
         </div>
 
         {/* Execution Block */}
-        <div className="shrink-0 flex flex-col gap-3 mt-auto pt-2">
+        <div className="shrink-0 flex flex-col gap-3 pt-2">
           <BackendStartupNotice backend={backendRuntime} compact />
           <button
             onClick={handleDecrypt}
@@ -1012,14 +1222,14 @@ export default function Decrypt() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="theme-backdrop fixed inset-0 flex items-center justify-center z-[100] p-4"
+            className="av-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
             onClick={() => setPreviewFile(null)}
           >
             <motion.div
               initial={{ scale: 0.95, opacity: 0, y: 10 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 10 }}
-              className="bg-av-surface rounded-2xl border border-av-border max-w-4xl w-full shadow-2xl overflow-hidden flex flex-col"
+              className="av-modal-surface flex max-h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-[1.5rem]"
               onClick={e => e.stopPropagation()}
             >
               <div className="flex items-center justify-between p-5 border-b border-av-border bg-av-border/10">
@@ -1050,7 +1260,7 @@ export default function Decrypt() {
                 </div>
               </div>
 
-              <div className="p-12 flex flex-col items-center justify-center flex-1 bg-av-surface min-h-[300px]">
+              <div className="flex min-h-[300px] flex-1 flex-col items-center justify-center overflow-y-auto bg-av-surface p-10 custom-scrollbar">
                 <FileText className="w-20 h-20 text-av-border mb-6" />
                 <h2 className="text-xl font-medium text-av-main mb-2">Open in System Viewer</h2>
                 <p className="text-sm text-av-muted max-w-md text-center">
@@ -1062,8 +1272,7 @@ export default function Decrypt() {
         )}
       </AnimatePresence>
 
-      <SecuritySettings isOpen={showSecuritySettings} onClose={() => setShowSecuritySettings(false)} />
-      <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />
+      <SecuritySettings isOpen={showSecuritySettings} onClose={() => setShowSecuritySettings(false)} initialTab={settingsInitialTab} />
     </div>
   )
 }

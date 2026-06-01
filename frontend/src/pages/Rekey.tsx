@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
-import { Archive, CheckCircle2, ChevronDown, Eye, EyeOff, File, FileKey2, Fingerprint, Key, RefreshCw, RotateCw, ShieldAlert, Upload, X } from 'lucide-react'
+import { Archive, CheckCircle2, ChevronDown, Eye, EyeOff, File, FileKey2, Fingerprint, Key, RotateCw, ShieldAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '../lib/api'
@@ -9,6 +9,7 @@ import { getErrorMessage } from '../lib/errors'
 import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
 import KeyphraseAssistInput, { splitKeyphraseWords } from '../components/KeyphraseAssistInput'
+import ProcessingOverlay from '../components/ProcessingOverlay'
 
 interface ArchiveInspectHints {
   provider?: 'aavrit' | 'drand' | null
@@ -18,6 +19,7 @@ interface ArchiveInspectHints {
   password_hint?: boolean | null
   keyphrase_hint?: boolean | null
   pqc_required?: boolean | null
+  pqc_storage_mode?: 'embedded' | 'external' | null
   unlock_timestamp?: number | null
   drand_round?: number | null
   keyphrase_wordlist_id?: string | null
@@ -82,8 +84,8 @@ export default function Rekey() {
 
   const [showOldPassword, setShowOldPassword] = useState(false)
   const [showNewPassword, setShowNewPassword] = useState(false)
-  const [showCurrentCredentialsPanel, setShowCurrentCredentialsPanel] = useState(true)
-  const [showNewCredentialsPanel, setShowNewCredentialsPanel] = useState(true)
+  const [showCurrentCredentialsPanel, setShowCurrentCredentialsPanel] = useState(false)
+  const [showNewCredentialsPanel, setShowNewCredentialsPanel] = useState(false)
   const [loading, setLoading] = useState(false)
   const [rekeyResult, setRekeyResult] = useState<RekeyResult | null>(null)
   const [keyphraseWordPairs, setKeyphraseWordPairs] = useState<KeyphraseWordPair[]>([])
@@ -313,48 +315,41 @@ export default function Rekey() {
     } catch (error) {
       toast.error(getErrorMessage(error, 'Rekey failed'))
     } finally {
+      setOldPassword('')
+      setOldKeyphrase('')
+      setNewPassword('')
+      setNewKeyphrase('')
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-full w-full max-w-[1600px] mx-auto p-6 lg:p-10 box-border">
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-        <div className="lg:col-span-3 min-h-[550px] bg-av-surface/60 backdrop-blur-3xl rounded-[24px] shadow-[0_8px_40px_rgba(0,0,0,0.06)] border border-av-border/30 flex flex-col overflow-hidden relative transition-colors duration-300">
-          <div className="px-8 py-7 border-b border-av-border/30 bg-gradient-to-b from-av-surface/80 to-av-surface/40 z-10 shrink-0">
-            <h2 className="text-[28px] font-medium tracking-tight text-av-main mb-1.5 flex items-center gap-3">
-              Rekey Archive <span className="font-light text-av-muted">Rotate Credentials Safely</span>
+    <div className="av-page-shell">
+      <div className="av-work-grid">
+        <div className="av-primary-panel lg:col-span-3 flex flex-col overflow-hidden relative">
+          <div className="av-panel-header z-10 shrink-0">
+            <h2 className="text-[26px] font-medium tracking-tight text-av-main mb-1 flex items-center gap-3">
+              Rekey Archive <span className="font-light text-av-muted">Rotate Access</span>
             </h2>
-            <p className="text-av-muted text-sm font-light">Change archive credentials without rewriting the encrypted payload.</p>
+            <p className="text-av-muted text-sm font-light">Change password/keyphrase access without rewriting the payload.</p>
           </div>
 
-          <div className="flex-1 flex flex-col relative overflow-hidden bg-av-border/10 dark:bg-white/[0.01]">
+          <div className="av-left-workspace flex-1 flex flex-col relative overflow-hidden">
             {loading && (
-              <div className="absolute inset-0 z-20 bg-av-surface/80 backdrop-blur-xl flex flex-col items-center justify-center p-8">
-                <div className="w-full max-w-md rounded-3xl bg-av-surface/90 border border-av-border/40 p-8 shadow-[0_20px_60px_rgba(0,0,0,0.12)]">
-                  <div className="flex items-center gap-3 mb-5">
-                    <div className="p-3 rounded-2xl bg-av-accent/10 border border-av-accent/30">
-                      <RefreshCw className="w-6 h-6 text-av-accent animate-spin" strokeWidth={1.5} />
-                    </div>
-                    <div>
-                      <h3 className="text-xl font-medium tracking-tight text-av-main">Rekeying Archive</h3>
-                      <p className="text-sm text-av-muted font-light">Rewrapping the archive access layer while keeping payload bytes unchanged.</p>
-                    </div>
-                  </div>
-                  <div className="h-2.5 w-full bg-av-border/30 rounded-full overflow-hidden">
-                    <motion.div
-                      className="h-full w-1/3 rounded-full bg-gradient-to-r from-transparent via-av-accent to-transparent"
-                      animate={{ x: ['0%', '300%'] }}
-                      transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
-                    />
-                  </div>
-                </div>
-              </div>
+              <ProcessingOverlay
+                title="Rekeying Archive"
+                description="Rewrapping the archive access layer while keeping payload bytes unchanged."
+                icon={<RotateCw className="h-5 w-5 text-av-accent" strokeWidth={1.7} />}
+                percentage={null}
+                sourceLabel="Access layer"
+                statusLabel="Working"
+                indeterminateText="Rotating credential envelope"
+              />
             )}
 
             {rekeyResult ? (
               <div className="flex-1 p-8 flex items-center justify-center">
-                <div className="w-full max-w-lg p-10 rounded-[24px] bg-av-surface/90 backdrop-blur-2xl border border-emerald-500/20 shadow-[0_20px_60px_rgba(16,185,129,0.1)] flex flex-col items-center text-center">
+                <div className="av-result-card w-full max-w-lg p-10 rounded-[24px] flex flex-col items-center text-center">
                   <div className="relative mb-8">
                     <div className="absolute inset-0 bg-emerald-500/20 rounded-full blur-2xl" />
                     <div className="w-20 h-20 rounded-full bg-emerald-500/10 flex items-center justify-center border border-emerald-500/30 relative z-10 shadow-inner">
@@ -383,116 +378,94 @@ export default function Rekey() {
                 </div>
               </div>
             ) : (
-              <div className="flex-1 p-8 flex flex-col">
-                <div className="rounded-[20px] border border-dashed border-av-border/50 bg-av-surface/40 flex-1 p-8 flex flex-col justify-between transition-colors">
-                  <div>
-                    <div className="flex items-center gap-3 mb-5">
-                      <div className="w-14 h-14 rounded-2xl bg-av-main/10 border border-av-border/30 flex items-center justify-center">
-                        <FileKey2 className="w-7 h-7 text-av-main" strokeWidth={1.5} />
+              <div className="flex-1 p-5 flex flex-col">
+                <div className="av-drop-zone rounded-[20px] flex-1 min-h-[360px] p-6 transition-colors">
+                  {!archivePath ? (
+                    <div className="flex h-full min-h-[310px] flex-col items-center justify-center text-center">
+                      <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl border border-av-border/40 bg-av-surface/70 shadow-sm">
+                        <FileKey2 className="h-8 w-8 text-av-main" strokeWidth={1.5} />
                       </div>
-                      <div>
-                        <h3 className="text-xl font-medium text-av-main tracking-tight">Choose an existing `.avk` archive</h3>
-                        <p className="text-sm text-av-muted font-light">Rekey works only for normal rekey-capable archives. TimeCapsule and PQC rekey stay blocked for now.</p>
-                      </div>
+                      <h3 className="text-xl font-medium tracking-tight text-av-main">Select archive</h3>
+                      <p className="mt-2 max-w-sm text-sm text-av-muted">Choose a normal password/keyphrase `.avk` archive.</p>
+                      <button
+                        onClick={handleBrowseArchive}
+                        className="mt-6 flex items-center gap-2 rounded-xl bg-av-main px-5 py-2.5 text-xs font-semibold text-av-surface shadow-[0_2px_12px_rgba(0,0,0,0.15)] transition-all hover:-translate-y-0.5 hover:opacity-90 active:scale-95"
+                      >
+                        <File className="h-3.5 w-3.5" /> Browse .avk
+                      </button>
                     </div>
-
-                    <div className="rounded-2xl border border-av-border/40 bg-av-border/10 p-4">
-                      <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-2">Selected Archive</p>
-                      <p className="text-sm text-av-main break-all">{archivePath || 'No archive selected yet.'}</p>
-                    </div>
-
-                    {archiveHints && (
-                      <div className={`mt-4 rounded-2xl border p-4 ${
-                        unsupportedReason
-                          ? 'border-amber-500/25 bg-amber-500/5'
-                          : 'border-emerald-500/20 bg-emerald-500/5'
-                      }`}>
-                        <div className="flex items-start gap-3">
-                          <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                            unsupportedReason ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'
-                          }`}>
-                            {unsupportedReason ? <ShieldAlert className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-sm font-semibold text-av-main">
-                              {unsupportedReason ? 'Rekey not available for this archive' : 'Archive looks rekey-eligible'}
-                            </p>
-                            <p className="mt-1 text-[13px] leading-relaxed text-av-muted">
-                              {unsupportedReason || 'You can rotate its password and/or keyphrase without rewriting the payload file.'}
-                            </p>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              {archiveHints.password_hint && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">Current password protected</span>}
-                              {archiveHints.keyphrase_hint && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">Current keyphrase protected</span>}
-                              {archiveHints.provider && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">TimeCapsule: {archiveHints.provider}</span>}
-                              {archiveHints.pqc_required && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">PQC required</span>}
+                  ) : (
+                    <div className="flex h-full min-h-[310px] flex-col justify-between gap-5">
+                      <div className="rounded-[22px] border border-av-border/45 bg-av-surface/60 p-5 shadow-sm">
+                        <div className="mb-4 flex items-start justify-between gap-4">
+                          <div className="flex min-w-0 items-start gap-3">
+                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-av-border/40 bg-av-border/10">
+                              <Archive className="h-6 w-6 text-av-main" strokeWidth={1.5} />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-av-muted">Selected Archive</p>
+                              <p className="mt-1 line-clamp-2 break-all text-sm font-medium text-av-main">{archivePath}</p>
                             </div>
                           </div>
+                          {inspectLoading && <span className="shrink-0 rounded-full border border-av-border/40 bg-av-border/10 px-2.5 py-1 text-[10px] text-av-muted">Inspecting</span>}
                         </div>
-                      </div>
-                    )}
-                  </div>
 
-                  <div className="mt-6 flex items-center gap-3">
-                    <button
-                      onClick={handleBrowseArchive}
-                      className="flex items-center gap-2 text-xs bg-av-main text-av-surface font-semibold px-5 py-2.5 rounded-xl transition-all shadow-[0_2px_12px_rgba(0,0,0,0.15)] hover:opacity-90 hover:-translate-y-0.5 active:scale-95"
-                    >
-                      <File className="w-3.5 h-3.5" /> Browse `.avk`
-                    </button>
-                    {archivePath && (
-                      <button
-                        onClick={resetAll}
-                        className="flex items-center gap-2 text-xs bg-red-500/10 border border-red-500/20 text-red-400 font-semibold px-4 py-2.5 rounded-xl transition-all shadow-sm hover:bg-red-500/20 active:scale-95"
-                      >
-                        <X className="w-3.5 h-3.5" /> Remove
-                      </button>
-                    )}
-                    {inspectLoading && <span className="text-xs text-av-muted">Inspecting archive...</span>}
-                  </div>
+                        {archiveHints && (
+                          <div className={`rounded-2xl border p-3 ${
+                            unsupportedReason
+                              ? 'border-amber-500/25 bg-amber-500/5'
+                              : 'border-emerald-500/20 bg-emerald-500/5'
+                          }`}>
+                            <div className="flex items-start gap-2.5">
+                              <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
+                                unsupportedReason ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'
+                              }`}>
+                                {unsupportedReason ? <ShieldAlert className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-sm font-semibold text-av-main">
+                                  {unsupportedReason ? 'Rekey unavailable' : 'Ready for rekey'}
+                                </p>
+                                <p className="mt-1 text-[12px] leading-relaxed text-av-muted">
+                                  {unsupportedReason || 'Rotate password/keyphrase access.'}
+                                </p>
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {archiveHints.password_hint && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">Password</span>}
+                                  {archiveHints.keyphrase_hint && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">Keyphrase</span>}
+                                  {archiveHints.provider && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">TimeCapsule</span>}
+                                  {archiveHints.pqc_required && <span className="rounded-full border border-av-border/40 bg-av-border/10 px-3 py-1 text-[11px] text-av-main">PQC</span>}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={handleBrowseArchive}
+                          className="flex items-center gap-2 rounded-xl bg-av-main px-5 py-2.5 text-xs font-semibold text-av-surface shadow-[0_2px_12px_rgba(0,0,0,0.15)] transition-all hover:-translate-y-0.5 hover:opacity-90 active:scale-95"
+                        >
+                          <File className="h-3.5 w-3.5" /> Change Archive
+                        </button>
+                        <button
+                          onClick={resetAll}
+                          className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-xs font-semibold text-red-400 shadow-sm transition-all hover:bg-red-500/20 active:scale-95"
+                        >
+                          <X className="h-3.5 w-3.5" /> Remove
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
           </div>
         </div>
 
-        <div className={`lg:col-span-2 flex flex-col gap-5 pb-6 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
+        <div className={`av-side-stack av-natural-side-stack lg:col-span-2 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
           <div className="px-2 mb-1">
             <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Rekey Settings</h3>
-          </div>
-
-          <div className="rounded-[20px] border bg-av-surface/40 border-av-border/30 shadow-sm overflow-hidden backdrop-blur-xl">
-            <div className="p-5">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-11 h-11 rounded-xl flex items-center justify-center border bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20">
-                    <RotateCw className="w-[18px] h-[18px] text-av-muted" strokeWidth={1.5} />
-                  </div>
-                  <div>
-                    <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Output Archive</h3>
-                    <p className="text-av-muted text-[13px] font-light">Choose where the rekeyed `.avk` should be written</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-3 rounded-xl bg-av-border/10 dark:bg-white/5 border border-av-border/40">
-                <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-1">Destination</p>
-                <p className="text-sm text-av-main break-all">{outputFilePath || 'Choose a destination for the new archive.'}</p>
-              </div>
-
-              <div className="mt-4 flex items-center gap-3">
-                <button
-                  onClick={handleChooseOutput}
-                  disabled={!archivePath}
-                  className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all shadow-sm ${
-                    archivePath
-                      ? 'bg-av-main text-av-surface border border-av-main hover:opacity-90'
-                      : 'bg-av-border/10 border border-av-border/20 text-av-muted cursor-not-allowed'
-                  }`}
-                >
-                  {outputFilePath ? 'Change Output Destination' : 'Choose Output Destination'}
-                </button>
-              </div>
-            </div>
           </div>
 
           <div className={`rounded-[20px] border shadow-sm overflow-hidden backdrop-blur-xl ${
@@ -500,9 +473,9 @@ export default function Rekey() {
               ? 'bg-amber-500/8 border-amber-500/30'
               : 'bg-av-surface/40 border-av-border/30'
           }`}>
-            <div className="p-5">
-              <div className="flex items-start gap-4">
-                <div className={`w-11 h-11 rounded-xl flex items-center justify-center border shadow-[0_2px_8px_rgba(0,0,0,0.04)] shrink-0 ${
+            <div className="p-4">
+              <div className="flex items-start gap-3">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center border shadow-[0_2px_8px_rgba(0,0,0,0.04)] shrink-0 ${
                   isReducingProtection
                     ? 'bg-amber-500/10 border-amber-500/25 text-amber-500'
                     : 'bg-av-surface border-av-border/20 text-av-accent'
@@ -510,27 +483,39 @@ export default function Rekey() {
                   {isReducingProtection ? <ShieldAlert className="w-[18px] h-[18px]" strokeWidth={1.5} /> : <Archive className="w-[18px] h-[18px]" strokeWidth={1.5} />}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Resulting Archive Protection</h3>
-                  <p className="text-av-muted text-[13px] font-light leading-relaxed">
-                    Rekey replaces the archive&apos;s full protection set. The new archive will require exactly what you keep enabled below.
-                  </p>
+                  <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Rekey Output</h3>
+                  <p className="text-av-muted text-[12px] font-light leading-relaxed">{resultingProtectionNotice}</p>
                 </div>
               </div>
 
-              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="rounded-2xl border border-av-border/35 bg-av-border/10 p-4">
-                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-2">Current Archive</p>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <div className="rounded-2xl border border-av-border/35 bg-av-border/10 p-3">
+                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.18em] mb-1">Current</p>
                   <p className="text-sm font-medium text-av-main">{currentProtectionSet}</p>
                 </div>
-                <div className="rounded-2xl border border-av-border/35 bg-av-border/10 p-4">
-                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-2">After Rekey</p>
+                <div className="rounded-2xl border border-av-border/35 bg-av-border/10 p-3">
+                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.18em] mb-1">After</p>
                   <p className="text-sm font-medium text-av-main">{resultingProtectionSet}</p>
                 </div>
               </div>
 
-              <p className={`mt-4 text-[12px] leading-relaxed ${isReducingProtection ? 'text-amber-500 font-medium' : 'text-av-muted'}`}>
-                {resultingProtectionNotice}
-              </p>
+              <div className="mt-3 rounded-xl border border-av-border/40 bg-av-border/10 p-3">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.18em]">Destination</p>
+                  <button
+                    onClick={handleChooseOutput}
+                    disabled={!archivePath}
+                    className={`rounded-lg px-3 py-1.5 text-[11px] font-semibold transition-colors ${
+                      archivePath
+                        ? 'bg-av-main text-av-surface hover:opacity-90'
+                        : 'bg-av-border/20 text-av-muted cursor-not-allowed'
+                    }`}
+                  >
+                    {outputFilePath ? 'Change' : 'Choose'}
+                  </button>
+                </div>
+                <p className="line-clamp-2 break-all text-sm text-av-main">{outputFilePath || 'No output selected.'}</p>
+              </div>
             </div>
           </div>
 
@@ -538,8 +523,8 @@ export default function Rekey() {
             icon={<Fingerprint className="w-[18px] h-[18px] text-emerald-500" strokeWidth={1.5} />}
             title="Current Credentials"
             description={currentNeedsBoth
-              ? 'This archive appears to require both its current password and current 21-word keyphrase.'
-              : 'Enter the current password, keyphrase, or both depending on how the archive was created.'}
+              ? 'Current password and keyphrase are required.'
+              : 'Enter the current secret.'}
             summary={currentCredentialSummary}
             open={showCurrentCredentialsPanel}
             onToggle={() => setShowCurrentCredentialsPanel((value) => !value)}
@@ -577,26 +562,26 @@ export default function Rekey() {
           <CollapsibleSettingsCard
             icon={<Key className="w-[18px] h-[18px] text-purple-500" strokeWidth={1.5} />}
             title="New Credentials"
-            description="Choose the full protection set the rekeyed archive should require during decryption."
+            description="Choose the new required secret."
             summary={newCredentialSummary}
             open={showNewCredentialsPanel}
             onToggle={() => setShowNewCredentialsPanel((value) => !value)}
           >
             <div className="space-y-4">
                 <div className={`rounded-[18px] border transition-all duration-300 overflow-hidden backdrop-blur-xl ${newPasswordEnabled ? 'bg-av-surface/80 border-emerald-500/35 ring-1 ring-emerald-500/15' : 'bg-av-surface/40 border-av-border/30'}`}>
-                  <div className="p-4 flex items-center justify-between">
+                  <div className="p-3.5 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <LockBadge />
                       <div>
                         <h4 className="text-sm font-medium text-av-main">New Password</h4>
-                        <p className="text-[12px] text-av-muted">Rotate to a stronger password if needed.</p>
+                        <p className="text-[12px] text-av-muted">Password access</p>
                       </div>
                     </div>
                     <Toggle checked={newPasswordEnabled} onClick={() => setNewPasswordEnabled((value) => !value)} />
                   </div>
 
                   {newPasswordEnabled && (
-                    <div className="px-4 pb-4 space-y-4">
+                    <div className="px-3.5 pb-3.5 space-y-3">
                       <div className="relative rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)]">
                         <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
                           <Fingerprint className="w-4 h-4 text-emerald-400" />
@@ -613,7 +598,7 @@ export default function Rekey() {
                         </button>
                       </div>
 
-                      <div className="p-4 bg-container-bg border border-av-border/30 rounded-xl shadow-[inset_0_4px_15px_var(--container-bg)]">
+                      <div className="p-3 bg-container-bg border border-av-border/30 rounded-xl shadow-[inset_0_4px_15px_var(--container-bg)]">
                         <div className="flex items-center justify-between text-[10px] font-bold text-av-main opacity-80 mb-2.5 uppercase tracking-[0.15em]">
                           <span>Password Strength</span>
                           <span className={passwordStrength < 40 ? 'text-red-400' : passwordStrength < 80 ? 'text-amber-400' : 'text-emerald-400'}>
@@ -628,7 +613,7 @@ export default function Rekey() {
                             }`}
                           />
                         </div>
-                        <div className="grid grid-cols-2 gap-y-2.5 text-[11px] font-medium text-av-main opacity-90 tracking-wide">
+                        <div className="grid grid-cols-2 gap-y-2 text-[10.5px] font-medium text-av-main opacity-90 tracking-wide">
                           <RuleDot ok={hasMinLen} label="Length >= 12" />
                           <RuleDot ok={hasUpper} label="Uppercase" />
                           <RuleDot ok={hasLower} label="Lowercase" />
@@ -641,47 +626,29 @@ export default function Rekey() {
                 </div>
 
                 <div className={`rounded-[18px] border transition-all duration-300 overflow-hidden backdrop-blur-xl ${newKeyphraseEnabled ? 'bg-av-surface/80 border-purple-500/35 ring-1 ring-purple-500/15' : 'bg-av-surface/40 border-av-border/30'}`}>
-                  <div className="p-4 flex items-center justify-between">
+                  <div className="p-3.5 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <KeyBadge />
                       <div>
                         <h4 className="text-sm font-medium text-av-main">New Keyphrase</h4>
-                        <p className="text-[12px] text-av-muted">Rotate to a fresh 21-word Devanagari keyphrase.</p>
+                        <p className="text-[12px] text-av-muted">21-word access</p>
                       </div>
                     </div>
                     <Toggle checked={newKeyphraseEnabled} onClick={() => setNewKeyphraseEnabled((value) => !value)} />
                   </div>
 
                   {newKeyphraseEnabled && (
-                    <div className="px-4 pb-4 space-y-4">
-                      {!newKeyphrase ? (
-                        <button onClick={handleGenerateKeyphrase} className="w-full py-3.5 rounded-xl border border-purple-500/20 bg-purple-500/10 shadow-sm hover:bg-purple-500/15 text-[13px] font-semibold transition-all duration-300 flex items-center justify-center gap-2.5 text-purple-700 dark:text-purple-300 hover:border-purple-500/40">
-                          <RefreshCw className="w-4 h-4" /> Generate New Keyphrase
+                    <div className="px-3.5 pb-3.5 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <button onClick={handleGenerateKeyphrase} className="flex-1 rounded-xl border border-purple-500/20 bg-purple-500/10 py-2.5 text-[13px] font-semibold text-purple-700 shadow-sm transition-colors hover:border-purple-500/40 hover:bg-purple-500/15 dark:text-purple-300">
+                          {newKeyphrase ? 'Regenerate Keyphrase' : 'Generate New Keyphrase'}
                         </button>
-                      ) : (
-                        <div className="security-keyphrase-card rounded-2xl p-4">
-                          <div className="security-keyphrase-header mb-3 flex items-center justify-between pb-3 text-[10px] font-bold uppercase tracking-[0.16em]">
-                            <span>New Keyphrase</span>
-                            <span className="security-keyphrase-badge rounded-full px-2 py-0.5">21 Words</span>
-                          </div>
-                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                            {newKeyphrase.split(' ').map((word, idx) => (
-                              <div key={`${word}-${idx}`} className="security-keyphrase-chip flex min-w-0 overflow-hidden rounded-lg transition-colors">
-                                <span className="security-keyphrase-index flex w-7 shrink-0 items-center justify-center py-1 text-[9px] font-bold tracking-wider tabular-nums">{(idx + 1).toString().padStart(2, '0')}</span>
-                                <span className="min-w-0 flex-1 truncate px-2 py-1 text-[11px] font-semibold">{word}</span>
-                              </div>
-                            ))}
-                          </div>
-                          <div className="security-keyphrase-actions mt-4 flex items-center gap-3 pt-4">
-                            <button onClick={handleCopyKeyphrase} className="security-keyphrase-copy flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-xs font-semibold transition-colors duration-300">
-                              {isCopied ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> Copied</> : <><Upload className="w-4 h-4" /> Copy</>}
-                            </button>
-                            <button onClick={handleGenerateKeyphrase} className="security-keyphrase-secondary rounded-lg px-4 py-2 text-xs font-semibold transition-colors duration-300">
-                              Regenerate
-                            </button>
-                          </div>
-                        </div>
-                      )}
+                        {newKeyphrase && (
+                          <button onClick={handleCopyKeyphrase} className="rounded-xl border border-av-border/40 bg-av-border/10 px-4 py-2.5 text-xs font-semibold text-av-muted transition-colors hover:bg-av-border/20 hover:text-av-main">
+                            {isCopied ? 'Copied' : 'Copy'}
+                          </button>
+                        )}
+                      </div>
 
                       <KeyphraseAssistInput
                         value={newKeyphrase}
@@ -716,7 +683,7 @@ export default function Rekey() {
             </motion.div>
           )}
 
-          <div className="shrink-0 flex flex-col gap-3 mt-auto pt-2">
+          <div className="shrink-0 flex flex-col gap-3 pt-2">
             <BackendStartupNotice backend={backendRuntime} compact />
             <button
               onClick={handleRekey}
@@ -775,15 +742,15 @@ function CollapsibleSettingsCard({
 }) {
   return (
     <div className="rounded-[20px] border bg-av-surface/40 border-av-border/30 shadow-sm overflow-hidden backdrop-blur-xl">
-      <div className="p-5 flex items-start justify-between gap-4">
-        <div className="flex items-start gap-4 min-w-0 flex-1">
-          <div className="w-11 h-11 rounded-xl flex items-center justify-center border bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20 shrink-0">
+      <div className="p-4 flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3 min-w-0 flex-1">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center border bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20 shrink-0">
             {icon}
           </div>
           <div className="min-w-0">
             <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">{title}</h3>
-            <p className="text-av-muted text-[13px] font-light leading-relaxed">{description}</p>
-            <p className="mt-2 text-[11px] font-medium text-av-muted truncate">{summary}</p>
+            <p className="text-av-muted text-[12px] font-light leading-relaxed">{description}</p>
+            <p className="mt-1 text-[11px] font-medium text-av-muted truncate">{summary}</p>
           </div>
         </div>
         <button
@@ -798,7 +765,7 @@ function CollapsibleSettingsCard({
       </div>
 
       {open && (
-        <div className="px-5 pb-5">
+        <div className="px-4 pb-4">
           {children}
         </div>
       )}

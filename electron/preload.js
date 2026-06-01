@@ -5,8 +5,7 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Expose protected methods to renderer
-contextBridge.exposeInMainWorld('electron', {
+const electronBridge = Object.freeze({
   // File dialogs
   openFile: (options) => ipcRenderer.invoke('dialog:openFile', options),
   saveFile: (options) => ipcRenderer.invoke('dialog:saveFile', options),
@@ -32,11 +31,11 @@ contextBridge.exposeInMainWorld('electron', {
   isLinux: process.platform === 'linux',
 
   // Secure token storage
-  safeStorage: {
+  safeStorage: Object.freeze({
     encrypt: (data) => ipcRenderer.invoke('safeStorage:encrypt', data),
     decrypt: (encryptedData) => ipcRenderer.invoke('safeStorage:decrypt', encryptedData),
     isAvailable: () => ipcRenderer.invoke('safeStorage:isAvailable'),
-  },
+  }),
   getPendingLaunchAction: () => ipcRenderer.invoke('launchAction:getPending'),
   onLaunchAction: (callback) => {
     const listener = (event, data) => callback(data);
@@ -49,10 +48,16 @@ contextBridge.exposeInMainWorld('electron', {
     return () => ipcRenderer.removeListener('backend-log', listener);
   },
   getBackendStatus: () => ipcRenderer.invoke('backend:getStatus'),
-  getBackendRequestConfig: () => ipcRenderer.invoke('backend:getRequestConfig'),
+  getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  openLatestRelease: () => ipcRenderer.invoke('updates:openLatest'),
+  invokeCore: (method, params, timeoutMs) => ipcRenderer.invoke('core:invoke', method, params, timeoutMs),
   onBackendStatus: (callback) => {
     const listener = (event, data) => callback(data);
     ipcRenderer.on('backend-status', listener);
     return () => ipcRenderer.removeListener('backend-status', listener);
   },
 });
+
+// Expose protected methods to renderer
+contextBridge.exposeInMainWorld('electron', electronBridge);

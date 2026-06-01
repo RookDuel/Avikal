@@ -1,13 +1,4 @@
-"""
-Trusted UTC time helpers for time-capsule validation and timestamp conversion.
-
-Primary source:
-- strict UDP-based Google NTP path
-
-Fallback source:
-- cached HTTPS Date-header path from the backend NTP service
-
-System time is never used as a trusted fallback for unlock validation.
+"""Trusted UTC time helpers for time-capsule validation.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -29,12 +20,7 @@ def _ensure_utc_datetime(value: datetime) -> datetime:
 
 
 def _get_trusted_utc_now() -> datetime:
-    """
-    Return trusted UTC time from the backend NTP service (time.google.com HTTPS).
-
-    Raises:
-        ConnectionError: if the NTP service is unreachable
-    """
+    """Return trusted UTC time from the backend NTP service."""
     try:
         from avikal_backend.services.ntp_service import get_ntp_datetime_utc
 
@@ -49,10 +35,7 @@ def _get_trusted_utc_now() -> datetime:
 
 
 def get_trusted_now_ntp() -> datetime:
-    """
-    Get current trusted time in UTC.
-    Uses strict Google NTP first, then the backend trusted HTTP time fallback.
-    """
+    """Get current trusted UTC time."""
     try:
         return _get_trusted_utc_now()
     except Exception as exc:
@@ -68,9 +51,7 @@ def get_trusted_now() -> datetime:
 
 
 def datetime_to_timestamp_ntp(unlock_dt: datetime) -> int:
-    """
-    Convert a datetime to a Unix timestamp after validating it against trusted UTC time.
-    """
+    """Convert a datetime after validating it against trusted UTC time."""
     normalized = _ensure_utc_datetime(unlock_dt)
 
     try:
@@ -91,11 +72,7 @@ def datetime_to_timestamp_ntp(unlock_dt: datetime) -> int:
 
 
 def datetime_to_timestamp(unlock_dt: datetime, use_ntp: bool = False) -> int:
-    """
-    Convert a datetime to a Unix timestamp in UTC.
-
-    Naive datetimes are treated as UTC to avoid locale-dependent behavior.
-    """
+    """Convert a datetime to a Unix timestamp in UTC."""
     normalized = _ensure_utc_datetime(unlock_dt)
     if use_ntp:
         return datetime_to_timestamp_ntp(normalized)

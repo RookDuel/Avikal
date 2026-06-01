@@ -5,7 +5,7 @@
  * Safe-to-retry requests are wrapped with retry logic for transient failures.
  */
 
-import { buildBackendUrl, createBackendHeaders, fetchBackend } from './backend'
+import { callCoreResponse, createBackendHeaders } from './backend'
 import { waitForBackendReady } from './backendStatus'
 import { withRetry } from './retry'
 
@@ -75,11 +75,12 @@ export async function fetchWithTimeout(
   options: RequestInit = {},
   timeoutMs = 30_000,
 ): Promise<Response> {
-  return fetchBackend(path, options, timeoutMs)
+  return callCoreResponse(path, options, timeoutMs)
 }
 
 export interface EncryptRequest {
   input_files: string[]
+  excluded_input_paths?: string[]
   output_file: string
   password?: string
   keyphrase?: string[]
@@ -87,7 +88,10 @@ export interface EncryptRequest {
   use_timecapsule: boolean
   timecapsule_provider?: 'aavrit' | 'drand'
   pqc_enabled?: boolean
+  pqc_storage_mode?: 'embedded' | 'external'
   pqc_keyfile_output?: string
+  pqc_keyfile_protection_mode?: 'archive_secret' | 'dual_password'
+  pqc_keyfile_password?: string
 }
 
 export interface DecryptRequest {
@@ -96,6 +100,7 @@ export interface DecryptRequest {
   password?: string
   keyphrase?: string[]
   pqc_keyfile?: string
+  pqc_keyfile_password?: string
 }
 
 export interface PreviewCleanupRequest {
@@ -104,6 +109,10 @@ export interface PreviewCleanupRequest {
 
 export interface ArchiveInspectRequest {
   input_file: string
+}
+
+export interface PqcKeyfileInspectRequest {
+  keyfile_path: string
 }
 
 export interface RekeyRequest {
@@ -136,23 +145,21 @@ export interface VerifySessionRequest {
 
 export const api = {
   async encrypt(data: EncryptRequest, token?: string) {
-    await waitForBackendReady()
     const headers = await createBackendHeaders({ 'Content-Type': 'application/json' })
     if (data.use_timecapsule && data.timecapsule_provider === 'aavrit' && token) {
       headers.set('Authorization', `Bearer ${token}`)
     }
 
-    const response = await fetch(await buildBackendUrl('/api/encrypt'), {
+    const response = await callCoreResponse('archive.encrypt', {
       method: 'POST',
       headers,
       body: JSON.stringify(data),
-    })
+    }, 0)
     if (!response.ok) throw new Error(await readErrorResponse(response, 'Encryption failed'))
     return response.json()
   },
 
   async decrypt(data: DecryptRequest, token?: string) {
-    await waitForBackendReady()
     const headers = await createBackendHeaders({ 'Content-Type': 'application/json' })
     if (token) {
       headers.set('Authorization', `Bearer ${token}`)
@@ -165,16 +172,13 @@ export const api = {
     _decryptAbortController = new AbortController()
     const signal = _decryptAbortController.signal
 
-    // 5-minute timeout for large archives
-    const timer = setTimeout(() => _decryptAbortController?.abort(), 300_000)
-
     try {
-      const response = await fetch(await buildBackendUrl('/api/decrypt'), {
+      const response = await callCoreResponse('archive.decrypt', {
         method: 'POST',
         headers,
         body: JSON.stringify(data),
         signal,
-      })
+      }, 0)
       if (!response.ok) throw new Error(await readErrorResponse(response, 'Decryption failed'))
       return response.json()
     } catch (err) {
@@ -185,13 +189,12 @@ export const api = {
       }
       throw err
     } finally {
-      clearTimeout(timer)
       _decryptAbortController = null
     }
   },
 
   async inspectArchive(data: ArchiveInspectRequest) {
-    const response = await fetchWithTimeout('/api/archive/inspect', {
+    const response = await fetchWithTimeout('archive.inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -200,9 +203,19 @@ export const api = {
     return response.json()
   },
 
+  async inspectPqcKeyfile(data: PqcKeyfileInspectRequest) {
+    const response = await fetchWithTimeout('pqc.keyfileInspect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }, 10_000)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'PQC keyfile inspection failed'))
+    return response.json()
+  },
+
   async rekeyArchive(data: RekeyRequest) {
     await waitForBackendReady()
-    const response = await fetchWithTimeout('/api/archive/rekey', {
+    const response = await fetchWithTimeout('archive.rekey', {
       method: 'POST',
       headers: await createBackendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(data),
@@ -212,7 +225,7 @@ export const api = {
   },
 
   async cleanupDecryptSession(data: PreviewCleanupRequest) {
-    const response = await fetchWithTimeout('/api/decrypt/cleanup-session', {
+    const response = await fetchWithTimeout('preview.cleanupSession', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -223,7 +236,7 @@ export const api = {
 
   async generateKeyphrase(wordCount = 21) {
     return withRetry(async () => {
-      const response = await fetchWithTimeout('/api/generate-keyphrase', {
+      const response = await fetchWithTimeout('keyphrase.generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ word_count: wordCount, language: 'hindi' }),
@@ -235,7 +248,7 @@ export const api = {
 
   async getKeyphraseRomanMap(): Promise<KeyphraseRomanMapResponse> {
     return withRetry(async () => {
-      const response = await fetchWithTimeout('/api/keyphrase/roman-map')
+      const response = await fetchWithTimeout('keyphrase.romanMap')
       if (!response.ok) throw new Error(await readErrorResponse(response, 'Keyphrase helper loading failed'))
       return response.json()
     })
@@ -243,7 +256,7 @@ export const api = {
 
   async verifySession(sessionToken: string, aavritUrl?: string) {
     return withRetry(async () => {
-      const response = await fetchWithTimeout('/api/auth/verify-session', {
+      const response = await fetchWithTimeout('auth.verifySession', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_token: sessionToken, aavrit_url: aavritUrl }),
@@ -258,15 +271,19 @@ export const api = {
       const headers: Record<string, string> = {}
       if (token) headers['X-Aavrit-Session'] = token
       if (aavritUrl) headers['X-Aavrit-Server-URL'] = aavritUrl
-      const response = await fetchWithTimeout('/api/auth/profile', { headers })
+      const response = await fetchWithTimeout('auth.profile', { headers })
       if (!response.ok) throw new Error(await readErrorResponse(response, 'Profile fetch failed'))
       return response.json()
     })
   },
 
-  async logout() {
-    const response = await fetchWithTimeout('/api/auth/logout', {
+  async logout(token?: string, aavritUrl?: string) {
+    const headers: Record<string, string> = {}
+    if (token) headers.Authorization = `Bearer ${token}`
+    if (aavritUrl) headers['X-Aavrit-Server-URL'] = aavritUrl
+    const response = await fetchWithTimeout('auth.logout', {
       method: 'POST',
+      headers,
     })
     return response.json()
   },

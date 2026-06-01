@@ -15,23 +15,20 @@ datas += [
 ]
 datas += [
     (str(project_root / "scripts" / "drand_timelock_helper.mjs"), "scripts"),
+    (str(project_root / "scripts" / "package.json"), "scripts"),
+    (str(project_root / "scripts" / "package-lock.json"), "scripts"),
+    (str(project_root / "scripts" / "node_modules"), "scripts/node_modules"),
 ]
 
-hiddenimports = []
-for package_name in (
+hiddenimports = collect_submodules(
     "avikal_backend",
-    "uvicorn",
-    "fastapi",
-    "starlette",
-    "pydantic",
-    "anyio",
-    "multipart",
-    "jwt",
-):
+    filter=lambda name: not name.startswith("avikal_backend.api"),
+)
+for package_name in ("pydantic", "anyio", "jwt"):
     hiddenimports += collect_submodules(package_name)
 
 a = Analysis(
-    [str(project_root / "api_server.py")],
+    [str(project_root / "core_server.py")],
     pathex=[str(project_root), str(backend_src)],
     binaries=[],
     datas=datas,

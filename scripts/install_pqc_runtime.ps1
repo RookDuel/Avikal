@@ -57,6 +57,10 @@ try {
   }
 
   $versionOutput = & $opensslExe version
+  $licensePath = Join-Path $RuntimeRoot "LICENSE.txt"
+  if (-not (Test-Path -LiteralPath $licensePath)) {
+    throw "Installed runtime does not contain OpenSSL LICENSE.txt"
+  }
   Write-Host "Installed Avikal PQC runtime at $RuntimeRoot"
   Write-Host $versionOutput
 } finally {

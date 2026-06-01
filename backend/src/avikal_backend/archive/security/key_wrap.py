@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import secrets
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from .native_bridge import aes256gcm_decrypt, aes256gcm_encrypt, random_bytes
 
 
 PAYLOAD_KEY_WRAP_ALGORITHM = "aes256gcm-dek-wrap-v1"
@@ -20,7 +20,7 @@ WRAP_TAG_BYTES = 16
 
 def generate_payload_key() -> bytes:
     """Generate a random 256-bit data-encryption key for payload.enc."""
-    return secrets.token_bytes(PAYLOAD_KEY_BYTES)
+    return random_bytes(PAYLOAD_KEY_BYTES)
 
 
 def wrap_payload_key(payload_key: bytes, wrapping_key: bytes, aad: bytes) -> bytes:
@@ -34,8 +34,8 @@ def wrap_payload_key(payload_key: bytes, wrapping_key: bytes, aad: bytes) -> byt
     if not isinstance(aad, (bytes, bytearray)):
         raise ValueError("AAD must be bytes")
 
-    nonce = secrets.token_bytes(WRAP_NONCE_BYTES)
-    encrypted_key = AESGCM(wrapping_key).encrypt(nonce, payload_key, bytes(aad))
+    nonce = random_bytes(WRAP_NONCE_BYTES)
+    encrypted_key = aes256gcm_encrypt(wrapping_key, nonce, payload_key, bytes(aad))
     return nonce + encrypted_key
 
 
@@ -54,7 +54,7 @@ def unwrap_payload_key(wrapped_payload_key: bytes, wrapping_key: bytes, aad: byt
     nonce = wrapped_payload_key[:WRAP_NONCE_BYTES]
     ciphertext = wrapped_payload_key[WRAP_NONCE_BYTES:]
     try:
-        payload_key = AESGCM(wrapping_key).decrypt(nonce, ciphertext, bytes(aad))
+        payload_key = aes256gcm_decrypt(wrapping_key, nonce, ciphertext, bytes(aad))
     except Exception as exc:
         raise ValueError("Wrapped payload key could not be unlocked") from exc
 

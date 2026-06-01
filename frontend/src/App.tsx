@@ -1,22 +1,21 @@
 import { useState, useEffect, type CSSProperties, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, Unlock, Info, Minus, Square, X, Shield, LogOut, Clock, Settings, CheckCircle2, PlugZap, AlertCircle, RotateCw } from 'lucide-react'
+import { Lock, Unlock, Minus, Square, X, Clock, Settings, RotateCw } from 'lucide-react'
 import { Toaster } from 'sonner'
 import Encrypt from './pages/Encrypt'
 import Decrypt from './pages/Decrypt'
 import Rekey from './pages/Rekey'
 import TimeCapsule from './pages/TimeCapsule'
-import About from './pages/About'
-import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { AuthProvider } from './contexts/AuthContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
-import AuthModal from './components/AuthModal'
 import SecuritySettings from './components/SecuritySettings'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { cn } from './lib/utils'
 import { useBackendRuntime } from './hooks/useBackendRuntime'
 import type { ExternalLaunchAction, PendingExternalLaunchAction } from './lib/externalLaunch'
 
-type Tab = 'encrypt' | 'decrypt' | 'rekey' | 'timecapsule' | 'about'
+type Tab = 'encrypt' | 'decrypt' | 'rekey' | 'timecapsule'
+type SettingsTab = 'appearance' | 'aavrit' | 'privacy' | 'defaults' | 'runtime' | 'diagnostics' | 'updates' | 'help'
 
 const NO_DRAG_REGION_STYLE: CSSProperties & { WebkitAppRegion: 'no-drag' } = {
   WebkitAppRegion: 'no-drag',
@@ -108,12 +107,11 @@ function StartupShell({
 function AppContent() {
   const [activeTab, setActiveTab] = useState<Tab>('encrypt')
   const [visitedTabs, setVisitedTabs] = useState<Tab[]>(['encrypt'])
-  const [showAuthModal, setShowAuthModal] = useState(false)
   const [showSecuritySettings, setShowSecuritySettings] = useState(false)
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('appearance')
   const [showContent, setShowContent] = useState(false)
   const [pendingExternalLaunch, setPendingExternalLaunch] = useState<PendingExternalLaunchAction | null>(null)
   const backendRuntime = useBackendRuntime()
-  const { isAuthenticated, isAavritConnected, user, logout, aavritMode, aavritServerUrl } = useAuth()
   const { actualTheme } = useTheme()
 
   useEffect(() => {
@@ -127,9 +125,16 @@ function AppContent() {
   }, [backendRuntime.isReady])
 
   useEffect(() => {
-    const openAuthModal = () => setShowAuthModal(true)
-    window.addEventListener('avikal:open-auth-modal', openAuthModal)
-    return () => window.removeEventListener('avikal:open-auth-modal', openAuthModal)
+    const openAavritSettings = () => {
+      setSettingsInitialTab('aavrit')
+      setShowSecuritySettings(true)
+    }
+    window.addEventListener('avikal:open-auth-modal', openAavritSettings)
+    window.addEventListener('avikal:open-aavrit-settings', openAavritSettings)
+    return () => {
+      window.removeEventListener('avikal:open-auth-modal', openAavritSettings)
+      window.removeEventListener('avikal:open-aavrit-settings', openAavritSettings)
+    }
   }, [])
 
   useEffect(() => {
@@ -162,7 +167,6 @@ function AppContent() {
     }
   }, [])
 
-  const authModalOpen = showAuthModal && !(isAuthenticated && user)
   const mountedTabs: Tab[] = visitedTabs
 
   const tabPanels: Record<Tab, ReactNode> = {
@@ -184,11 +188,6 @@ function AppContent() {
     timecapsule: (
       <ErrorBoundary context="TimeCapsule">
         <TimeCapsule externalLaunchAction={pendingExternalLaunch} />
-      </ErrorBoundary>
-    ),
-    about: (
-      <ErrorBoundary context="About">
-        <About />
       </ErrorBoundary>
     ),
   }
@@ -214,7 +213,7 @@ function AppContent() {
     >
       <Toaster position="top-right" theme={actualTheme} richColors />
 
-      <div className="sticky top-0 z-50 drag-region border-b border-av-border/35 bg-av-surface/78 shadow-[0_10px_28px_rgba(0,0,0,0.06)] backdrop-blur-3xl transition-all duration-300 dark:bg-av-surface/92">
+      <div className="av-titlebar-glass fixed inset-x-0 top-0 z-[220] drag-region transition-all duration-300">
         <div className="flex min-h-16 items-center pl-4 sm:pl-5 lg:pl-6">
           <div className="flex min-w-0 items-center gap-3 pr-4">
             <div className="min-w-0">
@@ -242,7 +241,6 @@ function AppContent() {
               { id: 'decrypt', icon: Unlock, label: 'Decode' },
               { id: 'rekey', icon: RotateCw, label: 'Rekey' },
               { id: 'timecapsule', icon: Clock, label: 'Time-Capsule' },
-              { id: 'about', icon: Info, label: 'About' },
             ].map((tab) => (
               <motion.button
                 key={tab.id}
@@ -276,56 +274,13 @@ function AppContent() {
           </nav>
 
           <div className="flex shrink-0 items-center gap-2 border-l border-av-border/20 pl-3 sm:gap-3 sm:pl-4" style={NO_DRAG_REGION_STYLE}>
-            {isAavritConnected ? (
-              <div className="flex min-w-0 items-center gap-2">
-                <button
-                  onClick={() => setShowAuthModal(true)}
-                  className="flex items-center gap-3 rounded-xl border border-av-border/35 bg-av-surface/82 px-3 py-1.5 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:border-av-border/55 hover:bg-av-border/12 hover:shadow-[0_10px_22px_rgba(15,23,42,0.08)] dark:bg-white/[0.03] dark:hover:bg-white/[0.06] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.28)]"
-                  title="Manage Aavrit Connection"
-                >
-                  <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/15 shadow-md">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                  </div>
-                  <div className="hidden text-left xl:block">
-                    <div className="text-sm font-medium leading-tight tracking-wide text-av-main">
-                      {aavritMode === 'private' ? (user?.name || 'Aavrit Connected') : 'Aavrit Connected'}
-                    </div>
-                    <div className="text-[11px] leading-tight text-av-muted">
-                      {aavritMode === 'private' ? 'Private session active' : 'Public server ready'}
-                    </div>
-                  </div>
-                </button>
-                {aavritMode === 'private' && (
-                  <motion.button
-                    type="button"
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={logout}
-                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/35 bg-av-surface/82 text-av-muted shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:border-av-border/55 hover:bg-av-border/12 hover:text-red-400 hover:shadow-[0_10px_22px_rgba(15,23,42,0.08)] dark:bg-white/[0.03] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.28)]"
-                    title="Disconnect Aavrit"
-                  >
-                    <LogOut className="w-4 h-4" />
-                  </motion.button>
-                )}
-              </div>
-            ) : (
-              <motion.button
-                whileHover={{ scale: 1.04 }}
-                whileTap={{ scale: 0.97 }}
-                onClick={() => setShowAuthModal(true)}
-                className="flex items-center gap-2 rounded-xl bg-av-main px-3 py-1.5 text-sm font-medium tracking-wide text-av-surface shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-all hover:opacity-90 hover:shadow-[0_10px_22px_rgba(15,23,42,0.12)] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.3)]"
-              >
-                {aavritServerUrl ? <PlugZap className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
-                <span className="hidden sm:inline">
-                  {aavritServerUrl && aavritMode === 'private' ? 'Reconnect Aavrit' : 'Connect Aavrit'}
-                </span>
-              </motion.button>
-            )}
-
             <motion.button
               whileHover={{ scale: 1.05, rotate: 15 }}
               whileTap={{ scale: 0.95 }}
-              onClick={() => setShowSecuritySettings(true)}
+              onClick={() => {
+                setSettingsInitialTab('appearance')
+                setShowSecuritySettings(true)
+              }}
               className="flex h-9 w-9 items-center justify-center rounded-xl border border-av-border/35 bg-av-surface/82 text-av-muted shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:border-av-border/55 hover:bg-av-border/12 hover:text-av-main hover:shadow-[0_10px_22px_rgba(15,23,42,0.08)] dark:bg-white/[0.03] dark:hover:shadow-[0_12px_24px_rgba(0,0,0,0.28)]"
               title="Global Settings"
             >
@@ -359,7 +314,7 @@ function AppContent() {
         </div>
       </div>
 
-      <main className="relative flex-1 min-h-0 overflow-y-auto">
+      <main className="relative flex-1 min-h-0 overflow-y-auto pt-16">
         <AnimatePresence initial={false}>
           {mountedTabs.map((tab) => {
             const isActive = activeTab === tab
@@ -386,11 +341,10 @@ function AppContent() {
         </AnimatePresence>
       </main>
 
-      <AuthModal isOpen={authModalOpen} onClose={() => setShowAuthModal(false)} />
-
       <SecuritySettings
         isOpen={showSecuritySettings}
         onClose={() => setShowSecuritySettings(false)}
+        initialTab={settingsInitialTab}
       />
     </div>
   )

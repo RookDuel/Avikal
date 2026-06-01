@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=69", "setuptools-rust>=1.10.2", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -24,6 +24,7 @@ classifiers = [
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
   "Operating System :: POSIX",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -40,7 +41,7 @@ Repository = "https://github.com/RookDuel/Avikal"
 Documentation = "https://github.com/RookDuel/Avikal/blob/main/CLI_USAGE.md"
 
 [project.scripts]
-avikal = "avikal_backend.cli.main:main"
+avikal = "avikal_backend.core_main:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -53,6 +54,10 @@ exclude = ["avikal_backend.api*"]
 
 [tool.setuptools.package-data]
 avikal_backend = [
+  "_native.pyi",
+  "runtime/scripts/*.mjs",
+  "runtime/scripts/package*.json",
+  "runtime/scripts/node_modules/**/*",
   "wordlists/*.txt",
 ]
 

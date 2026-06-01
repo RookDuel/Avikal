@@ -1,8 +1,6 @@
-import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { Shield } from 'lucide-react'
 import Button from './Button'
-import AuthModal from './AuthModal'
 
 interface AuthGateProps {
   message?: string
@@ -13,13 +11,11 @@ export default function AuthGate({
   message = 'Aavrit connection required to access private Aavrit time-capsule features',
   onLogin,
 }: AuthGateProps) {
-  const [showAuthModal, setShowAuthModal] = useState(false)
-
   const handleLogin = () => {
     if (onLogin) {
       onLogin()
     } else {
-      setShowAuthModal(true)
+      window.dispatchEvent(new Event('avikal:open-aavrit-settings'))
     }
   }
 
@@ -42,12 +38,10 @@ export default function AuthGate({
 
           <Button onClick={handleLogin}>
             <Shield className="w-4 h-4" />
-            Connect Aavrit
+            Open Aavrit Settings
           </Button>
         </motion.div>
       </div>
-
-      <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />
     </>
   )
 }

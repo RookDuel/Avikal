@@ -11,6 +11,7 @@ import base64
 import re
 import struct
 
+from ..security.pqc_keyfile import PQC_STORAGE_MODE_EMBEDDED, PQC_STORAGE_MODE_EXTERNAL, PQC_STORAGE_MODES
 
 HEADER_MAGIC = b"AVK2"
 HEADER_FORMAT_VERSION = 0x01
@@ -21,10 +22,12 @@ KEYCHAIN_ROUTE_VERSION_TAG = "AvikalRouteVersion"
 KEYCHAIN_REQUIRE_PASSWORD_TAG = "AvikalRequirePassword"
 KEYCHAIN_REQUIRE_KEYPHRASE_TAG = "AvikalRequireKeyphrase"
 KEYCHAIN_REQUIRE_PQC_TAG = "AvikalRequirePQC"
+KEYCHAIN_PQC_STORAGE_MODE_TAG = "AvikalPQCStorageMode"
 KEYCHAIN_UNLOCK_TIMESTAMP_TAG = "AvikalUnlockTimestamp"
 KEYCHAIN_DRAND_ROUND_TAG = "AvikalDrandRound"
 KEYCHAIN_KEYPHRASE_WORDLIST_TAG = "AvikalKeyphraseWordlist"
-PUBLIC_ROUTE_FORMAT_VERSION = "1"
+PUBLIC_ROUTE_FORMAT_VERSION_V1 = "1"
+PUBLIC_ROUTE_FORMAT_VERSION_V2 = "2"
 
 ARCHIVE_MODE_SINGLE = 0x01
 ARCHIVE_MODE_MULTI = 0x02
@@ -175,16 +178,28 @@ def attach_public_route_tags_to_keychain_pgn(
     requires_password: bool,
     requires_keyphrase: bool,
     requires_pqc: bool,
+    pqc_storage_mode: str | None = None,
     unlock_timestamp: int | None = None,
     drand_round: int | None = None,
     keyphrase_wordlist_id: str | None = None,
 ) -> str:
     """Attach public non-secret routing hints to keychain.pgn."""
+    if pqc_storage_mode is not None and pqc_storage_mode not in PQC_STORAGE_MODES:
+        raise ValueError("Invalid PQC storage mode route hint")
+    if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED and not requires_pqc:
+        raise ValueError("Embedded PQC storage mode requires PQC to be enabled")
+    route_version = (
+        PUBLIC_ROUTE_FORMAT_VERSION_V2
+        if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED
+        else PUBLIC_ROUTE_FORMAT_VERSION_V1
+    )
     output = keychain_pgn
-    output = _replace_or_insert_tag(output, KEYCHAIN_ROUTE_VERSION_TAG, PUBLIC_ROUTE_FORMAT_VERSION)
+    output = _replace_or_insert_tag(output, KEYCHAIN_ROUTE_VERSION_TAG, route_version)
     output = _replace_or_insert_tag(output, KEYCHAIN_REQUIRE_PASSWORD_TAG, _encode_route_bool(requires_password))
     output = _replace_or_insert_tag(output, KEYCHAIN_REQUIRE_KEYPHRASE_TAG, _encode_route_bool(requires_keyphrase))
     output = _replace_or_insert_tag(output, KEYCHAIN_REQUIRE_PQC_TAG, _encode_route_bool(requires_pqc))
+    if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+        output = _replace_or_insert_tag(output, KEYCHAIN_PQC_STORAGE_MODE_TAG, pqc_storage_mode)
     if unlock_timestamp is not None:
         output = _replace_or_insert_tag(output, KEYCHAIN_UNLOCK_TIMESTAMP_TAG, str(int(unlock_timestamp)))
     if drand_round is not None:
@@ -204,21 +219,32 @@ def extract_public_route_tags_from_keychain_pgn(keychain_pgn: str) -> dict:
             "requires_password": None,
             "requires_keyphrase": None,
             "requires_pqc": None,
+            "pqc_storage_mode": None,
             "unlock_timestamp": None,
             "drand_round": None,
             "keyphrase_wordlist_id": None,
         }
-    if route_version != PUBLIC_ROUTE_FORMAT_VERSION:
+    if route_version not in {PUBLIC_ROUTE_FORMAT_VERSION_V1, PUBLIC_ROUTE_FORMAT_VERSION_V2}:
         raise ValueError("Unsupported Avk public route hint version")
 
     unlock_timestamp_raw = _extract_tag_value(keychain_pgn, KEYCHAIN_UNLOCK_TIMESTAMP_TAG)
     drand_round_raw = _extract_tag_value(keychain_pgn, KEYCHAIN_DRAND_ROUND_TAG)
+    requires_pqc = _decode_route_bool(_extract_tag_value(keychain_pgn, KEYCHAIN_REQUIRE_PQC_TAG))
+    pqc_storage_mode = None
+    if route_version == PUBLIC_ROUTE_FORMAT_VERSION_V2:
+        pqc_storage_mode = _extract_tag_value(keychain_pgn, KEYCHAIN_PQC_STORAGE_MODE_TAG)
+        if pqc_storage_mode not in PQC_STORAGE_MODES:
+            raise ValueError("Invalid Avk PQC storage mode route hint")
+    elif requires_pqc:
+        pqc_storage_mode = PQC_STORAGE_MODE_EXTERNAL
+
     return {
         "available": True,
         "format_version": route_version,
         "requires_password": _decode_route_bool(_extract_tag_value(keychain_pgn, KEYCHAIN_REQUIRE_PASSWORD_TAG)),
         "requires_keyphrase": _decode_route_bool(_extract_tag_value(keychain_pgn, KEYCHAIN_REQUIRE_KEYPHRASE_TAG)),
-        "requires_pqc": _decode_route_bool(_extract_tag_value(keychain_pgn, KEYCHAIN_REQUIRE_PQC_TAG)),
+        "requires_pqc": requires_pqc,
+        "pqc_storage_mode": pqc_storage_mode,
         "unlock_timestamp": int(unlock_timestamp_raw) if unlock_timestamp_raw else None,
         "drand_round": int(drand_round_raw) if drand_round_raw else None,
         "keyphrase_wordlist_id": _extract_tag_value(keychain_pgn, KEYCHAIN_KEYPHRASE_WORDLIST_TAG),

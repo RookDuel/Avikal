@@ -8,9 +8,16 @@ Copyright (c) 2026 Atharva Sen Barai.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import getpass
+import os
 from pathlib import Path
+import shutil
 from typing import Any
 
+from ...archive.format.container import read_avk_header_and_keychain
+from ...archive.format.header import extract_public_route_tags_from_keychain_pgn, parse_header_bytes
+from ...archive.path_safety import resolve_safe_relative_output_path
 from ...archive.pipeline.decoder import extract_avk_file
 from ...archive.pipeline.encoder import create_avk_file
 from ...archive.pipeline.multi_file_decoder import extract_multi_file_avk
@@ -31,9 +38,99 @@ from ..inputs import (
 from .inspect import detect_archive_kind
 
 
+def _load_pqc_keyfile_password(args: argparse.Namespace, *, confirm: bool = False) -> str | None:
+    if not getattr(args, "pqc_keyfile_password_prompt", False):
+        return None
+    password = getpass.getpass(".avkkey password: ")
+    if confirm:
+        repeated = getpass.getpass("Confirm .avkkey password: ")
+        if password != repeated:
+            raise ValueError(".avkkey passwords do not match")
+    return password
+
+
+def _provider_from_public_route(input_path: str) -> str | None:
+    header_bytes, keychain_pgn = read_avk_header_and_keychain(input_path)
+    header_info = parse_header_bytes(header_bytes)
+    route_hints = extract_public_route_tags_from_keychain_pgn(keychain_pgn)
+    return header_info.get("provider") or route_hints.get("provider")
+
+
+def _run_core_service(coro) -> dict[str, Any]:
+    try:
+        return asyncio.run(coro)
+    except Exception as exc:
+        if exc.__class__.__name__ != "ServiceError":
+            raise
+        raise ValueError(str(exc)) from exc
+
+
+def _commit_core_preview_to_output(core_result: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    preview_dir = Path(core_result.get("output_dir") or "").resolve()
+    preview_session_id = str(core_result.get("preview_session_id") or "")
+    if not preview_dir.exists() or not preview_session_id:
+        raise ValueError("Provider decrypt did not return a valid preview session.")
+
+    result = core_result.get("result") if isinstance(core_result.get("result"), dict) else {}
+    files = result.get("files") if isinstance(result.get("files"), list) else []
+    if not files:
+        raise ValueError("Provider decrypt did not return extracted files.")
+
+    committed_files: list[dict[str, Any]] = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for file_info in files:
+            source = Path(str(file_info.get("path") or file_info.get("output_file") or "")).resolve()
+            try:
+                source.relative_to(preview_dir)
+            except ValueError as exc:
+                raise ValueError("Provider decrypt returned a file outside its preview directory.") from exc
+            if not source.is_file():
+                raise ValueError("Provider decrypt returned a missing preview file.")
+
+            relative_name = str(file_info.get("filename") or source.name).replace(os.sep, "/")
+            final_path = Path(resolve_safe_relative_output_path(str(output_dir), relative_name))
+            if final_path.exists():
+                raise ValueError(f"Refusing to overwrite existing extracted file: {relative_name}")
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, final_path)
+            size = final_path.stat().st_size
+            committed_files.append({"filename": relative_name.replace("/", os.sep), "path": str(final_path), "size": size})
+    except Exception:
+        for file_info in committed_files:
+            try:
+                Path(file_info["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        from ...core import services
+
+        try:
+            asyncio.run(services.preview_cleanup_session({"session_id": preview_session_id}))
+        except Exception:
+            shutil.rmtree(preview_dir, ignore_errors=True)
+        else:
+            shutil.rmtree(preview_dir, ignore_errors=True)
+
+    total_size = sum(file_info["size"] for file_info in committed_files)
+    return {
+        "ok": True,
+        "mode": "decode",
+        "archive_kind": "multi_file" if len(committed_files) > 1 else "single_file",
+        "provider": core_result.get("provider") or "drand",
+        "output_directory": str(output_dir),
+        "file_count": len(committed_files),
+        "total_size_bytes": total_size,
+        "total_size_human": human_size(total_size),
+        "files": committed_files,
+    }
+
+
 def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
     password = load_password(args, confirm=bool(getattr(args, "password_prompt", False)))
     keyphrase = load_keyphrase(args)
+    pqc_keyfile_password = _load_pqc_keyfile_password(args, confirm=True)
     unlock_dt = parse_unlock_datetime(args.unlock)
     if args.timecapsule and not unlock_dt:
         raise ValueError("Time-capsule mode requires --unlock.")
@@ -57,6 +154,42 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
         output_candidate,
         force=args.force,
     )
+    provider = getattr(args, "timecapsule_provider", "local")
+    if provider != "local" and not args.timecapsule:
+        raise ValueError("Use --timecapsule together with --timecapsule-provider.")
+    if provider == "drand":
+        from ...core import services
+
+        core_result = _run_core_service(
+            services.archive_encrypt(
+                {
+                    "input_files": input_paths,
+                    "output_file": output_path,
+                    "password": password,
+                    "keyphrase": keyphrase,
+                    "unlock_datetime": unlock_dt.isoformat() if unlock_dt else None,
+                    "use_timecapsule": True,
+                    "timecapsule_provider": "drand",
+                    "pqc_enabled": args.pqc,
+                    "pqc_keyfile_output": args.pqc_keyfile_output,
+                    "pqc_keyfile_protection_mode": "dual_password" if pqc_keyfile_password else "archive_secret",
+                    "pqc_keyfile_password": pqc_keyfile_password,
+                }
+            )
+        )
+        return {
+            "ok": True,
+            "mode": "encode",
+            "archive_kind": "multi_file" if len(input_paths) > 1 or any(Path(path).is_dir() for path in input_paths) else "single_file",
+            "selected_input_count": len(input_paths),
+            "output_file": output_path,
+            "output_size_bytes": Path(output_path).stat().st_size,
+            "output_size_human": human_size(Path(output_path).stat().st_size),
+            "timecapsule": True,
+            "timecapsule_provider": "drand",
+            "pqc_enabled": bool(args.pqc),
+            "drand": core_result.get("drand"),
+        }
 
     if len(input_paths) == 1 and Path(input_paths[0]).is_file():
         engine_result = create_avk_file(
@@ -70,6 +203,8 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
             use_timecapsule=args.timecapsule,
             pqc_enabled=args.pqc,
             pqc_keyfile_output=args.pqc_keyfile_output,
+            pqc_keyfile_protection_mode="dual_password" if pqc_keyfile_password else "archive_secret",
+            pqc_keyfile_password=pqc_keyfile_password,
         )
         archive_kind = "single_file"
         selected_input_count = 1
@@ -85,6 +220,8 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
             use_timecapsule=args.timecapsule,
             pqc_enabled=args.pqc,
             pqc_keyfile_output=args.pqc_keyfile_output,
+            pqc_keyfile_protection_mode="dual_password" if pqc_keyfile_password else "archive_secret",
+            pqc_keyfile_password=pqc_keyfile_password,
         )
         archive_kind = "multi_file"
         selected_input_count = len(input_paths)
@@ -110,6 +247,8 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
         payload["total_size_human"] = human_size(engine_result["total_size"])
     if engine_result.get("telemetry"):
         payload["telemetry"] = engine_result["telemetry"]
+    if args.timecapsule:
+        payload["timecapsule_provider"] = provider
 
     return payload
 
@@ -117,6 +256,7 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
 def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
     password = load_password(args)
     keyphrase = load_keyphrase(args)
+    pqc_keyfile_password = _load_pqc_keyfile_password(args)
     input_path = resolve_single_input(
         args.input,
         pick=getattr(args, "pick", False),
@@ -135,6 +275,26 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(output_dir_value).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    provider = _provider_from_public_route(input_path)
+    if provider == "drand":
+        from ...core import services
+
+        core_result = _run_core_service(
+            services.archive_decrypt(
+                {
+                    "input_file": input_path,
+                    "output_dir": str(output_dir),
+                    "password": password,
+                    "keyphrase": keyphrase,
+                    "pqc_keyfile": args.pqc_keyfile,
+                    "pqc_keyfile_password": pqc_keyfile_password,
+                }
+            )
+        )
+        return _commit_core_preview_to_output(core_result, output_dir)
+    if provider == "aavrit":
+        raise ValueError("Aavrit time-capsule CLI decrypt requires Aavrit authentication and is not enabled in this CLI release.")
+
     archive_kind, metadata = detect_archive_kind(
         input_path,
         password=password,
@@ -152,6 +312,7 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
             password=password,
             keyphrase=keyphrase,
             pqc_keyfile_path=args.pqc_keyfile,
+            pqc_keyfile_password=pqc_keyfile_password,
         )
         return {
             "ok": True,
@@ -171,6 +332,7 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
         password=password,
         keyphrase=keyphrase,
         pqc_keyfile_path=args.pqc_keyfile,
+        pqc_keyfile_password=pqc_keyfile_password,
     )
     extracted_file = Path(extracted_path)
     return {

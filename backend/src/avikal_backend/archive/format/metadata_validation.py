@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from ..path_safety import normalize_single_archive_filename
 from ..security.key_wrap import PAYLOAD_KEY_WRAP_ALGORITHM
+from ..security.pqc_keyfile import PQC_STORAGE_MODE_EMBEDDED, PQC_STORAGE_MODE_EXTERNAL, PQC_STORAGE_MODES
 from ..security.pqc_provider import PQC_SUITE_ID
-from .metadata_pack import METADATA_FORMAT_VERSION
+from .metadata_pack import METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED
 
 
 def validate_cascade_metadata_dict(metadata: dict) -> dict:
     """Validate parsed metadata for the public v1 archive format."""
-    if metadata.get("version") != METADATA_FORMAT_VERSION:
+    if metadata.get("version") not in {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED}:
         raise ValueError("Metadata corrupted: unsupported metadata version")
 
     salt = metadata.get("salt")
@@ -99,6 +100,8 @@ def _validate_pqc_fields(metadata: dict) -> None:
     pqc_key_id = metadata.get("pqc_key_id")
     pqc_ciphertext = metadata.get("pqc_ciphertext")
     pqc_private_key = metadata.get("pqc_private_key")
+    pqc_storage_mode = metadata.get("pqc_storage_mode")
+    version = metadata.get("version")
 
     if pqc_required:
         if pqc_algorithm != PQC_SUITE_ID:
@@ -107,8 +110,14 @@ def _validate_pqc_fields(metadata: dict) -> None:
             raise ValueError("Metadata corrupted: invalid PQC key identifier")
         if not isinstance(pqc_ciphertext, (bytes, bytearray)) or len(pqc_ciphertext) == 0:
             raise ValueError("Metadata corrupted: PQC keyfile mode requires ciphertext")
+        if pqc_storage_mode not in PQC_STORAGE_MODES:
+            raise ValueError("Metadata corrupted: invalid PQC storage mode")
+        if version == METADATA_FORMAT_VERSION and pqc_storage_mode != PQC_STORAGE_MODE_EXTERNAL:
+            raise ValueError("Metadata corrupted: legacy PQC archives must use external storage")
     elif any(value is not None for value in [pqc_algorithm, pqc_key_id, pqc_ciphertext]):
         raise ValueError("Metadata corrupted: inactive PQC fields must be empty")
+    elif pqc_storage_mode is not None:
+        raise ValueError("Metadata corrupted: inactive PQC storage mode must be empty")
 
     if pqc_private_key is not None:
         raise ValueError("Metadata corrupted: PQC private key must not be embedded in the archive")

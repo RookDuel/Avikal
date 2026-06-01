@@ -1,6 +1,4 @@
-"""
-Enhanced decoder for Avikal format with Option 1 + Option B security.
-Extracts and decrypts .avk files with hierarchical keys and maximum security.
+"""Single-file Avikal archive decoder.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -21,7 +19,12 @@ from ..chess_metadata import decode_chess_to_metadata_enhanced
 from ..path_safety import resolve_safe_output_path
 from .payload_streaming import stream_payload_to_file
 from .progress import get_progress_tracker
-from ..security.pqc_keyfile import read_pqc_keyfile
+from ..security.pqc_keyfile import (
+    PQC_STORAGE_MODE_EMBEDDED,
+    PQC_STORAGE_MODE_EXTERNAL,
+    read_embedded_pqc_blob,
+    read_pqc_keyfile,
+)
 from ..security.pqc_provider import decapsulate_pqc_archive_material
 from ..security.key_wrap import unwrap_payload_key
 from ..runtime_logging import runtime_debug_print as print
@@ -33,24 +36,11 @@ def extract_avk_file_enhanced(
     password: str = None,
     keyphrase: list = None,
     pqc_keyfile_path: str = None,
+    pqc_keyfile_password: str = None,
     time_key: bytes = None,
     metadata_override: dict | None = None,
 ) -> str:
-    """
-    Extract and decrypt .avk file with enhanced security (Option 1 + Option B).
-    
-    Args:
-        avk_filepath: Path to .avk file
-        output_directory: Where to save decrypted file
-        password: Password for decryption
-        keyphrase: 21-word Hindi mnemonic keyphrase (list of strings)
-    
-    Returns:
-        Path to extracted file
-    
-    Raises:
-        ValueError: If password/keyphrase wrong, time-lock not reached, or file corrupted
-    """
+    """Extract and decrypt a single-file .avk archive."""
     master_key = None
     payload_key = None
     payload_decryption_key = None
@@ -62,7 +52,7 @@ def extract_avk_file_enhanced(
         tracker = get_progress_tracker()
         print(f"Opening {avk_filepath}...")
         try:
-            with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, payload_stream):
+            with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, payload_stream, embedded_pqc_blob):
                 header_info = parse_header_bytes(header_bytes)
                 if tracker:
                     tracker.update("metadata", "Reading archive metadata", 0.05, force=True)
@@ -83,6 +73,7 @@ def extract_avk_file_enhanced(
                             keyphrase,
                             skip_timelock=False,
                             aad=header_bytes,
+                            progress_tracker=tracker,
                         )
                         validate_metadata_against_header(header_info, metadata)
                         chess_decoding_time = time.time() - start_chess
@@ -105,18 +96,28 @@ def extract_avk_file_enhanced(
                     print(f"Salt extracted: {len(salt)} bytes")
 
                     if metadata['encryption_method'] == "plaintext_archive":
+                        if tracker:
+                            tracker.update("payload", "Archive payload is not encrypted", 0.03)
                         payload_key = None
                     elif metadata['encryption_method'] == "aes256gcm_stream_timekey":
                         if not time_key:
                             raise ValueError("This archive requires the time-capsule unlock flow.")
+                        if tracker:
+                            tracker.update("payload", "Deriving time-capsule payload key", 0.08)
                         payload_key = derive_time_only_payload_key(time_key, salt)
                     else:
                         print("Deriving payload key with extracted salt...")
+                        if tracker:
+                            tracker.update("payload", "Deriving access key with Argon2id", 0.08, force=True)
                         from ..security.crypto import derive_hierarchical_keys
                         master_key, payload_key, _, _ = derive_hierarchical_keys(password, keyphrase, salt)
+                        if tracker:
+                            tracker.update("payload", "Payload key hierarchy ready", 0.14)
                         if time_key:
                             from ..security.crypto import combine_split_keys
 
+                            if tracker:
+                                tracker.update("payload", "Combining local and time-release keys", 0.18)
                             combined_key = combine_split_keys(payload_key, time_key, salt)
                             payload_key = combined_key[:32]
                 except KeyError:
@@ -128,6 +129,9 @@ def extract_avk_file_enhanced(
                     pqc_required = bool(metadata.get('pqc_required'))
                     pqc_algorithm = metadata.get('pqc_algorithm')
                     pqc_key_id = metadata.get('pqc_key_id')
+                    pqc_storage_mode = metadata.get('pqc_storage_mode') or (
+                        PQC_STORAGE_MODE_EXTERNAL if pqc_required else None
+                    )
                     expected_checksum = metadata['checksum']
                     expected_output_size = metadata.get('total_original_size')
                     original_filename = metadata['filename']
@@ -146,24 +150,46 @@ def extract_avk_file_enhanced(
                         keyphrase = normalize_mnemonic_words(keyphrase)
 
                     if pqc_required:
-                        if tracker:
-                            tracker.update("payload", "Loading PQC keyfile", 0.05)
-                        print("Loading external PQC keyfile...")
-                        pqc_key_bundle = read_pqc_keyfile(
-                            pqc_keyfile_path,
-                            password=password,
-                            keyphrase=keyphrase,
-                            expected_key_id=pqc_key_id,
-                            expected_algorithm=pqc_algorithm,
-                        )
+                        if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+                            if tracker:
+                                tracker.update("payload", "Unlocking embedded PQC", 0.05)
+                            print("Unlocking embedded PQC bundle...")
+                            pqc_key_bundle = read_embedded_pqc_blob(
+                                embedded_pqc_blob,
+                                password=password,
+                                keyphrase=keyphrase,
+                                header_aad=header_bytes,
+                                expected_key_id=pqc_key_id,
+                                expected_algorithm=pqc_algorithm,
+                            )
+                        else:
+                            if embedded_pqc_blob is not None:
+                                raise ValueError("Archive metadata expects an external PQC keyfile, but an embedded PQC bundle was found.")
+                            if tracker:
+                                tracker.update("payload", "Loading PQC keyfile", 0.05)
+                            print("Loading external PQC keyfile...")
+                            pqc_key_bundle = read_pqc_keyfile(
+                                pqc_keyfile_path,
+                                password=password,
+                                keyphrase=keyphrase,
+                                expected_key_id=pqc_key_id,
+                                expected_algorithm=pqc_algorithm,
+                                pqc_keyfile_password=pqc_keyfile_password,
+                            )
                         pqc_private_bundle = pqc_key_bundle["private_bundle"]
+                        if tracker:
+                            tracker.update("payload", "Verifying PQC bundle signatures", 0.10)
                         pqc_shared_secret = decapsulate_pqc_archive_material(
                             private_bundle=pqc_private_bundle,
                             public_bundle=pqc_key_bundle["public_bundle"],
                             pqc_ciphertext=pqc_ciphertext,
                             expected_key_id=pqc_key_id,
                         )
+                        if tracker:
+                            tracker.update("payload", "Mixing PQC shared secret into payload key", 0.16)
                         payload_key = derive_pqc_hybrid_payload_key(payload_key, pqc_shared_secret, salt)
+                    elif embedded_pqc_blob is not None:
+                        raise ValueError("Archive contains an unexpected embedded PQC bundle.")
 
                     expected_time_key_hash = metadata.get("time_key_hash")
                     if time_key is not None and expected_time_key_hash is not None:
@@ -174,12 +200,16 @@ def extract_avk_file_enhanced(
 
                     wrapped_payload_key = metadata.get("wrapped_payload_key")
                     if wrapped_payload_key:
+                        if tracker:
+                            tracker.update("payload", "Unwrapping payload data key", 0.20)
                         payload_decryption_key = unwrap_payload_key(wrapped_payload_key, payload_key, header_bytes)
                     else:
                         payload_decryption_key = payload_key
 
                     output_filepath = resolve_safe_output_path(output_directory, original_filename)
                     print("Streaming payload decode...")
+                    if tracker:
+                        tracker.update("payload", "Preparing payload stream", 0.24)
                     start_decrypt = time.time()
                     stream_result = stream_payload_to_file(
                         payload_stream=payload_stream,
@@ -223,7 +253,10 @@ def extract_avk_file_enhanced(
             security_features.append("Hierarchical Keys (Argon2id + HKDF)")
             security_features.append("Streaming AES-256-GCM Payload Decryption")
             if metadata.get('pqc_required'):
-                security_features.append("External Quantum Keyfile (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
+                if metadata.get("pqc_storage_mode") == PQC_STORAGE_MODE_EMBEDDED:
+                    security_features.append("Embedded Quantum Protection (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
+                else:
+                    security_features.append("External Quantum Keyfile (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
             elif metadata.get('pqc_ciphertext'):
                 security_features.append("Post-Quantum Cryptography (OpenSSL PQC Suite)")
             security_features.append("Chess Metadata Security (AES-256-GCM)")
@@ -255,6 +288,7 @@ def extract_avk_file(
     password: str = None,
     keyphrase: list = None,
     pqc_keyfile_path: str = None,
+    pqc_keyfile_password: str = None,
     time_key: bytes = None,
     metadata_override: dict | None = None,
 ) -> str:
@@ -265,6 +299,7 @@ def extract_avk_file(
         password,
         keyphrase,
         pqc_keyfile_path,
+        pqc_keyfile_password,
         time_key=time_key,
         metadata_override=metadata_override,
     )

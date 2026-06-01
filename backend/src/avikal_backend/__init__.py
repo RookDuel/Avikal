@@ -1,9 +1,4 @@
-"""
-Avikal Time-Locked File Format (.avk).
-
-Package exports stay lazy so lightweight imports, especially the Electron API
-server, do not load archive crypto modules before the backend can answer health
-checks.
+"""Avikal archive backend package.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.

@@ -2,35 +2,38 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { motion } from 'framer-motion'
 import {
-  Lock, Key, Upload, Shield, RefreshCw, CheckCircle2,
+  Lock, Key, Upload, Shield, ShieldAlert, RefreshCw, CheckCircle2,
   ChevronDown, Search, Eye, EyeOff, CheckCircle, ExternalLink,
   DownloadCloud, Copy, Calendar, Clock, Wifi, WifiOff, File, Folder, Fingerprint
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../lib/api'
-import { fetchBackend } from '../lib/backend'
+import { callCoreResponse } from '../lib/backend'
 import { waitForBackendReady } from '../lib/backendStatus'
-import { formatEta, parseBackendProgressChunk } from '../lib/backendProgress'
+import { parseBackendProgressChunk } from '../lib/backendProgress'
 import { getErrorMessage } from '../lib/errors'
 import { getDroppedPaths } from '../lib/electron'
 import { useProgress } from '../hooks/useProgress'
 import ProgressCard from '../components/ProgressCard'
-import FileTree, { type FileNode } from '../components/FileTree'
+import FileTree, { pruneTreeByPaths, type FileNode } from '../components/FileTree'
 import type { PendingExternalLaunchAction } from '../lib/externalLaunch'
 import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
+import ProcessingOverlay from '../components/ProcessingOverlay'
+import {
+  getDefaultPqcStorageMode,
+  getDefaultTimecapsuleProvider,
+  USER_PREFERENCES_UPDATED_EVENT,
+  type TimecapsuleProvider,
+  type UserPreferences,
+} from '../lib/preferences'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type PanelType = 'datetime' | 'password' | 'keyphrase' | 'pqc' | null
+type PqcStorageMode = 'embedded' | 'external'
 
 function deriveSiblingKeyfilePath(archivePath: string): string {
   return archivePath.replace(/(\.avk)?$/i, '.avkkey')
-}
-
-function deriveDefaultKeyfileName(files: string[]): string {
-  const first = files[0]?.split(/[/\\]/).pop() || 'timecapsule'
-  const base = first.replace(/\.[^.]+$/, '')
-  return `${base || 'timecapsule'}.avkkey`
 }
 
 // Local timezone helpers
@@ -97,7 +100,7 @@ async function fetchNTPTime(): Promise<Date> {
   // which already calls time.google.com, or fall back to a public HTTP time API.
   try {
     await waitForBackendReady()
-    const res = await fetchBackend('/api/ntp-time', { method: 'GET' })
+    const res = await callCoreResponse('time.ntp', { method: 'GET' })
     if (res.ok) {
       const data = await res.json()
       if (data.timestamp) return new Date(data.timestamp * 1000)
@@ -127,10 +130,13 @@ interface TimeCapsuleProps {
 
 export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) {
   const { sessionToken, refreshUserProfile, aavritMode, aavritServerUrl } = useAuth()
-  const [timecapsuleProvider, setTimecapsuleProvider] = useState<'drand' | 'aavrit'>('drand')
+  const [timecapsuleProvider, setTimecapsuleProvider] = useState<TimecapsuleProvider>(() => getDefaultTimecapsuleProvider())
+  const [timecapsuleProviderOverridden, setTimecapsuleProviderOverridden] = useState(false)
   const [authorityExpanded, setAuthorityExpanded] = useState(false)
   const [files, setFiles]               = useState<string[]>([])
   const [treeNodes, setTreeNodes]       = useState<FileNode[]>([])
+  const [selectedTreePaths, setSelectedTreePaths] = useState<Set<string>>(() => new Set())
+  const [excludedInputPaths, setExcludedInputPaths] = useState<string[]>([])
   const [isDragging, setIsDragging]     = useState(false)
   const [activePanel, setActivePanel]   = useState<PanelType>('datetime')
   const [passwordEnabled, setPasswordEnabled] = useState(false)
@@ -144,9 +150,15 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const [isEncrypted, setIsEncrypted]   = useState(false)
   const [outputFilePath, setOutputFilePath] = useState('')
   const [createdPqcKeyfilePath, setCreatedPqcKeyfilePath] = useState('')
+  const [createdPqcStorageMode, setCreatedPqcStorageMode] = useState<PqcStorageMode>(() => getDefaultPqcStorageMode())
   const [isCopied, setIsCopied]         = useState(false)
   const [pqcEnabled, setPqcEnabled]     = useState(false)
+  const [pqcStorageMode, setPqcStorageMode] = useState<PqcStorageMode>(() => getDefaultPqcStorageMode())
   const [pqcKeyfilePath, setPqcKeyfilePath] = useState('')
+  const [pqcKeyfilePasswordEnabled, setPqcKeyfilePasswordEnabled] = useState(false)
+  const [pqcKeyfilePassword, setPqcKeyfilePassword] = useState('')
+  const [showPqcKeyfilePassword, setShowPqcKeyfilePassword] = useState(false)
+  const [pqcModeOverridden, setPqcModeOverridden] = useState(false)
   const progress = useProgress()
   const backendRuntime = useBackendRuntime()
 
@@ -159,9 +171,17 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const ntpFetched = useRef(false)
   const filesRef = useRef<string[]>([])
 
+  const normalizeUiPath = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const isSameOrChildPath = (candidate: string, parent: string) => {
+    const candidatePath = normalizeUiPath(candidate)
+    const parentPath = normalizeUiPath(parent)
+    return candidatePath === parentPath || candidatePath.startsWith(`${parentPath}/`)
+  }
+
   const resetTimecapsulePanel = useCallback(() => {
     setAuthorityExpanded(false)
-    setTimecapsuleProvider('drand')
+    setTimecapsuleProvider(getDefaultTimecapsuleProvider())
+    setTimecapsuleProviderOverridden(false)
     setActivePanel('datetime')
     setUnlockDate('')
     setUnlockTime('')
@@ -172,12 +192,65 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
     setShowPassword(false)
     setIsCopied(false)
     setPqcEnabled(false)
+    setPqcStorageMode(getDefaultPqcStorageMode())
     setPqcKeyfilePath('')
+    setPqcKeyfilePasswordEnabled(false)
+    setPqcKeyfilePassword('')
+    setShowPqcKeyfilePassword(false)
+    setPqcModeOverridden(false)
   }, [])
 
   useEffect(() => {
     filesRef.current = files
   }, [files])
+
+  useEffect(() => {
+    if (!pqcEnabled || pqcStorageMode !== 'external') {
+      setPqcKeyfilePasswordEnabled(false)
+      setPqcKeyfilePassword('')
+      setShowPqcKeyfilePassword(false)
+    }
+  }, [pqcEnabled, pqcStorageMode])
+
+  useEffect(() => {
+    const applyPqcDefault = (mode: PqcStorageMode) => {
+      setPqcStorageMode(current => pqcModeOverridden ? current : mode)
+    }
+    const applyProviderDefault = (provider: TimecapsuleProvider) => {
+      setTimecapsuleProvider(current => {
+        if (timecapsuleProviderOverridden) return current
+        if (provider === 'aavrit' && !aavritServerUrl) return 'drand'
+        return provider
+      })
+    }
+
+    const onPreferencesUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<UserPreferences>).detail
+      const pqcMode = detail?.archive_defaults?.pqc_storage_mode
+      const provider = detail?.archive_defaults?.default_timecapsule_provider
+      if (pqcMode === 'embedded' || pqcMode === 'external') applyPqcDefault(pqcMode)
+      if (provider === 'drand' || provider === 'aavrit') applyProviderDefault(provider)
+    }
+
+    const onFocus = () => {
+      applyPqcDefault(getDefaultPqcStorageMode())
+      applyProviderDefault(getDefaultTimecapsuleProvider())
+    }
+
+    window.addEventListener(USER_PREFERENCES_UPDATED_EVENT, onPreferencesUpdated)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.removeEventListener(USER_PREFERENCES_UPDATED_EVENT, onPreferencesUpdated)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [aavritServerUrl, pqcModeOverridden, timecapsuleProviderOverridden])
+
+  useEffect(() => {
+    if (!aavritServerUrl || (aavritMode === 'private' && !sessionToken)) {
+      setTimecapsuleProvider('drand')
+      setTimecapsuleProviderOverridden(false)
+    }
+  }, [aavritMode, aavritServerUrl, sessionToken])
 
   useEffect(() => {
     const unsubscribe = window.electron?.onBackendLog?.((message) => {
@@ -230,6 +303,17 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const hasLower = /[a-z]/.test(password)
   const hasNumber = /[0-9]/.test(password)
   const hasSpecial = /[^A-Za-z0-9]/.test(password)
+  const needsPqcKeyfilePassword = pqcEnabled && pqcStorageMode === 'external' && pqcKeyfilePasswordEnabled
+  const isValidPqcKeyfilePassword =
+    !needsPqcKeyfilePassword ||
+    (
+      pqcKeyfilePassword.length >= 12 &&
+      /[A-Z]/.test(pqcKeyfilePassword) &&
+      /[a-z]/.test(pqcKeyfilePassword) &&
+      /[0-9]/.test(pqcKeyfilePassword) &&
+      /[^A-Za-z0-9]/.test(pqcKeyfilePassword) &&
+      (!passwordEnabled || pqcKeyfilePassword !== password)
+    )
   const strength = getStrength(password)
   const strengthColor = strength < 40 ? 'bg-red-400' : strength < 80 ? 'bg-amber-400' : 'bg-emerald-400'
   const strengthLabel = strength < 40 ? 'WEAK' : strength < 80 ? 'MODERATE' : 'OPTIMAL'
@@ -285,6 +369,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
     }
 
     setFiles((prev) => [...prev, ...newPaths])
+    setSelectedTreePaths(new Set())
     newPaths.forEach((item) => {
       void scanAndAddPath(item)
     })
@@ -304,13 +389,8 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
     const dropped = getDroppedPaths(e.dataTransfer.files)
     const newPaths = dropped.filter(f => !files.includes(f))
     if (dropped.length - newPaths.length > 0) toast.error(`${dropped.length - newPaths.length} duplicate(s) skipped`)
-    if (newPaths.length > 0) {
-      setFiles(prev => [...prev, ...newPaths])
-      newPaths.forEach(p => {
-        void scanAndAddPath(p)
-      })
-    }
-  }, [files])
+    addPathsToSelection(newPaths)
+  }, [addPathsToSelection, files])
 
   const handleBrowseFiles = async () => {
     try {
@@ -319,12 +399,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       if (selected?.length) {
         const newPaths = selected.filter(f => !files.includes(f))
         if (selected.length - newPaths.length > 0) toast.error(`${selected.length - newPaths.length} duplicate(s) skipped`)
-        if (newPaths.length > 0) {
-          setFiles(prev => [...prev, ...newPaths])
-          newPaths.forEach(p => {
-            void scanAndAddPath(p)
-          })
-        }
+        addPathsToSelection(newPaths)
       }
     } catch (error) { console.error(error) }
   }
@@ -336,19 +411,51 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       if (selected?.length) {
         const newPaths = selected.filter(f => !files.includes(f))
         if (selected.length - newPaths.length > 0) toast.error(`${selected.length - newPaths.length} duplicate(s) skipped`)
-        if (newPaths.length > 0) {
-          setFiles(prev => [...prev, ...newPaths])
-          newPaths.forEach(p => {
-            void scanAndAddPath(p)
-          })
-        }
+        addPathsToSelection(newPaths)
       }
     } catch (error) { console.error(error) }
   }
 
-  const handleRemoveRoot = (rootPath: string) => {
-    setFiles(prev => prev.filter(f => f !== rootPath))
-    setTreeNodes(prev => prev.filter(n => n.path !== rootPath))
+  const handleTreeSelectionChange = (paths: string[], selected: boolean) => {
+    setSelectedTreePaths(prev => {
+      const next = new Set(prev)
+      for (const path of paths) {
+        if (selected) next.add(path)
+        else next.delete(path)
+      }
+      return next
+    })
+  }
+
+  const handleRemoveTreePaths = (paths: string[]) => {
+    const removeSet = new Set(paths)
+    const removedRoots = files.filter(rootPath => removeSet.has(rootPath))
+    setFiles(prev => prev.filter(rootPath => !removeSet.has(rootPath)))
+    setTreeNodes(prev => pruneTreeByPaths(prev, removeSet))
+    setSelectedTreePaths(prev => {
+      const next = new Set(prev)
+      for (const path of paths) next.delete(path)
+      return next
+    })
+    const nestedExclusions = paths.filter(path =>
+      !files.includes(path)
+      && !removedRoots.some(rootPath => isSameOrChildPath(path, rootPath))
+    )
+    setExcludedInputPaths(prev => {
+      const next = prev.filter(existing =>
+        !removeSet.has(existing)
+        && !removedRoots.some(rootPath => isSameOrChildPath(existing, rootPath))
+      )
+      return Array.from(new Set([...next, ...nestedExclusions]))
+    })
+  }
+
+  const handleClearAllStagedInputs = () => {
+    setFiles([])
+    setTreeNodes([])
+    setSelectedTreePaths(new Set())
+    setExcludedInputPaths([])
+    setSearchQuery('')
   }
 
   // Generate keyphrase via backend
@@ -368,15 +475,6 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
     navigator.clipboard.writeText(keyphrase)
     setIsCopied(true)
     setTimeout(() => setIsCopied(false), 2000)
-  }
-
-  const handleChoosePqcKeyfile = async () => {
-    const electron = window.electron
-    const selected = await electron?.saveFile({
-      defaultPath: pqcKeyfilePath || deriveDefaultKeyfileName(files),
-      filters: [{ name: 'RookDuel Avikal PQC Keyfile', extensions: ['avkkey'] }]
-    })
-    if (selected) setPqcKeyfilePath(selected)
   }
 
   const togglePasswordProtection = () => {
@@ -406,6 +504,11 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       const next = !current
       if (!next) {
         setPqcKeyfilePath('')
+        setPqcKeyfilePasswordEnabled(false)
+        setPqcKeyfilePassword('')
+        setShowPqcKeyfilePassword(false)
+        setPqcStorageMode(getDefaultPqcStorageMode())
+        setPqcModeOverridden(false)
       }
       return next
     })
@@ -444,6 +547,10 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       toast.error('Quantum keyfile mode requires a password or keyphrase')
       return
     }
+    if (needsPqcKeyfilePassword && !isValidPqcKeyfilePassword) {
+      toast.error('Use a strong .avkkey password that differs from the archive password')
+      return
+    }
     if (timecapsuleProvider === 'aavrit' && !aavritServerUrl) {
       toast.error('Aavrit mode requires an Aavrit server connection. Connect to your Aavrit server or switch to drand.')
       promptAavritLogin()
@@ -467,7 +574,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       if (!outputFile) return
 
       let nextPqcKeyfilePath = ''
-      if (pqcEnabled) {
+      if (pqcEnabled && pqcStorageMode === 'external') {
         nextPqcKeyfilePath = pqcKeyfilePath
         if (!nextPqcKeyfilePath) {
           const selectedKeyfilePath = await electron?.saveFile({
@@ -491,6 +598,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       setIsEncrypted(false)
       setOutputFilePath(outputFile)
       setCreatedPqcKeyfilePath('')
+      setCreatedPqcStorageMode(pqcStorageMode)
       progress.reset()
       progress.update({
         status: 'running',
@@ -502,6 +610,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       // Call the correct Python API endpoint for timecapsule creation
       const result = await api.encrypt({
         input_files: files,
+        excluded_input_paths: excludedInputPaths.length > 0 ? excludedInputPaths : undefined,
         output_file: outputFile,
         password: password || undefined,
         keyphrase: keyphrase ? keyphrase.split(' ') : undefined,
@@ -509,7 +618,10 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         use_timecapsule: true,
         timecapsule_provider: timecapsuleProvider,
         pqc_enabled: pqcEnabled,
-        pqc_keyfile_output: pqcEnabled ? nextPqcKeyfilePath : undefined,
+        pqc_storage_mode: pqcEnabled ? pqcStorageMode : undefined,
+        pqc_keyfile_output: pqcEnabled && pqcStorageMode === 'external' ? nextPqcKeyfilePath : undefined,
+        pqc_keyfile_protection_mode: needsPqcKeyfilePassword ? 'dual_password' : 'archive_secret',
+        pqc_keyfile_password: needsPqcKeyfilePassword ? pqcKeyfilePassword : undefined,
       }, timecapsuleProvider === 'aavrit' ? (sessionToken || '') : undefined)
       
       if (!result.success) throw new Error(result.message || 'Time-Capsule creation failed')
@@ -525,15 +637,18 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         currentOperation: 'Time-Capsule created',
         percentage: 100,
       })
-      toast.success(
-        pqcEnabled
-          ? 'Time-Capsule and PQC keyfile created successfully!'
-          : timecapsuleProvider === 'drand'
-          ? 'drand Time-Capsule created successfully!'
-          : 'Aavrit Time-Capsule created successfully!'
+        toast.success(
+          pqcEnabled
+            ? pqcStorageMode === 'embedded'
+              ? 'Time-Capsule with embedded quantum protection created successfully!'
+              : 'Time-Capsule and PQC keyfile created successfully!'
+            : timecapsuleProvider === 'drand'
+            ? 'drand Time-Capsule created successfully!'
+            : 'Aavrit Time-Capsule created successfully!'
       )
       setPassword('')
       setKeyphrase('')
+      setPqcKeyfilePassword('')
       setActivePanel('datetime')
     } catch (error: unknown) {
       progress.update({
@@ -543,6 +658,9 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       })
       toast.error(getErrorMessage(error, 'Time-Capsule creation failed'))
     } finally {
+      setPassword('')
+      setKeyphrase('')
+      setPqcKeyfilePassword('')
       setLoading(false)
     }
   }
@@ -550,6 +668,8 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const usePass = passwordEnabled
   const useKeyp = keyphraseEnabled
   const hasProtection = usePass || useKeyp
+  const isBoth = usePass && useKeyp
+  const isTrioProtection = isBoth && pqcEnabled
   const isPasswordReady = usePass
     ? hasMinLen && hasUpper && hasLower && hasNumber && hasSpecial
     : true
@@ -565,32 +685,24 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const currentTimeZoneLabel = ntpTime ? getLocalTimeZoneLabel(ntpTime) : getLocalTimeZoneLabel(new Date())
   const isUnlockReady = unlockMs !== null && (ntpSynced ? nowMs !== null && unlockMs > nowMs : true)
   const isFilesReady = files.length > 0
-  const isProviderReady = timecapsuleProvider !== 'aavrit' || !!aavritServerUrl && (aavritMode !== 'private' || !!sessionToken)
-  const isPqcReady = !pqcEnabled || hasProtection
   const showInlineProgressCard = false
-  const canAttemptCreateTimeCapsule = backendRuntime.isReady && !loading && isFilesReady && unlockMs !== null
+  const canAttemptCreateTimeCapsule = backendRuntime.isReady && !loading && isFilesReady && unlockMs !== null && isValidPqcKeyfilePassword
+  const isAavritAvailable = Boolean(aavritServerUrl && (aavritMode !== 'private' || sessionToken))
   const providerModeLabel = timecapsuleProvider === 'drand'
-    ? 'No Login'
+    ? 'drand'
     : aavritMode === 'private'
       ? 'Private'
       : 'Public'
-  const providerSummaryText = timecapsuleProvider === 'drand'
-    ? 'Public quicknet unlock with no account requirement.'
-    : !aavritServerUrl
-      ? 'Connect an Aavrit server to enable signed commit/reveal release.'
-      : aavritMode === 'private'
-        ? 'Private Aavrit server with authenticated release flow.'
-        : 'Public Aavrit server with signed reveal verification.'
 
   return (
-    <div className="min-h-full w-full max-w-[1600px] mx-auto p-6 lg:p-10 box-border">
+    <div className="av-page-shell">
 
       {/* 60/40 Split Architecture */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
+      <div className="av-work-grid">
 
       {/* ── Left Panel: File Staging (60%) ───────────────────────── */}
-      <div className="lg:col-span-3 min-h-[550px] bg-av-surface/60 backdrop-blur-3xl rounded-[24px] shadow-[0_8px_40px_rgba(0,0,0,0.06)] border border-av-border/30 flex flex-col overflow-hidden relative transition-colors duration-300">
-        <div className="px-8 py-7 border-b border-av-border/30 bg-gradient-to-b from-av-surface/80 to-av-surface/40 z-10 shrink-0">
+      <div className="av-primary-panel lg:col-span-3 flex flex-col overflow-hidden relative">
+        <div className="av-panel-header z-10 shrink-0">
           <h2 className="text-[28px] font-medium tracking-tight text-av-main mb-1.5 flex items-center gap-3">
             Time <span className="font-light text-av-muted">Capsule</span>
           </h2>
@@ -598,62 +710,31 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         </div>
 
         <div
-          className="flex-1 flex flex-col relative overflow-hidden bg-av-border/5"
+          className="av-left-workspace flex-1 flex flex-col relative overflow-hidden"
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
           {loading && !isEncrypted && (
-            <div className="absolute inset-0 z-20 bg-av-surface/80 backdrop-blur-xl flex flex-col items-center justify-center p-8">
-              <div className="w-full max-w-md rounded-3xl bg-av-surface/90 border border-av-border/40 p-8 shadow-[0_20px_60px_rgba(0,0,0,0.12)]">
-                <div className="flex items-center gap-3 mb-5">
-                  <div className="p-3 rounded-2xl bg-av-accent/10 border border-av-accent/30">
-                    <RefreshCw className="w-6 h-6 text-av-accent" strokeWidth={1.5} />
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-medium tracking-tight text-av-main">Creating Time-Capsule</h3>
-                    <p className="text-sm text-av-muted font-light">
-                      {progress.currentOperation || 'Creating your secure time-locked archive.'}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between text-xs text-av-muted mb-2">
-                  <span>{progress.percentage !== null ? `${Math.round(progress.percentage)}% complete` : 'Working...'}</span>
-                  <span>{formatEta(progress.etaSeconds)}</span>
-                </div>
-                <div className="h-2.5 w-full bg-av-border/30 rounded-full overflow-hidden">
-                  {progress.percentage !== null ? (
-                    <motion.div
-                      initial={{ width: 0 }}
-                      animate={{ width: `${Math.max(0, Math.min(100, progress.percentage))}%` }}
-                      className="h-full bg-av-accent rounded-full"
-                      transition={{ duration: 0.35, ease: 'easeOut' }}
-                    />
-                  ) : (
-                    <motion.div
-                      className="h-full w-1/3 rounded-full bg-gradient-to-r from-transparent via-av-accent to-transparent"
-                      animate={{ x: ['0%', '280%'] }}
-                      transition={{ duration: 1.3, repeat: Infinity, ease: 'easeInOut' }}
-                    />
-                  )}
-                </div>
-                <div className="mt-3 flex items-center justify-between text-xs text-av-muted">
-                  <span>{progress.elapsedSeconds}s elapsed</span>
-                  {progress.fileSize !== null && (
-                    <span>{(progress.fileSize / (1024 * 1024)).toFixed(progress.fileSize >= 1024 * 1024 * 1024 ? 1 : 2)} MB source</span>
-                  )}
-                </div>
-              </div>
-            </div>
+            <ProcessingOverlay
+              title="Creating Time-Capsule"
+              description={progress.currentOperation || 'Creating your secure time-locked archive.'}
+              icon={<Clock className="h-5 w-5 text-av-accent" strokeWidth={1.7} />}
+              percentage={progress.percentage}
+              etaSeconds={progress.etaSeconds}
+              elapsedSeconds={progress.elapsedSeconds}
+              fileSize={progress.fileSize}
+              indeterminateText="Sealing archive to release time"
+            />
           )}
 
           {/* Success state */}
           {isEncrypted && (
-            <div className="flex-1 flex flex-col items-center justify-center p-8 bg-av-surface/40 backdrop-blur-sm z-20">
+            <div className="av-processing-overlay flex-1 flex flex-col items-center justify-center p-8 z-20">
               <motion.div
                 initial={{ scale: 0.9, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
-                className="w-full max-w-md p-8 rounded-3xl bg-av-surface border border-green-500/20 shadow-2xl flex flex-col items-center text-center relative overflow-hidden"
+                className="av-result-card w-full max-w-md p-8 rounded-3xl flex flex-col items-center text-center relative overflow-hidden"
               >
                 <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-transparent via-green-500/30 to-transparent" />
                 <div className="w-20 h-20 rounded-full bg-green-500/10 flex items-center justify-center mb-6 border border-green-500/20">
@@ -685,6 +766,19 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                   <ExternalLink className="w-5 h-5 text-av-muted group-hover:text-av-accent transition-colors" />
                 </div>
 
+                {createdPqcStorageMode === 'embedded' && pqcEnabled && !createdPqcKeyfilePath && (
+                  <div className="w-full mt-4 p-5 rounded-2xl bg-emerald-500/5 border border-emerald-500/20 flex items-center gap-4 transition-all">
+                    <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center shrink-0 border border-emerald-500/20">
+                      <Fingerprint className="w-6 h-6 text-emerald-500" />
+                    </div>
+                    <div className="text-left truncate flex-1">
+                      <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider mb-0.5">Embedded Quantum Protection</p>
+                      <p className="text-sm font-medium text-av-main truncate">Stored inside the .avk archive</p>
+                      <p className="text-[11px] text-av-muted mt-1">The capsule still needs the correct password or keyphrase after release before embedded quantum unlock can continue.</p>
+                    </div>
+                  </div>
+                )}
+
                 {createdPqcKeyfilePath && (
                   <div className="w-full mt-4 p-5 rounded-2xl bg-amber-500/5 border border-amber-500/20 flex items-center gap-4 transition-all">
                     <div className="w-12 h-12 rounded-xl bg-amber-500/10 flex items-center justify-center shrink-0 border border-amber-500/20">
@@ -701,10 +795,14 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                 <button
                   onClick={() => {
                     setIsEncrypted(false)
-                    setFiles([])
-                    setPqcEnabled(false)
-                    setPqcKeyfilePath('')
-                    setCreatedPqcKeyfilePath('')
+                      setFiles([])
+                      setTreeNodes([])
+                      setSelectedTreePaths(new Set())
+                      setExcludedInputPaths([])
+                      setPqcEnabled(false)
+                      setPqcStorageMode('embedded')
+                      setPqcKeyfilePath('')
+                      setCreatedPqcKeyfilePath('')
                   }}
                   className="mt-8 w-full py-4 rounded-xl bg-av-accent text-white font-bold hover:opacity-90 transition-all shadow-lg shadow-av-accent/20"
                 >
@@ -719,13 +817,13 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
             files.length === 0 ? (
               <div className="flex-1 p-8 flex flex-col relative">
                 <div
-                  className={`flex-1 rounded-2xl border-2 border-dashed flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden ${
+                  className={`av-drop-zone flex-1 rounded-2xl flex flex-col items-center justify-center transition-all duration-300 relative overflow-hidden ${
                     isDragging
-                      ? 'border-av-main bg-av-border/10'
-                      : 'border-av-border bg-av-surface hover:border-av-accent/50 hover:bg-av-border/5 text-av-muted'
+                      ? 'av-drop-zone-active'
+                      : 'text-av-muted'
                   }`}
                 >
-                  <div className="absolute inset-0 bg-gradient-to-b from-transparent to-av-border/10 pointer-events-none" />
+                  <div className="pointer-events-none absolute inset-0 opacity-0" />
                   <motion.div animate={{ y: isDragging ? -10 : 0 }} className="z-10 flex flex-col items-center">
                     <div className="w-20 h-20 rounded-2xl bg-av-border/10 flex items-center justify-center mb-6 shadow-sm border border-av-border text-av-main">
                       <Upload className="w-8 h-8" strokeWidth={1.5} />
@@ -743,9 +841,9 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                       </button>
                       <button
                         onClick={handleBrowseFolders}
-                        className="flex items-center gap-2 text-xs bg-av-surface border border-av-border text-av-main font-semibold px-5 py-2.5 rounded-xl transition-all shadow-sm hover:border-av-accent/40 active:scale-95"
+                        className="flex items-center gap-2 text-xs bg-av-surface border border-av-border text-av-main font-semibold px-5 py-2.5 rounded-xl transition-all shadow-sm hover:border-av-border active:scale-95"
                       >
-                        <Folder className="w-3.5 h-3.5 text-amber-400" /> Add Folders
+                        <Folder className="w-3.5 h-3.5 text-av-muted" /> Add Folders
                       </button>
                     </div>
                   </motion.div>
@@ -754,29 +852,29 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
             ) : (
               <div className="flex-1 flex flex-col relative overflow-hidden">
                 {/* Toolbar */}
-                <div className="px-6 py-4 flex items-center justify-between border-b border-av-border bg-av-border/10 shrink-0">
+                <div className="av-explorer-toolbar px-6 py-4 flex items-center justify-between shrink-0">
                   <div className="flex items-center gap-3 shrink-0">
                     <span className="text-sm font-medium text-av-main">Explorer</span>
-                    <span className="bg-av-main text-av-surface text-xs font-bold px-2.5 py-1 rounded-full">{files.length}</span>
+                    <span className="bg-av-border/15 border border-av-main/20 text-av-main text-[11px] font-semibold px-2.5 py-0.5 rounded-md">{files.length}</span>
                   </div>
                   <div className="flex-1 max-w-[200px] mx-4">
                     <div className="relative group">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-av-muted group-focus-within:text-av-accent transition-colors" />
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-av-muted group-focus-within:text-av-main transition-colors" />
                       <input
                         type="text"
                         placeholder="Filter..."
                         value={searchQuery}
                         onChange={e => setSearchQuery(e.target.value)}
-                        className="w-full pl-8 pr-3 py-1.5 bg-av-surface border border-av-border rounded-lg text-xs focus:outline-none focus:border-av-accent/50 transition-all text-av-main"
+                        className="w-full pl-8 pr-3 py-1.5 bg-av-surface border border-av-border rounded-lg text-xs focus:outline-none focus:border-av-border focus:ring-1 focus:ring-av-border/20 transition-all text-av-main"
                       />
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <button onClick={handleBrowseFiles} className="flex items-center gap-1.5 text-[11px] bg-av-surface border border-av-border text-av-muted hover:text-av-main hover:border-av-accent/40 font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
+                    <button onClick={handleBrowseFiles} className="flex items-center gap-1.5 text-[11px] bg-av-surface border border-av-border text-av-muted hover:text-av-main hover:border-av-border font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
                       <File className="w-3 h-3" /> Files
                     </button>
-                    <button onClick={handleBrowseFolders} className="flex items-center gap-1.5 text-[11px] bg-av-surface border border-av-border text-av-muted hover:text-av-main hover:border-av-accent/40 font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
-                      <Folder className="w-3 h-3 text-amber-400" /> Folders
+                    <button onClick={handleBrowseFolders} className="flex items-center gap-1.5 text-[11px] bg-av-surface border border-av-border text-av-muted hover:text-av-main hover:border-av-border font-medium px-3 py-1.5 rounded-lg transition-all shadow-sm">
+                      <Folder className="w-3 h-3 text-av-muted" /> Folders
                     </button>
                   </div>
                 </div>
@@ -786,7 +884,10 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                   <FileTree
                     nodes={treeNodes}
                     searchQuery={searchQuery}
-                    onRemoveRoot={handleRemoveRoot}
+                    selectedPaths={selectedTreePaths}
+                    onSelectionChange={handleTreeSelectionChange}
+                    onRemovePaths={handleRemoveTreePaths}
+                    onClearAll={handleClearAllStagedInputs}
                   />
                 </div>
               </div>
@@ -796,7 +897,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       </div>
 
       {/* ── Right Panel: Security Protocol (40%) ───────────────────── */}
-      <div className={`lg:col-span-2 flex flex-col gap-5 pb-6 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
+      <div className={`av-side-stack av-natural-side-stack lg:col-span-2 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
         <div className="px-2 mb-1">
           <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Time-Lock Settings</h3>
@@ -805,12 +906,14 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         <div className="rounded-[20px] border border-av-border/30 bg-av-surface/40 backdrop-blur-xl overflow-hidden shadow-sm">
           <button
             type="button"
-            onClick={() => setAuthorityExpanded(value => !value)}
-            className="flex w-full items-start justify-between gap-4 p-5 text-left transition-colors hover:bg-av-border/5"
+            onClick={() => isAavritAvailable && setAuthorityExpanded(value => !value)}
+            className={`flex w-full items-start justify-between gap-4 p-5 text-left transition-colors ${
+              isAavritAvailable ? 'hover:bg-av-border/5' : 'cursor-default'
+            }`}
           >
             <div className="min-w-0">
               <div className="flex items-center gap-3">
-                <h3 className="font-semibold text-av-main text-sm">Unlock Authority</h3>
+                <h3 className="font-semibold text-av-main text-sm">Release Method</h3>
                 <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${
                   timecapsuleProvider === 'drand'
                     ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
@@ -819,91 +922,52 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                   {providerModeLabel}
                 </span>
               </div>
-              <p className="mt-1 text-xs text-av-muted">
-                {timecapsuleProvider === 'drand' ? 'drand' : 'Aavrit'} selected. {providerSummaryText}
-              </p>
+              <p className="mt-1 text-xs text-av-muted">{timecapsuleProvider === 'drand' ? 'drand public time release' : 'Aavrit server release'}</p>
             </div>
-            <ChevronDown className={`mt-1 h-4 w-4 shrink-0 text-av-muted transition-transform ${authorityExpanded ? 'rotate-180' : ''}`} />
+            {isAavritAvailable && (
+              <ChevronDown className={`mt-1 h-4 w-4 shrink-0 text-av-muted transition-transform ${authorityExpanded ? 'rotate-180' : ''}`} />
+            )}
           </button>
 
-          {authorityExpanded && (
+          {isAavritAvailable && authorityExpanded && (
             <div className="border-t border-av-border/30 px-5 pb-5 pt-4">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  onClick={() => setTimecapsuleProvider('drand')}
-                  className={`rounded-2xl border p-4 text-left transition-all ${
-                    timecapsuleProvider === 'drand'
-                      ? 'border-emerald-500 bg-emerald-500/10 shadow-sm ring-1 ring-emerald-500/10'
-                      : 'border-av-border hover:border-emerald-500/30 hover:bg-av-border/5'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10">
-                      <Shield className="h-5 w-5 text-emerald-400" />
+                  <button
+                    type="button"
+                    onClick={() => { setTimecapsuleProvider('drand'); setTimecapsuleProviderOverridden(true) }}
+                    className={`rounded-2xl border p-4 text-left transition-all ${
+                      timecapsuleProvider === 'drand'
+                        ? 'border-emerald-500 bg-emerald-500/10 shadow-sm ring-1 ring-emerald-500/10'
+                        : 'border-av-border hover:border-emerald-500/30 hover:bg-av-border/5'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-sm font-semibold text-av-main">drand</h4>
+                        <p className="mt-1 text-[11px] text-av-muted">Public beacon</p>
+                      </div>
+                      <CheckCircle2 className={`h-4 w-4 ${timecapsuleProvider === 'drand' ? 'text-emerald-400' : 'text-transparent'}`} />
                     </div>
-                    <CheckCircle2 className={`h-4 w-4 ${timecapsuleProvider === 'drand' ? 'text-emerald-400' : 'text-transparent'}`} />
-                  </div>
-                  <h4 className="mt-3 text-sm font-semibold text-av-main">drand</h4>
-                  <p className="mt-1 text-xs leading-relaxed text-av-muted">
-                    Unlimited public capsules with decentralized unlock timing and no account requirement.
-                  </p>
-                </button>
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTimecapsuleProvider('aavrit')
-                    if (!aavritServerUrl || (aavritMode === 'private' && !sessionToken)) {
-                      toast.info('Connect your Aavrit server to use Aavrit release mode.')
-                      promptAavritLogin()
-                    }
-                  }}
-                  className={`rounded-2xl border p-4 text-left transition-all ${
-                    timecapsuleProvider === 'aavrit'
-                      ? 'border-blue-500 bg-blue-500/10 shadow-sm ring-1 ring-blue-500/10'
-                      : 'border-av-border hover:border-blue-500/30 hover:bg-av-border/5'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-blue-500/20 bg-blue-500/10">
-                      <Lock className="h-5 w-5 text-blue-400" />
+                  <button
+                    type="button"
+                    onClick={() => { setTimecapsuleProvider('aavrit'); setTimecapsuleProviderOverridden(true) }}
+                    className={`rounded-2xl border p-4 text-left transition-all ${
+                      timecapsuleProvider === 'aavrit'
+                        ? 'border-blue-500 bg-blue-500/10 shadow-sm ring-1 ring-blue-500/10'
+                        : 'border-av-border hover:border-blue-500/30 hover:bg-av-border/5'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-sm font-semibold text-av-main">Aavrit</h4>
+                        <p className="mt-1 text-[11px] text-av-muted">{aavritMode === 'private' ? 'Private server' : 'Signed release'}</p>
+                      </div>
+                      <CheckCircle2 className={`h-4 w-4 ${timecapsuleProvider === 'aavrit' ? 'text-blue-400' : 'text-transparent'}`} />
                     </div>
-                    <CheckCircle2 className={`h-4 w-4 ${timecapsuleProvider === 'aavrit' ? 'text-blue-400' : 'text-transparent'}`} />
-                  </div>
-                  <h4 className="mt-3 text-sm font-semibold text-av-main">Aavrit</h4>
-                  <p className="mt-1 text-xs leading-relaxed text-av-muted">
-                    Signed commit/reveal verification with public or Appwrite-protected private deployments.
-                  </p>
-                </button>
+                  </button>
               </div>
-
-              <div className={`mt-4 rounded-xl border p-3 text-xs leading-relaxed ${
-                timecapsuleProvider === 'drand'
-                  ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300'
-                  : 'border-blue-500/20 bg-blue-500/5 text-blue-700 dark:text-blue-300'
-              }`}>
-                {timecapsuleProvider === 'drand'
-                  ? 'drand stays self-contained in the archive and unlocks once the selected quicknet round becomes public.'
-                  : !aavritServerUrl
-                    ? 'Connect an Aavrit server before creating an Aavrit time-capsule.'
-                    : aavritMode === 'private'
-                      ? sessionToken
-                        ? 'Private Aavrit is connected and ready.'
-                        : 'Sign in to your Aavrit server before creating a private Aavrit time-capsule.'
-                      : 'Public Aavrit is connected and ready.'}
-              </div>
-
-              {timecapsuleProvider === 'aavrit' && (!aavritServerUrl || (aavritMode === 'private' && !sessionToken)) && (
-                <button
-                  type="button"
-                  onClick={promptAavritLogin}
-                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-500 py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90"
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  Connect Aavrit Server
-                </button>
-              )}
             </div>
           )}
         </div>
@@ -1155,8 +1219,8 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                 <Fingerprint className={`w-[18px] h-[18px] ${pqcEnabled ? 'text-amber-500' : 'text-av-muted'}`} strokeWidth={1.5} />
               </div>
               <div>
-                <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Quantum Keyfile</h3>
-                <p className="text-av-muted text-[13px] font-light">Add a separate `.avkkey` file on top of time release</p>
+                <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Quantum Protection</h3>
+                <p className="text-av-muted text-[13px] font-light">{pqcStorageMode === 'embedded' ? 'Embedded PQC bundle' : 'External .avkkey bundle'}</p>
               </div>
             </div>
             <div className="flex items-center gap-2 pr-1" onClick={e => e.stopPropagation()}>
@@ -1170,73 +1234,99 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           </div>
 
           {pqcEnabled && (
-            <div className="px-5 pb-5 space-y-4 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
-              <div className="security-pqc-info rounded-2xl p-4">
-                <div className="flex items-start gap-3">
-                  <div className="security-pqc-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
-                    <Fingerprint className="h-4 w-4" />
-                  </div>
-                  <p className="text-[12px] leading-relaxed">
-                    This mode keeps the capsule portable while adding a fixed hybrid quantum suite through a separate protected <span className="font-semibold">.avkkey</span> file that must be present during unlock.
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleChoosePqcKeyfile}
-                  className="flex-1 py-3 rounded-xl bg-av-main text-av-surface border border-av-main text-sm font-semibold hover:opacity-90 transition-all shadow-sm"
-                >
-                  {pqcKeyfilePath ? 'Change .avkkey Destination' : 'Choose .avkkey Destination'}
-                </button>
-                {pqcKeyfilePath && (
+            <div className="px-5 pb-5 space-y-3 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
+                <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={() => setPqcKeyfilePath('')}
-                    className="py-3 px-4 rounded-xl bg-av-surface border border-av-border/70 text-av-main text-sm font-semibold hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300 transition-all"
-                  >
-                    Clear
-                  </button>
-                )}
+                  onClick={() => { setPqcStorageMode('embedded'); setPqcModeOverridden(true); setPqcKeyfilePath(''); setPqcKeyfilePasswordEnabled(false); setPqcKeyfilePassword('') }}
+                  className={`rounded-2xl border px-4 py-4 text-left transition-all ${
+                    pqcStorageMode === 'embedded'
+                      ? 'border-emerald-500/35 bg-emerald-500/10 shadow-sm'
+                      : 'border-av-border/40 bg-av-surface/60 hover:border-av-border/70'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-av-main">Embedded in .avk</p>
+                      <p className="mt-1 text-[11px] text-av-muted">Single capsule file</p>
+                    </div>
+                    {pqcStorageMode === 'embedded' && <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300">Selected</span>}
+                  </div>
+                </button>
+                <button
+                  onClick={() => { setPqcStorageMode('external'); setPqcModeOverridden(true); setPqcKeyfilePath('') }}
+                  className={`rounded-2xl border px-4 py-4 text-left transition-all ${
+                    pqcStorageMode === 'external'
+                      ? 'border-amber-500/35 bg-amber-500/10 shadow-sm'
+                      : 'border-av-border/40 bg-av-surface/60 hover:border-av-border/70'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-av-main">Separate .avkkey</p>
+                      <p className="mt-1 text-[11px] text-av-muted">Split key material</p>
+                    </div>
+                    {pqcStorageMode === 'external' && <span className="rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">Selected</span>}
+                  </div>
+                </button>
               </div>
-              <div className="security-keyfile-destination rounded-xl p-3">
-                <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.2em] mb-1">Keyfile Destination</p>
-                <p className="break-all text-sm">{pqcKeyfilePath || 'You will be prompted before capsule creation starts.'}</p>
-              </div>
-              <p className="security-keyfile-warning rounded-xl px-3 py-2 text-[11px] leading-relaxed">
-                Losing the `.avkkey` means the capsule cannot be opened, even after the Aavrit or drand release succeeds.
-              </p>
+              {pqcStorageMode === 'external' && (
+                <div className="rounded-xl border border-av-border/35 bg-av-surface/60 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold text-av-main">Add .avkkey password</p>
+                      <p className="mt-0.5 text-[11px] text-av-muted">Optional second unlock layer</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setPqcKeyfilePasswordEnabled(value => {
+                          const next = !value
+                          if (!next) {
+                            setPqcKeyfilePassword('')
+                            setShowPqcKeyfilePassword(false)
+                          }
+                          return next
+                        })
+                      }}
+                      className={`relative h-6 w-11 rounded-full border transition-all ${pqcKeyfilePasswordEnabled ? 'border-amber-500 bg-amber-500' : 'border-av-border/40 bg-av-border/20 dark:bg-white/10'}`}
+                    >
+                      <span className={`absolute left-[1px] top-[1px] h-5 w-5 rounded-full bg-white shadow transition-transform ${pqcKeyfilePasswordEnabled ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+                  {pqcKeyfilePasswordEnabled && (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center gap-2 rounded-xl border border-av-border/35 bg-av-border/10 px-3 py-2">
+                        <input
+                          type={showPqcKeyfilePassword ? 'text' : 'password'}
+                          value={pqcKeyfilePassword}
+                          onChange={(event) => setPqcKeyfilePassword(event.target.value)}
+                          placeholder=".avkkey password"
+                          className="min-w-0 flex-1 bg-transparent text-sm text-av-main outline-none placeholder:text-av-muted"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPqcKeyfilePassword(value => !value)}
+                          className="text-av-muted transition hover:text-av-main"
+                        >
+                          {showPqcKeyfilePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                      <p className={`text-[11px] ${isValidPqcKeyfilePassword ? 'text-emerald-500' : 'text-amber-500'}`}>
+                        {pqcKeyfilePassword && passwordEnabled && pqcKeyfilePassword === password
+                          ? 'Must be different from archive password.'
+                          : 'Use 12+ chars with upper, lower, number, and symbol.'}
+                      </p>
+                    </div>
+                  )}
+                  {!pqcKeyfilePasswordEnabled && (
+                    <p className="mt-2 text-[11px] text-av-muted">`.avkkey` location is chosen when creation starts.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        <div className="shrink-0 flex flex-col gap-3 mt-auto pt-2">
-          {pqcEnabled && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="security-external-keyfile-card mb-2 overflow-hidden rounded-[18px]"
-            >
-              <div className="h-1.5 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-400" />
-              <div className="flex items-start gap-3 p-4">
-                <div className="security-pqc-icon flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl">
-                  <Fingerprint className="h-5 w-5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="mb-2 flex items-center gap-2">
-                    <p className="text-[13px] font-bold uppercase tracking-[0.18em] text-av-main">External Keyfile Required</p>
-                    <span className="rounded-full border border-av-border/60 bg-av-border/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-av-muted">
-                      Required
-                    </span>
-                  </div>
-                  <p className="text-[13px] leading-relaxed text-av-main">
-                    This capsule also needs the separate <span className="font-semibold">.avkkey</span> file during unlock. Keep it stored away from the <span className="font-semibold">.avk</span> archive.
-                  </p>
-                  <p className="mt-2 text-[11px] leading-relaxed text-av-muted">
-                    Without the matching keyfile, unlock cannot complete even after the release time is reached.
-                  </p>
-                </div>
-              </div>
-            </motion.div>
-          )}
+        <div className="shrink-0 flex flex-col gap-3 pt-2">
           {showInlineProgressCard && progress.status !== 'idle' && !loading && !isEncrypted && (
             <ProgressCard
               status={progress.status === 'running' ? 'Creating…' : progress.status === 'completed' ? 'Completed' : progress.status === 'error' ? 'Error' : progress.status === 'cancelled' ? 'Cancelled' : 'Preparing…'}
@@ -1249,6 +1339,22 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
               elapsedSeconds={progress.elapsedSeconds}
               etaSeconds={progress.etaSeconds}
             />
+          )}
+
+          {isBoth && (
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-[16px] bg-red-500/10 border border-red-500/30 flex items-start gap-3 backdrop-blur-md shadow-inner">
+              <ShieldAlert className="w-5 h-5 text-red-500 shrink-0 mt-0.5 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
+              <div>
+                <p className="text-[13px] font-bold text-red-500 uppercase tracking-wide mb-1 drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]">
+                  {isTrioProtection ? 'Trio High Protection Enabled' : 'Dual High Protection Enabled'}
+                </p>
+                <p className="text-xs text-red-400/90 font-medium leading-relaxed">
+                  {isTrioProtection
+                    ? 'This capsule will require release time, password, 21-word keyphrase, and PQC material. Store every required secret carefully before you continue.'
+                    : 'This capsule will require both the access password and the 21-word keyphrase after release. Keep both stored safely before you continue.'}
+                </p>
+              </div>
+            </motion.div>
           )}
 
           <BackendStartupNotice backend={backendRuntime} compact />

@@ -21,7 +21,7 @@ _WINDOWS_RESERVED_NAMES = {
 _WINDOWS_INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
 
-def _validate_windows_path_component(component: str, *, allow_path_separators: bool = False) -> str:
+def _validate_windows_path_component(component: str) -> str:
     if not isinstance(component, str):
         raise ValueError("Archive path component must be a string")
 
@@ -36,7 +36,7 @@ def _validate_windows_path_component(component: str, *, allow_path_separators: b
         raise ValueError("Archive path component contains invalid characters")
     if candidate.endswith((" ", ".")):
         raise ValueError("Archive path component must not end with spaces or periods")
-    if not allow_path_separators and ("/" in candidate or "\\" in candidate):
+    if "/" in candidate or "\\" in candidate:
         raise ValueError("Archive path component must not contain path separators")
     if any(ord(ch) < 32 for ch in candidate):
         raise ValueError("Archive path component contains control characters")

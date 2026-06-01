@@ -1,21 +1,4 @@
-"""drand timelock helper integration.
-
-Node.js runtime discovery (3-tier):
-
-  Tier 1 — System PATH  : ``shutil.which("node")``
-            Works in development mode and on CI runners (Node.js installed).
-
-  Tier 2 — Electron exec: ``AVIKAL_ELECTRON_EXEC`` env var + ``ELECTRON_RUN_AS_NODE=1``
-            Electron ships a full Node.js runtime inside its own binary.
-            When the env var is set (by electron/main.js on every launch) we use the
-            Electron binary itself as a drop-in node interpreter.  This is the
-            official Electron-documented pattern used by VS Code, Cursor, 1Password,
-            etc. — zero external installation required, zero added bundle size.
-
-  Tier 3 — Windows fallback paths
-            Probes well-known Windows installation directories (Program Files, nvm,
-            Volta, Scoop, Chocolatey) for a ``node.exe``.  Edge-case last resort.
-"""
+"""drand timelock helper integration."""
 
 from __future__ import annotations
 
@@ -35,61 +18,34 @@ from ..runtime_paths import drand_helper_path as runtime_drand_helper_path
 
 
 log = logging.getLogger("avikal.api")
-_DRAND_PROCESS_LOCK = threading.Lock()
 _DRAND_WARMUP_LOCK = threading.Lock()
 _DRAND_WARMUP_THREAD: threading.Thread | None = None
+DEFAULT_DRAND_HELPER_TIMEOUT_SECONDS = 30
 
 
-# ---------------------------------------------------------------------------
-# Common Windows Node.js installation paths — Tier 3 fallback
-# ---------------------------------------------------------------------------
 _WINDOWS_NODE_CANDIDATES: list[str] = [
     r"C:\Program Files\nodejs\node.exe",
     r"C:\Program Files (x86)\nodejs\node.exe",
-    # nvm-windows per-user
     str(Path.home() / "AppData" / "Roaming" / "nvm" / "current" / "node.exe"),
-    # Volta
     str(Path.home() / ".volta" / "bin" / "node.exe"),
-    # Scoop
     str(Path.home() / "scoop" / "apps" / "nodejs" / "current" / "node.exe"),
-    # Chocolatey
     r"C:\ProgramData\chocolatey\bin\node.exe",
     r"C:\tools\nodejs\node.exe",
 ]
 
 
 def _find_node_binary() -> tuple[str, dict[str, str]]:
-    """
-    Locate a Node.js-compatible binary and return ``(path, extra_env)``.
-
-    ``extra_env`` is a dict of environment variables that MUST be set when
-    spawning the returned binary.  For Tier-1/3 (real node) it is empty.
-    For Tier-2 (Electron exec) it contains ``{"ELECTRON_RUN_AS_NODE": "1"}``.
-
-    Returns ``("", {})`` when no Node.js runtime can be found.
-    """
-    # ------------------------------------------------------------------
-    # Tier 1: system node on PATH  (dev mode + CI)
-    # ------------------------------------------------------------------
+    """Locate a Node.js-compatible binary and required environment."""
     node = shutil.which("node") or shutil.which("node.exe")
     if node:
         log.debug("drand: using system node at %s", node)
         return node, {}
 
-    # ------------------------------------------------------------------
-    # Tier 2: Electron's own bundled Node.js  (production .exe)
-    # ------------------------------------------------------------------
-    # electron/main.js sets AVIKAL_ELECTRON_EXEC = process.execPath before
-    # spawning the Python backend, so this env var is always available when
-    # running inside the desktop app.
     electron_exec = os.environ.get("AVIKAL_ELECTRON_EXEC", "").strip()
     if electron_exec and os.path.isfile(electron_exec):
         log.debug("drand: using Electron binary as Node.js runtime (%s)", electron_exec)
         return electron_exec, {"ELECTRON_RUN_AS_NODE": "1"}
 
-    # ------------------------------------------------------------------
-    # Tier 3: probe well-known Windows installation directories
-    # ------------------------------------------------------------------
     if os.name == "nt":
         for candidate in _WINDOWS_NODE_CANDIDATES:
             if os.path.isfile(candidate):
@@ -101,7 +57,6 @@ def _find_node_binary() -> tuple[str, dict[str, str]]:
 
 def drand_helper_path() -> str:
     """Absolute path to the drand_timelock_helper.mjs script."""
-    # Walk up: drand.py → api/ → avikal_backend/ → src/ → backend/
     project_root = Path(__file__).resolve().parents[3]
     return str(project_root / "scripts" / "drand_timelock_helper.mjs")
 
@@ -135,6 +90,17 @@ def _resolve_drand_runtime() -> tuple[str, dict[str, str], str]:
     return node_binary, node_extra_env, helper_path
 
 
+def _drand_helper_timeout_seconds() -> int:
+    raw = os.environ.get("AVIKAL_DRAND_HELPER_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_DRAND_HELPER_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_DRAND_HELPER_TIMEOUT_SECONDS
+    return max(5, min(120, value))
+
+
 def _run_drand_helper_once(
     payload: dict,
     *,
@@ -158,7 +124,7 @@ def _run_drand_helper_once(
             capture_output=True,
             text=True,
             check=False,
-            timeout=60,
+            timeout=_drand_helper_timeout_seconds(),
             cwd=str(Path(helper_path).parent),
             env=run_env,
         )
@@ -238,7 +204,7 @@ class _PersistentDrandHelper:
 
         reader = threading.Thread(target=_read_response, name="avikal-drand-readline", daemon=True)
         reader.start()
-        reader.join(timeout=60)
+        reader.join(timeout=_drand_helper_timeout_seconds())
         if reader.is_alive():
             self._terminate_locked()
             raise HTTPException(
@@ -254,7 +220,6 @@ class _PersistentDrandHelper:
             raise HTTPException(status_code=500, detail="drand helper execution failed.") from exc
 
         response_line = str(read_state.get("line") or "")
-
         if not response_line:
             stderr_output = ""
             if process.stderr is not None:
@@ -362,7 +327,6 @@ def prime_drand_helper_async() -> bool:
     except HTTPException:
         return False
 
-    # Electron-as-Node is the production runtime and is more stable in one-shot mode.
     if node_extra_env:
         return False
 
@@ -428,13 +392,7 @@ def _parse_drand_helper_result(raw_output: str, stderr_output: str = "") -> dict
 
 
 def run_drand_helper(payload: dict) -> dict:
-    """
-    Execute the drand timelock helper and return its parsed JSON result.
-
-    Uses the 3-tier Node.js discovery strategy described in the module
-    docstring so that drand works on every user machine regardless of
-    whether they have Node.js installed.
-    """
+    """Execute the drand helper and return its parsed JSON result."""
     action = payload.get("action")
     node_binary, node_extra_env, helper_path = _resolve_drand_runtime()
     log.debug("drand: dispatching helper request | action=%s", action)

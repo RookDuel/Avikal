@@ -47,7 +47,7 @@ function delay(ms: number): Promise<void> {
  * Execute `fn` and retry up to `maxRetries` times on transient failures.
  *
  * @example
- * const data = await withRetry(() => fetch('/api/data').then(r => r.json()))
+ * const data = await withRetry(() => loadData())
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,

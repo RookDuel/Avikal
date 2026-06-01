@@ -20,6 +20,7 @@ from typing import Any
 import requests
 
 from avikal_backend.archive.security.pqc_provider import provider_status
+from avikal_backend.runtime_requirements import get_native_runtime_status
 
 
 log = logging.getLogger("avikal.cli")
@@ -28,8 +29,6 @@ EXPECTED_HYBRID_KEM = "ML-KEM-1024+X25519"
 REQUIRED_RUNTIME_IMPORTS = {
     "requests": "requests",
     "cryptography": "cryptography",
-    "nacl": "PyNaCl",
-    "Crypto": "pycryptodome",
     "brotli": "brotli",
     "psutil": "psutil",
 }
@@ -62,6 +61,11 @@ def doctor_backend(args: argparse.Namespace) -> dict[str, Any]:
         "executable": sys.executable,
         "platform": platform.platform(),
         "openssl": ssl.OPENSSL_VERSION,
+    }
+    native_status = get_native_runtime_status()
+    checks["native_crypto"] = {
+        "available": native_status.available,
+        "import_error": native_status.import_error,
     }
 
     import_results: dict[str, bool] = {}
@@ -111,6 +115,8 @@ def doctor_backend(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "ok": (
+            checks["native_crypto"]["available"]
+            and
             all(checks["imports"].values())
             and checks["filesystem"]["write_ok"]
             and checks["pqc_hybrid_suite"]["ok"]

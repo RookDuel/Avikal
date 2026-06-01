@@ -47,6 +47,26 @@ function pinnedEncryptionClient() {
   }
 }
 
+function defaultBeaconId() {
+  return defaultChainInfo.metadata?.beaconID || 'quicknet'
+}
+
+function validateExpectedChain(payload) {
+  const expectedHash = typeof payload.expected_chain_hash === 'string' ? payload.expected_chain_hash.trim() : ''
+  const expectedUrl = typeof payload.expected_chain_url === 'string' ? payload.expected_chain_url.trim() : ''
+  const expectedBeaconId = typeof payload.expected_beacon_id === 'string' ? payload.expected_beacon_id.trim() : ''
+
+  if (expectedHash && expectedHash !== defaultChainInfo.hash) {
+    throw new Error('drand chain hash mismatch')
+  }
+  if (expectedUrl && expectedUrl !== defaultChainUrl) {
+    throw new Error('drand chain URL mismatch')
+  }
+  if (expectedBeaconId && expectedBeaconId !== defaultBeaconId()) {
+    throw new Error('drand beacon identifier mismatch')
+  }
+}
+
 async function seal(payload) {
   const unlockTimestamp = Number(payload.unlock_timestamp)
   if (!Number.isFinite(unlockTimestamp) || unlockTimestamp <= 0) {
@@ -70,7 +90,7 @@ async function seal(payload) {
     round_unlock_iso: new Date(roundTime(defaultChainInfo, round)).toISOString(),
     chain_hash: defaultChainInfo.hash,
     chain_url: defaultChainUrl,
-    beacon_id: defaultChainInfo.metadata?.beaconID || 'quicknet',
+    beacon_id: defaultBeaconId(),
     period_seconds: defaultChainInfo.period,
     ciphertext,
   }
@@ -86,6 +106,7 @@ async function open(payload) {
   if (!Number.isFinite(round) || round <= 0) {
     throw new Error('Missing drand target round')
   }
+  validateExpectedChain(payload)
 
   const client = mainnetClient()
   const latest = await client.latest()

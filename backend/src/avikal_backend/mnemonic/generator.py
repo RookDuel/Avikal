@@ -1,6 +1,4 @@
-"""
-Hindi Mnemonic Generator for Avikal.
-Implements a normalized, checksum-validated mnemonic design for archive keyphrases.
+"""Hindi mnemonic generation and validation for archive keyphrases.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -62,10 +60,7 @@ def _canonicalize_words(words: List[str]) -> List[str]:
 
 
 class HindiMnemonic:
-    """
-    Hindi mnemonic generator for Avikal encryption.
-    Generates cryptographically secure checksum-validated mnemonic phrases.
-    """
+    """Checksum-validated Hindi mnemonic generator."""
 
     format_version = MNEMONIC_FORMAT_VERSION
     wordlist_id = WORDLIST_ID
@@ -74,15 +69,7 @@ class HindiMnemonic:
         self.wordlist = HindiWordList()
 
     def generate(self, word_count: int = DEFAULT_WORD_COUNT) -> List[str]:
-        """
-        Generate a cryptographically secure mnemonic phrase.
-
-        Args:
-            word_count: Number of words (12, 15, 18, 21, or 24)
-
-        Returns:
-            List of Hindi words
-        """
+        """Generate a mnemonic phrase."""
         entropy_bits = _entropy_bits_for_word_count(word_count)
         entropy = secrets.token_bytes(entropy_bits // 8)
         checksum_bits = _derive_checksum_bits(entropy, _checksum_length_bits(entropy_bits))
@@ -91,15 +78,7 @@ class HindiMnemonic:
         return [self.wordlist.get_word(index) for index in indices]
 
     def validate_or_raise(self, mnemonic: List[str]) -> List[str]:
-        """
-        Validate and normalize a mnemonic phrase.
-
-        Returns:
-            Canonical normalized words.
-
-        Raises:
-            ValueError with a specific validation message if invalid.
-        """
+        """Validate and normalize a mnemonic phrase."""
         if not isinstance(mnemonic, list):
             raise ValueError("Invalid phrase: expected a list of words")
 
@@ -134,16 +113,7 @@ class HindiMnemonic:
             return False
 
     def to_seed(self, mnemonic: List[str], salt: bytes = b"") -> bytes:
-        """
-        Convert mnemonic to 256-bit encryption key using Argon2id.
-
-        Args:
-            mnemonic: List of Hindi words
-            salt: Salt for key derivation (from .avk file)
-
-        Returns:
-            32-byte encryption key
-        """
+        """Convert a mnemonic to a 256-bit seed using Argon2id."""
         canonical_words = self.validate_or_raise(mnemonic)
         mnemonic_str = " ".join(canonical_words)
 
@@ -207,16 +177,7 @@ def normalize_mnemonic_phrase(phrase_str: str) -> str:
 
 
 def generate_mnemonic(word_count: int = DEFAULT_WORD_COUNT, language: str = "hindi") -> str:
-    """
-    Generate a Hindi mnemonic phrase.
-
-    Args:
-        word_count: Number of words (12, 15, 18, 21, or 24)
-        language: Language (only 'hindi' supported)
-
-    Returns:
-        Canonical space-separated string of Hindi words
-    """
+    """Generate a Hindi mnemonic phrase."""
     if language != "hindi":
         raise ValueError(f"Only 'hindi' language supported, got '{language}'")
 
@@ -226,31 +187,14 @@ def generate_mnemonic(word_count: int = DEFAULT_WORD_COUNT, language: str = "hin
 
 
 def mnemonic_to_seed(mnemonic: str, salt: bytes = b"") -> bytes:
-    """
-    Convert mnemonic phrase to encryption seed.
-
-    Args:
-        mnemonic: Space-separated Hindi words
-        salt: Salt for key derivation
-
-    Returns:
-        32-byte encryption key
-    """
+    """Convert a mnemonic phrase to an encryption seed."""
     gen = get_generator()
     words = gen.string_to_phrase(mnemonic)
     return gen.to_seed(words, salt)
 
 
 def validate_mnemonic(mnemonic: str) -> bool:
-    """
-    Validate a mnemonic phrase.
-
-    Args:
-        mnemonic: Space-separated Hindi words
-
-    Returns:
-        True if valid, False otherwise
-    """
+    """Return True when a mnemonic phrase is valid."""
     try:
         gen = get_generator()
         gen.string_to_phrase(mnemonic)

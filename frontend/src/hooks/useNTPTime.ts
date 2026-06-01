@@ -1,10 +1,10 @@
 /**
- * Polls the backend /api/ntp-time endpoint every 60 seconds and returns
+ * Polls the local core time method every 60 seconds and returns
  * the current trusted time formatted in the user's local timezone.
  */
 
 import { useState, useEffect, useRef } from 'react'
-import { fetchBackend } from '../lib/backend'
+import { callCoreResponse } from '../lib/backend'
 const POLL_INTERVAL_MS = 60_000
 
 function getLocalTimeZoneLabel(ms: number): string {
@@ -45,7 +45,7 @@ export function useNTPTime(): NTPTimeState {
 
   async function fetchNTPTime() {
     try {
-      const res = await fetchBackend('/api/ntp-time', {}, 8000)
+      const res = await callCoreResponse('time.ntp', {}, 8000)
       const data = await res.json()
 
       if (data.success && data.timestamp) {

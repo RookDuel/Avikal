@@ -113,21 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=AvikalHelpFormatter,
         epilog=textwrap.dedent(
             """
-            What this command does:
-              - Accepts one file, several files, or a full folder as input
-              - Produces one .avk archive
-              - Can add password, keyphrase, PQC keyfile, and time-lock protection
-
-            Common examples:
+            Examples:
               avikal enc document.pdf --password-prompt
               avikal enc photo.jpg notes.txt -o bundle.avk --password-prompt
               avikal enc --pick-folder --pick-output --password-prompt
               avikal enc reports --timecapsule -u "2026-05-01 12:00" --password-prompt
+              avikal enc report.pdf --timecapsule --timecapsule-provider drand -u "2026-05-01 12:00" --password-prompt
               avikal enc secret.docx --password-prompt --pqc
 
             Notes:
               - Use either --keyphrase or --keyphrase-file, not both.
-              - Time-lock mode requires both --timecapsule and --unlock.
+              - Time-lock mode requires --timecapsule and --unlock.
+              - drand requires network access and a Node/Electron runtime.
               - If the output file already exists, add --force to overwrite it.
             """
         ),
@@ -145,9 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
     encode_protection.add_argument("--keyphrase-file", "-K", help="Read the 21-word keyphrase from a UTF-8 text file")
     encode_protection.add_argument("--pqc", action="store_true", help="Generate and require an external .avkkey file for decryption")
     encode_protection.add_argument("--pqc-keyfile-output", help="Custom output path for the generated .avkkey file")
+    encode_protection.add_argument("--pqc-keyfile-password-prompt", action="store_true", help="Prompt for an optional second .avkkey password")
 
     encode_timelock = encode_parser.add_argument_group("Time Lock")
     encode_timelock.add_argument("--timecapsule", action="store_true", help="Enable time-lock protection for the archive")
+    encode_timelock.add_argument(
+        "--timecapsule-provider",
+        choices=["local", "drand"],
+        default="local",
+        help="Time-lock provider: local or public drand",
+    )
     encode_timelock.add_argument("--unlock", "-u", help='Unlock date and time in your local timezone using "YYYY-MM-DD HH:MM"')
 
     encode_tuning = encode_parser.add_argument_group("Archive Settings")
@@ -171,12 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=AvikalHelpFormatter,
         epilog=textwrap.dedent(
             """
-            What this command does:
-              - Opens an existing .avk archive
-              - Detects whether it is a single-file or multi-file archive
-              - Extracts the payload into the selected output directory
-
-            Common examples:
+            Examples:
               avikal dec locked.avk -d output --password-prompt
               avikal dec locked.avk -d output --keyphrase-file phrase.txt
               avikal dec locked.avk -d output --password-prompt --pqc-keyfile locked.avkkey
@@ -200,6 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     decode_optional = decode_parser.add_argument_group("Optional Inputs")
     decode_optional.add_argument("--pqc-keyfile", help="Path to the external .avkkey file")
+    decode_optional.add_argument("--pqc-keyfile-password-prompt", action="store_true", help="Prompt for the .avkkey password when the keyfile is dual-password protected")
 
     decode_automation = decode_parser.add_argument_group("Automation")
     decode_automation.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
@@ -213,12 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=AvikalHelpFormatter,
         epilog=textwrap.dedent(
             """
-            What this command does:
-              - Reads archive container information immediately
-              - Optionally decrypts metadata when you provide access credentials
-              - Never writes extracted payload files
-
-            Common examples:
+            Examples:
               avikal info locked.avk
               avikal info locked.avk --password-prompt
               avikal info locked.avk --keyphrase-file phrase.txt
@@ -245,12 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=AvikalHelpFormatter,
         epilog=textwrap.dedent(
             """
-            What this command does:
-              - Lists the logical files represented by the archive
-              - Shows filenames, sizes, and checksums for multi-file archives
-              - Helps confirm archive contents before extraction
-
-            Common examples:
+            Examples:
               avikal ls locked.avk --password-prompt
               avikal ls locked.avk --keyphrase-file phrase.txt
               avikal ls locked.avk --password-prompt --pqc-keyfile locked.avkkey
@@ -277,12 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=AvikalHelpFormatter,
         epilog=textwrap.dedent(
             """
-            What this command does:
-              - Confirms the archive container is readable
-              - Optionally verifies that metadata can be decrypted
-              - Helps distinguish a structurally valid archive from one you can actually open
-
-            Common examples:
+            Examples:
               avikal check locked.avk
               avikal check locked.avk --password-prompt
               avikal check locked.avk --keyphrase-file phrase.txt --skip-timelock
@@ -308,19 +293,14 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=AvikalHelpFormatter,
         epilog=textwrap.dedent(
             """
-            What this command does:
-              - Opens the current keychain with old credentials
-              - Re-wraps the archive payload key with new credentials
-              - Rewrites keychain.pgn only; payload.enc remains byte-for-byte unchanged
-
-            Common examples:
+            Examples:
               avikal rekey locked.avk --old-password-prompt --new-password-prompt
               avikal rekey locked.avk --old-password "OldPass#123" --new-password "NewPass#123"
               avikal rotate locked.avk --output rotated.avk --old-keyphrase-file old.txt --new-keyphrase-file new.txt
 
             Notes:
               - Current phase supports regular rekey-capable archives.
-              - PQC keyfile and provider time-capsule rekey are intentionally rejected until their external-key flows are complete.
+              - PQC and time-capsule rekey are intentionally rejected.
             """
         ),
     )
@@ -354,19 +334,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=AvikalHelpFormatter,
         epilog=textwrap.dedent(
             """
-            What this command does:
-              - Verifies required Python packages can be imported
-              - Checks that the current working directory is writable
-              - Optionally probes Aavrit /health and /config endpoints
-
-            Common examples:
+            Examples:
               avikal diag
               avikal diag --aavrit-url https://aavrit.example
               avikal diag --aavrit-url https://aavrit.example --timeout 5
-
-            Notes:
-              - --aavrit-url is the primary flag.
-              - --aavrit-url is still accepted as a compatibility alias for the CLI flag name only.
             """
         ),
     )

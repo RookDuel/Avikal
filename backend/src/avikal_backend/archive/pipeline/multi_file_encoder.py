@@ -1,6 +1,4 @@
-"""
-Multi-file container encoder for Avikal format.
-Packs multiple files into a single .avk container with enhanced security.
+"""Multi-file Avikal archive encoder.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -14,6 +12,9 @@ import hashlib
 from datetime import datetime, timezone
 from typing import List, Dict, Tuple
 
+from avikal_backend.core.temp_janitor import register_temp_artifact, unregister_temp_artifact
+
+from ..format.container import read_avk_header_and_keychain
 from ..format.header import (
     ARCHIVE_MODE_MULTI,
     attach_public_route_tags_to_keychain_pgn,
@@ -21,11 +22,12 @@ from ..format.header import (
     build_header_bytes,
     provider_name_to_id,
 )
-from ..format.manifest import (
-    INTERNAL_MANIFEST_PATH,
-    build_archive_manifest,
-    normalize_user_archive_path,
-    serialize_archive_manifest,
+from ..format.manifest import normalize_user_archive_path
+from ..format.multifile_stream import (
+    build_multifile_stream_manifest,
+    iter_multifile_stream_chunks,
+    multifile_stream_size,
+    scan_multifile_entries,
 )
 from ..security.crypto import (
     secure_zero,
@@ -40,32 +42,64 @@ from ..security.key_wrap import (
 )
 from ..chess_metadata import encode_metadata_to_chess_enhanced
 from ..security.pqc_keyfile import (
+    PQC_EMBEDDED_MEMBER_NAME,
     PQC_KEYFILE_ALGORITHM,
+    PQC_STORAGE_MODE_EMBEDDED,
+    PQC_STORAGE_MODE_EXTERNAL,
+    build_embedded_pqc_blob,
     default_keyfile_path_for_archive,
     write_pqc_keyfile,
 )
 from ..security.pqc_provider import create_pqc_archive_material
 from ..security.time_lock import datetime_to_timestamp, format_unlock_time, get_trusted_now
-from .payload_streaming import stream_file_to_payload
+from .payload_streaming import stream_chunks_to_payload_writer
 from .progress import get_progress_tracker
 from ..runtime_logging import runtime_debug_print as print
 
 
 
-def _collect_entries(paths: List[str]) -> List[Tuple[str, str]]:
-    """
-    Expand a mixed list of file and directory paths into (abs_path, arcname) pairs.
+def _normalize_path_for_compare(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(path)))
 
-    - For a file:      arcname = basename  (same behaviour as before)
-    - For a directory: arcname = <folder_name>/<relative_path_inside>  (tree preserved)
 
-    This is the *only* change to the container-packing logic; everything downstream
-    (crypto, chess encoding, metadata) is completely untouched.
-    """
+def _is_same_or_child_path(candidate: str, parent: str) -> bool:
+    candidate_norm = _normalize_path_for_compare(candidate)
+    parent_norm = _normalize_path_for_compare(parent)
+    try:
+        return os.path.commonpath([candidate_norm, parent_norm]) == parent_norm
+    except ValueError:
+        return False
+
+
+def _normalize_excluded_input_paths(paths: List[str], excluded_paths: List[str] | None) -> set[str]:
+    if not excluded_paths:
+        return set()
+
+    input_roots = [_normalize_path_for_compare(path) for path in paths]
+    normalized_exclusions: set[str] = set()
+    for excluded_path in excluded_paths:
+        if not isinstance(excluded_path, str) or not excluded_path.strip():
+            continue
+        excluded_norm = _normalize_path_for_compare(excluded_path)
+        if not any(_is_same_or_child_path(excluded_norm, root) for root in input_roots):
+            raise ValueError("Excluded input path must be inside the selected input files or folders")
+        normalized_exclusions.add(excluded_norm)
+    return normalized_exclusions
+
+
+def _is_excluded_path(path: str, excluded_paths: set[str]) -> bool:
+    return any(_is_same_or_child_path(path, excluded_path) for excluded_path in excluded_paths)
+
+
+def _collect_entries(paths: List[str], excluded_paths: List[str] | None = None) -> List[Tuple[str, str]]:
+    """Expand file and directory paths into deterministic archive entries."""
     entries: List[Tuple[str, str]] = []
     seen_arcnames: set[str] = set()
+    normalized_exclusions = _normalize_excluded_input_paths(paths, excluded_paths)
     for path in paths:
         path = os.path.normpath(path)
+        if _is_excluded_path(path, normalized_exclusions):
+            continue
         if os.path.isfile(path):
             arcname = normalize_user_archive_path(os.path.basename(path))
             if arcname in seen_arcnames:
@@ -75,12 +109,17 @@ def _collect_entries(paths: List[str]) -> List[Tuple[str, str]]:
         elif os.path.isdir(path):
             folder_name = os.path.basename(path)
             parent = os.path.dirname(path)
-            for dirpath, _dirnames, filenames in os.walk(path):
+            for dirpath, dirnames, filenames in os.walk(path):
+                dirnames[:] = [
+                    dirname
+                    for dirname in sorted(dirnames)
+                    if not _is_excluded_path(os.path.join(dirpath, dirname), normalized_exclusions)
+                ]
                 for filename in sorted(filenames):  # sorted for determinism
                     abs_file = os.path.join(dirpath, filename)
-                    # arcname keeps the folder name as root, then relative path
+                    if _is_excluded_path(abs_file, normalized_exclusions):
+                        continue
                     rel = os.path.relpath(abs_file, parent)
-                    # Normalise to forward slashes for ZIP portability
                     arcname = normalize_user_archive_path(rel.replace(os.sep, '/'))
                     if arcname in seen_arcnames:
                         raise ValueError(f"Duplicate archive entry detected: {arcname}")
@@ -114,34 +153,24 @@ def create_multi_file_avk(
     drand_ciphertext: str = None,
     drand_beacon_id: str = None,
     pqc_enabled: bool = False,
+    pqc_storage_mode: str = PQC_STORAGE_MODE_EXTERNAL,
     pqc_keyfile_output: str = None,
+    pqc_keyfile_protection_mode: str = None,
+    pqc_keyfile_password: str = None,
+    excluded_input_paths: List[str] | None = None,
 ) -> dict:
-    """
-    Create single .avk file from multiple input files with enhanced security.
-    
-    Args:
-        input_filepaths: List of paths to files to encrypt
-        output_filepath: Path for output .avk file
-        unlock_datetime: UTC datetime when file should unlock (required if use_timecapsule=True)
-        password: Password for protection (optional)
-        keyphrase: 21-word Hindi mnemonic keyphrase (optional, list of strings)
-        username: Optional user identifier
-        variations_per_round: Chess encoding parameter (default 5)
-        use_timecapsule: Enable time-lock feature (default False)
-    
-    Returns:
-        dict: Contains 'keyphrase' if generated, file info, etc.
-    
-    Raises:
-        ValueError: If timecapsule enabled but password/unlock_datetime missing
-        ConnectionError: If NTP time synchronization fails (timecapsule mode)
-    """
+    """Create a multi-file .avk archive."""
     result = {}
+    operation_started = time.time()
+    pqc_ms = 0.0
+    argon2_ms = 0.0
+    payload_stream_ms = 0.0
+    metadata_ms = 0.0
+    zip_finalize_ms = 0.0
     
     if not input_filepaths:
         raise ValueError("At least one input file or folder is required")
     
-    # Validate keyphrase if provided
     if keyphrase:
         from ...mnemonic.generator import normalize_mnemonic_words
         keyphrase = normalize_mnemonic_words(keyphrase)
@@ -149,11 +178,18 @@ def create_multi_file_avk(
 
     user_secret_enabled = has_user_secret(password, keyphrase)
 
+    if pqc_storage_mode is None:
+        pqc_storage_mode = PQC_STORAGE_MODE_EXTERNAL
+
     if pqc_enabled and not user_secret_enabled:
         raise ValueError(
             "PQC keyfile mode requires a password or keyphrase. "
             "Enable PQC only with archive secrets configured."
         )
+    if pqc_storage_mode not in {PQC_STORAGE_MODE_EXTERNAL, PQC_STORAGE_MODE_EMBEDDED}:
+        raise ValueError("Unsupported PQC storage mode")
+    if not pqc_enabled:
+        pqc_storage_mode = PQC_STORAGE_MODE_EXTERNAL
     
     # Validate password strength (if provided)
     if password:
@@ -193,25 +229,29 @@ def create_multi_file_avk(
     pqc_shared_secret = None
     pqc_key_id = None
     pqc_keyfile_path = None
+    embedded_pqc_blob = None
 
     if pqc_enabled:
-        if pqc_keyfile_output:
-            pqc_keyfile_path = os.path.abspath(pqc_keyfile_output)
-        else:
-            pqc_keyfile_path = default_keyfile_path_for_archive(output_filepath)
+        if pqc_storage_mode == PQC_STORAGE_MODE_EXTERNAL:
+            if pqc_keyfile_output:
+                pqc_keyfile_path = os.path.abspath(pqc_keyfile_output)
+            else:
+                pqc_keyfile_path = default_keyfile_path_for_archive(output_filepath)
 
-        if os.path.abspath(output_filepath) == pqc_keyfile_path:
-            raise ValueError("PQC keyfile path must be different from the .avk output path")
+            if os.path.abspath(output_filepath) == pqc_keyfile_path:
+                raise ValueError("PQC keyfile path must be different from the .avk output path")
 
+        pqc_start = time.time()
         pqc_material = create_pqc_archive_material(archive_filename=os.path.basename(output_filepath))
+        pqc_ms = (time.time() - pqc_start) * 1000
         pqc_public_bundle = pqc_material["public_bundle"]
         pqc_private_bundle = pqc_material["private_bundle"]
         pqc_ciphertext = pqc_material["ciphertext"]
         pqc_shared_secret = pqc_material["shared_secret"]
         pqc_key_id = pqc_material["key_id"]
     
-    # Step 1: Create multi-file container as a temp ZIP on disk.
-    all_entries = _collect_entries(input_filepaths)
+    # Step 1: Build a manifest without writing plaintext file contents to temp storage.
+    all_entries = _collect_entries(input_filepaths, excluded_input_paths)
     if not all_entries:
         raise ValueError("No files were found in the selected inputs")
     print(f"Processing {len(all_entries)} file(s) from {len(input_filepaths)} input path(s)...")
@@ -219,70 +259,15 @@ def create_multi_file_avk(
     if tracker:
         tracker.update("prepare", "Preparing multi-file archive", 0.05, force=True)
 
-    file_info = []
-    total_original_size = 0
     output_dir = os.path.dirname(output_filepath) or os.getcwd()
-    temp_container = tempfile.NamedTemporaryFile(
-        suffix=".zip",
-        prefix=".avikal-container-",
-        delete=False,
-        dir=output_dir,
-    )
-    temp_container_path = temp_container.name
-    temp_container.close()
-
-    temp_payload = tempfile.NamedTemporaryFile(
-        suffix=".payload",
-        prefix=".avikal-payload-",
-        delete=False,
-        dir=output_dir,
-    )
-    temp_payload_path = temp_payload.name
-    temp_payload.close()
-
     temp_archive_path = None
 
     try:
-        with zipfile.ZipFile(temp_container_path, "w", zipfile.ZIP_STORED) as container_zip:
-            for i, (abs_path, arcname) in enumerate(all_entries):
-                print(f"  Streaming file {i+1}/{len(all_entries)}: {arcname}")
-                file_size = 0
-                file_checksum = hashlib.sha256()
-                with open(abs_path, "rb") as source, container_zip.open(arcname, "w", force_zip64=True) as target:
-                    while True:
-                        chunk = source.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        file_size += len(chunk)
-                        file_checksum.update(chunk)
-                        target.write(chunk)
-
-                file_info.append(
-                    {
-                        "filename": arcname,
-                        "size": file_size,
-                        "checksum": file_checksum.hexdigest(),
-                    }
-                )
-                total_original_size += file_size
-                if tracker:
-                    tracker.update("prepare", f"Building container: {arcname}", (i + 1) / max(1, len(all_entries)))
-
-            manifest = build_archive_manifest(file_info, total_original_size)
-            manifest_bytes = serialize_archive_manifest(manifest)
-            manifest_hash = hashlib.sha256(manifest_bytes).digest()
-            container_zip.writestr(INTERNAL_MANIFEST_PATH, manifest_bytes)
-
-        container_checksum_hasher = hashlib.sha256()
-        with open(temp_container_path, "rb") as container_handle:
-            while True:
-                chunk = container_handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                container_checksum_hasher.update(chunk)
-        container_checksum = container_checksum_hasher.digest()
-        container_size = os.path.getsize(temp_container_path)
-        print(f"Created streamed multi-file container: {container_size:,} bytes from {len(all_entries)} files")
+        file_info, total_original_size = scan_multifile_entries(all_entries)
+        manifest, manifest_bytes = build_multifile_stream_manifest(file_info, total_original_size)
+        manifest_hash = hashlib.sha256(manifest_bytes).digest()
+        container_size = multifile_stream_size(manifest_bytes, manifest)
+        print(f"Prepared encrypted multi-file stream: {container_size:,} bytes from {len(all_entries)} files")
         if tracker:
             tracker.set_file_size(container_size)
 
@@ -308,7 +293,9 @@ def create_multi_file_avk(
             print("Deriving payload key with Argon2id...")
             from ..security.crypto import derive_hierarchical_keys
 
+            argon2_start = time.time()
             master_key, payload_key, _, _ = derive_hierarchical_keys(password, keyphrase, payload_salt)
+            argon2_ms = (time.time() - argon2_start) * 1000
 
             if use_timecapsule and time_key:
                 print("[Multi] Combining Key A (password) and Key B (time_key) for split-key encryption...")
@@ -338,20 +325,39 @@ def create_multi_file_avk(
             print("[Multi] Creating explicit unencrypted standard archive...")
             encryption_method = "plaintext_archive"
 
-        payload_result = stream_file_to_payload(
-            input_path=temp_container_path,
-            payload_path=temp_payload_path,
-            aad=header_bytes,
-            encrypt_key=payload_encryption_key if encryption_method != "plaintext_archive" else None,
-            progress_callback=(
-                (lambda processed, _total: tracker.update(
-                    "payload",
-                    "Encrypting multi-file payload" if encryption_method != "plaintext_archive" else "Packaging multi-file payload",
-                    (processed / container_size) if container_size else 1.0,
-                ))
-                if tracker else None
-            ),
+        temp_archive = tempfile.NamedTemporaryFile(
+            suffix=".avk",
+            prefix=".avikal-archive-",
+            delete=False,
+            dir=output_dir,
         )
+        temp_archive_path = temp_archive.name
+        temp_archive.close()
+        register_temp_artifact(temp_archive_path)
+
+        payload_stream_start = time.time()
+        with zipfile.ZipFile(temp_archive_path, "w") as zf:
+            payload_info = zipfile.ZipInfo("payload.enc")
+            payload_info.compress_type = zipfile.ZIP_STORED
+            with zf.open(payload_info, "w", force_zip64=True) as payload_writer:
+                payload_result = stream_chunks_to_payload_writer(
+                    chunks=iter_multifile_stream_chunks(all_entries, manifest_bytes),
+                    total_input_size=container_size,
+                    target=payload_writer,
+                    aad=header_bytes,
+                    encrypt_key=payload_encryption_key if encryption_method != "plaintext_archive" else None,
+                    compress_payload=None,
+                    progress_callback=(
+                        (lambda processed, _total: tracker.update(
+                            "payload",
+                            "Streaming encrypted payload" if encryption_method != "plaintext_archive" else "Streaming payload",
+                            (processed / container_size) if container_size else 1.0,
+                        ))
+                        if tracker else None
+                    ),
+                )
+        payload_stream_ms = (time.time() - payload_stream_start) * 1000
+        container_checksum = payload_result["checksum"]
         compressed_size = payload_result["compressed_size"]
         compression_ratio = (1 - compressed_size / container_size) * 100 if container_size else 0.0
         encrypt_time = time.time() - start_encrypt
@@ -381,6 +387,7 @@ def create_multi_file_avk(
             pqc_required=pqc_enabled,
             pqc_algorithm=PQC_KEYFILE_ALGORITHM if pqc_enabled else None,
             pqc_key_id=pqc_key_id,
+            pqc_storage_mode=pqc_storage_mode,
             keyphrase_format_version=MNEMONIC_FORMAT_VERSION if keyphrase else None,
             keyphrase_wordlist_id=WORDLIST_ID if keyphrase else None,
             archive_type="multi_file",
@@ -396,6 +403,7 @@ def create_multi_file_avk(
         if tracker:
             tracker.update("metadata", "Encoding secure metadata", 0.1)
         start_chess = time.time()
+        metadata_start = start_chess
         keychain_pgn = encode_metadata_to_chess_enhanced(
             metadata_bytes,
             password,
@@ -410,59 +418,74 @@ def create_multi_file_avk(
             requires_password=bool(password),
             requires_keyphrase=bool(keyphrase),
             requires_pqc=bool(pqc_enabled),
+            pqc_storage_mode=pqc_storage_mode if pqc_enabled else None,
             unlock_timestamp=unlock_timestamp if use_timecapsule else None,
             drand_round=drand_round,
             keyphrase_wordlist_id=WORDLIST_ID if keyphrase else None,
         )
         chess_encoding_time = time.time() - start_chess
+        metadata_ms = (time.time() - metadata_start) * 1000
         if tracker:
             tracker.update("metadata", "Encoding secure metadata", 1.0)
         print(f"Enhanced chess encoding completed in {chess_encoding_time:.2f} seconds")
 
-        print(f"Creating {output_filepath}...")
-        if tracker:
-            tracker.update("finalize", "Finalizing Avk container", 0.25)
-        temp_archive = tempfile.NamedTemporaryFile(
-            suffix=".avk",
-            prefix=".avikal-archive-",
-            delete=False,
-            dir=output_dir,
-        )
-        temp_archive_path = temp_archive.name
-        temp_archive.close()
-        with zipfile.ZipFile(temp_archive_path, "w") as zf:
-            zf.writestr("keychain.pgn", keychain_pgn, compress_type=zipfile.ZIP_DEFLATED)
-            zf.write(temp_payload_path, arcname="payload.enc", compress_type=zipfile.ZIP_STORED)
-
-        if pqc_enabled:
-            keyfile_result = write_pqc_keyfile(
-                pqc_keyfile_path,
+        if pqc_enabled and pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+            embedded_pqc_blob = build_embedded_pqc_blob(
                 password=password,
                 keyphrase=keyphrase,
                 private_bundle=pqc_private_bundle,
                 public_bundle=pqc_public_bundle,
                 pqc_ciphertext=pqc_ciphertext,
                 archive_filename=os.path.basename(output_filepath),
+                header_aad=header_bytes,
+                key_id=pqc_key_id,
                 algorithm=PQC_KEYFILE_ALGORITHM,
             )
+
+        print(f"Creating {output_filepath}...")
+        if tracker:
+            tracker.update("finalize", "Writing metadata", 0.25)
+        zip_finalize_start = time.time()
+        with zipfile.ZipFile(temp_archive_path, "a") as zf:
+            zf.writestr("keychain.pgn", keychain_pgn, compress_type=zipfile.ZIP_DEFLATED)
+            if embedded_pqc_blob is not None:
+                zf.writestr(PQC_EMBEDDED_MEMBER_NAME, embedded_pqc_blob, compress_type=zipfile.ZIP_STORED)
+        read_avk_header_and_keychain(temp_archive_path)
+        zip_finalize_ms = (time.time() - zip_finalize_start) * 1000
+
+        if pqc_enabled:
             result["pqc"] = {
                 "enabled": True,
-                "algorithm": keyfile_result["algorithm"],
-                "key_id": keyfile_result["key_id"],
-                "keyfile": keyfile_result["path"],
+                "storage_mode": pqc_storage_mode,
+                "algorithm": PQC_KEYFILE_ALGORITHM,
+                "key_id": pqc_key_id,
             }
+            if pqc_storage_mode == PQC_STORAGE_MODE_EXTERNAL:
+                keyfile_result = write_pqc_keyfile(
+                    pqc_keyfile_path,
+                    password=password,
+                    keyphrase=keyphrase,
+                    private_bundle=pqc_private_bundle,
+                    public_bundle=pqc_public_bundle,
+                    pqc_ciphertext=pqc_ciphertext,
+                    archive_filename=os.path.basename(output_filepath),
+                    algorithm=PQC_KEYFILE_ALGORITHM,
+                    protection_mode=pqc_keyfile_protection_mode,
+                    keyfile_password=pqc_keyfile_password,
+                )
+                result["pqc"]["keyfile"] = keyfile_result["path"]
+            else:
+                result["pqc"]["member"] = PQC_EMBEDDED_MEMBER_NAME
 
         os.replace(temp_archive_path, output_filepath)
+        unregister_temp_artifact(temp_archive_path)
         temp_archive_path = None
         if tracker:
             tracker.update("finalize", "Finalizing Avk container", 1.0, compression_ratio=(compressed_size / container_size) if container_size else None)
     finally:
         if temp_archive_path and os.path.exists(temp_archive_path):
             os.remove(temp_archive_path)
-        if os.path.exists(temp_payload_path):
-            os.remove(temp_payload_path)
-        if os.path.exists(temp_container_path):
-            os.remove(temp_container_path)
+            unregister_temp_artifact(temp_archive_path)
 
     # Clean up sensitive data from memory
     if master_key:
@@ -479,7 +502,7 @@ def create_multi_file_avk(
         secure_zero(password.encode('utf-8'))
     
     avk_size = os.path.getsize(output_filepath)
-    total_time = encrypt_time + chess_encoding_time
+    total_time = time.time() - operation_started
     
     print(f"\nSuccess! Created multi-file {output_filepath}")
     print(f"  Input paths: {len(input_filepaths)} (files/folders), {len(all_entries)} file(s) total")
@@ -509,7 +532,10 @@ def create_multi_file_avk(
     if use_timecapsule:
         security_features.append("NTP Time Synchronization (time.google.com)")
     if pqc_enabled:
-        security_features.append("External Quantum Keyfile (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
+        if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+            security_features.append("Embedded Quantum Protection (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
+        else:
+            security_features.append("External Quantum Keyfile (OpenSSL ML-KEM + X25519 + ML-DSA + SLH-DSA)")
     
     print(f"  Security: {', '.join(security_features)}")
     
@@ -523,12 +549,24 @@ def create_multi_file_avk(
         'expanded_entry_count': len(all_entries),
         'compression_ms': 0.0,
         'encryption_ms': round(encrypt_time * 1000, 2),
+        'pqc_ms': round(pqc_ms, 2),
+        'argon2_ms': round(argon2_ms, 2),
+        'payload_stream_ms': round(payload_stream_ms, 2),
+        'metadata_ms': round(metadata_ms, 2),
+        'zip_finalize_ms': round(zip_finalize_ms, 2),
         'chess_encoding_ms': round(chess_encoding_time * 1000, 2),
         'total_processing_ms': round(total_time * 1000, 2),
+        'source_bytes_read': payload_result.get("source_bytes_read", container_size),
+        'payload_bytes_written': payload_result.get("payload_bytes_written", payload_result["payload_size"]),
+        'compression_enabled': payload_result.get("compression_enabled"),
+        'compression_reason': payload_result.get("compression_reason"),
+        'compression_sample_ratio': payload_result.get("compression_sample_ratio"),
+        'compression_ratio': (compressed_size / container_size) if container_size else None,
         'output_archive_size_bytes': avk_size,
         'use_timecapsule': use_timecapsule,
         'timecapsule_provider': timecapsule_provider,
         'pqc_enabled': pqc_enabled,
+        'pqc_storage_mode': pqc_storage_mode if pqc_enabled else None,
     }
     if tracker:
         tracker.complete("Archive created")

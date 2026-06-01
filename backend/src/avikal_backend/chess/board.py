@@ -195,10 +195,26 @@ class Board:
         return False
 
     def generate_legal_moves(self):
-        for move in self._generate_pseudo_legal():
-            probe = self.copy(stack=False)
-            probe._apply_move(move)
-            if not probe._in_check(self.turn):
+        color = self.turn
+        pseudo_moves = list(self._generate_pseudo_legal())
+        for move in pseudo_moves:
+            snapshot = BoardSnapshot(
+                self.cells[:],
+                self.turn,
+                self.castling,
+                self.ep_square,
+                self.halfmove_clock,
+                self.fullmove_number,
+            )
+            self._apply_move(move)
+            is_legal = not self._in_check(color)
+            self.cells = snapshot.cells
+            self.turn = snapshot.turn
+            self.castling = snapshot.castling
+            self.ep_square = snapshot.ep_square
+            self.halfmove_clock = snapshot.halfmove_clock
+            self.fullmove_number = snapshot.fullmove_number
+            if is_legal:
                 yield move
 
     def _generate_pseudo_legal(self):
@@ -475,8 +491,8 @@ class Board:
             return True
         return piece is not None and _piece_role(piece) == "P" and move.to_square == self.ep_square and file_of(move.from_square) != file_of(move.to_square)
 
-    def san(self, move: Move) -> str:
-        legal = self.legal_moves
+    def san(self, move: Move, legal_moves: list[Move] | None = None) -> str:
+        legal = self.legal_moves if legal_moves is None else legal_moves
         if move not in legal:
             raise IllegalMoveError(f"illegal move for san: {move.uci()} in {self.fen()}")
 
@@ -501,11 +517,27 @@ class Board:
                     notation += "x"
                 notation += target_name
 
-        probe = self.copy(stack=False)
-        probe.push(move)
-        if probe.is_checkmate():
+        snapshot = BoardSnapshot(
+            self.cells[:],
+            self.turn,
+            self.castling,
+            self.ep_square,
+            self.halfmove_clock,
+            self.fullmove_number,
+        )
+        self._apply_move(move)
+        gives_check = self._in_check(self.turn)
+        gives_checkmate = gives_check and not self.legal_moves
+        self.cells = snapshot.cells
+        self.turn = snapshot.turn
+        self.castling = snapshot.castling
+        self.ep_square = snapshot.ep_square
+        self.halfmove_clock = snapshot.halfmove_clock
+        self.fullmove_number = snapshot.fullmove_number
+
+        if gives_checkmate:
             return notation + "#"
-        if probe.is_check():
+        if gives_check:
             return notation + "+"
         return notation
 
@@ -531,16 +563,17 @@ class Board:
             return RANKS[rank_of(move.from_square)]
         return FILES[file_of(move.from_square)]
 
-    def parse_san(self, token: str) -> Move:
+    def parse_san(self, token: str, legal_moves: list[Move] | None = None) -> Move:
         san_token = token.strip()
         while san_token and san_token[-1] in "+#!?":
             san_token = san_token[:-1]
+        legal = self.legal_moves if legal_moves is None else legal_moves
 
         if san_token in {"O-O", "0-0"}:
             target = parse_square("g1" if self.turn == WHITE else "g8")
             candidates = [
                 move
-                for move in self.legal_moves
+                for move in legal
                 if move.to_square == target
                 and self.cells[move.from_square] is not None
                 and _piece_role(self.cells[move.from_square]) == "K"
@@ -554,7 +587,7 @@ class Board:
             target = parse_square("c1" if self.turn == WHITE else "c8")
             candidates = [
                 move
-                for move in self.legal_moves
+                for move in legal
                 if move.to_square == target
                 and self.cells[move.from_square] is not None
                 and _piece_role(self.cells[move.from_square]) == "K"
@@ -574,7 +607,7 @@ class Board:
         promotion = promotion_hint.lower() if promotion_hint else None
 
         matches = []
-        for move in self.legal_moves:
+        for move in legal:
             piece = self.cells[move.from_square]
             if piece is None or _piece_role(piece) != role:
                 continue
@@ -595,7 +628,3 @@ class Board:
         if len(matches) > 1:
             raise AmbiguousMoveError(f"ambiguous san: {token!r} in {self.fen()}")
         return matches[0]
-"""
-SPDX-License-Identifier: Apache-2.0
-Copyright (c) 2026 Atharva Sen Barai.
-"""

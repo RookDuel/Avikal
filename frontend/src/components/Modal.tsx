@@ -43,7 +43,7 @@ export default function Modal({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="theme-backdrop fixed inset-0 z-50"
+            className="av-modal-backdrop fixed inset-0 z-[100]"
             onClick={disableBackdropClose ? undefined : onClose}
             aria-hidden="true"
           />
@@ -59,17 +59,17 @@ export default function Modal({
             exit={{ opacity: 0, scale: 0.95, y: 10 }}
             transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
             className={cn(
-              'fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50',
+              'fixed left-1/2 top-1/2 z-[110] -translate-x-1/2 -translate-y-1/2',
               'w-full max-w-lg',
-              'bg-av-surface border border-av-border rounded-2xl shadow-2xl',
-              'max-h-[90vh] overflow-y-auto',
+              'av-modal-surface rounded-[1.5rem]',
+              'max-h-[82vh] overflow-hidden',
               className
             )}
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
             {title && (
-              <div className="flex items-center justify-between px-6 py-4 border-b border-av-border/60">
+              <div className="flex items-center justify-between border-b border-av-border/60 px-6 py-4">
                 <h2 id="modal-title" className="text-lg font-semibold text-av-main">
                   {title}
                 </h2>
@@ -84,7 +84,7 @@ export default function Modal({
             )}
 
             {/* Body */}
-            <div className="p-6">{children}</div>
+            <div className="max-h-[calc(82vh-73px)] overflow-y-auto p-6 custom-scrollbar">{children}</div>
           </motion.div>
         </>
       )}

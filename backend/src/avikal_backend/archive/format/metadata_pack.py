@@ -12,9 +12,12 @@ import struct
 
 from ..path_safety import normalize_single_archive_filename
 from ..security.key_wrap import PAYLOAD_KEY_WRAP_ALGORITHM
+from ..security.pqc_keyfile import PQC_STORAGE_MODE_EMBEDDED, PQC_STORAGE_MODE_EXTERNAL, PQC_STORAGE_MODES
 
 
 METADATA_FORMAT_VERSION = 0x01
+METADATA_FORMAT_VERSION_EMBEDDED = 0x02
+SUPPORTED_METADATA_FORMAT_VERSIONS = {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED}
 MAX_METADATA_SIZE = 10 * 1024
 
 
@@ -45,6 +48,7 @@ def pack_cascade_metadata(
     pqc_required: bool = False,
     pqc_algorithm: str = None,
     pqc_key_id: str = None,
+    pqc_storage_mode: str = PQC_STORAGE_MODE_EXTERNAL,
     keyphrase_format_version: int = None,
     keyphrase_wordlist_id: str = None,
     archive_type: str = None,
@@ -87,6 +91,8 @@ def pack_cascade_metadata(
         raise ValueError("PQC ciphertext too large (max 2048 bytes)")
     if pqc_private_key:
         raise ValueError("PQC private key must not be embedded in archive metadata")
+    if pqc_storage_mode not in PQC_STORAGE_MODES:
+        raise ValueError("Unsupported PQC storage mode")
     if pqc_required:
         if not pqc_ciphertext:
             raise ValueError("PQC keyfile mode requires PQC ciphertext")
@@ -96,6 +102,8 @@ def pack_cascade_metadata(
             raise ValueError("PQC keyfile mode requires PQC key identifier")
     elif any(value is not None for value in [pqc_algorithm, pqc_key_id]) or pqc_ciphertext:
         raise ValueError("Inactive PQC fields must be empty")
+    elif pqc_storage_mode != PQC_STORAGE_MODE_EXTERNAL:
+        raise ValueError("Inactive PQC storage mode must be external")
 
     if archive_type not in {"multi_file", "single_file"}:
         raise ValueError("archive_type must be 'multi_file' or 'single_file'")
@@ -131,8 +139,9 @@ def pack_cascade_metadata(
             raise ValueError("Payload key wrap algorithm requires wrapped payload key material")
         payload_key_wrap_algorithm = ""
 
+    metadata_version = METADATA_FORMAT_VERSION_EMBEDDED if pqc_required and pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED else METADATA_FORMAT_VERSION
     flags = 0x01 if keyphrase_protected else 0x00
-    packed = struct.pack(">BBB", METADATA_FORMAT_VERSION, flags, len(method_bytes))
+    packed = struct.pack(">BBB", metadata_version, flags, len(method_bytes))
     packed += method_bytes
     packed += salt
     packed += chess_salt
@@ -167,6 +176,8 @@ def pack_cascade_metadata(
     packed += struct.pack(">B", 1 if pqc_required else 0)
     packed += _pack_short_text(pqc_algorithm or "", 64, "PQC algorithm")
     packed += _pack_short_text(pqc_key_id or "", 128, "PQC key identifier")
+    if metadata_version == METADATA_FORMAT_VERSION_EMBEDDED:
+        packed += _pack_short_text(pqc_storage_mode, 32, "PQC storage mode")
 
     packed += _pack_short_text(archive_type, 32, "Archive type")
     packed += struct.pack(">IQ", entry_count, total_original_size)

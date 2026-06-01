@@ -1,53 +1,39 @@
 # Code of Conduct
 
-## Our standard
+## Standard
 
-This project expects respectful, professional participation from everyone involved in:
+Avikal expects respectful, professional participation in issues, pull requests, reviews, and project discussions.
 
-- issues
-- pull requests
-- code review
-- project discussions tied to the repository
+Contributors should be able to ask questions, disagree technically, and propose changes without harassment, hostility, or personal attacks.
 
-We want the project to be a place where people can ask questions, propose changes, disagree technically, and collaborate without harassment or hostility.
+## Expected Behavior
 
-## Expected behavior
+- Communicate respectfully.
+- Keep criticism focused on the work.
+- Explain technical reasoning clearly.
+- Accept correction and review in good faith.
+- Help new contributors understand context when possible.
 
-Examples of expected behavior:
+## Unacceptable Behavior
 
-- communicate with respect
-- keep criticism specific to the work
-- explain reasoning clearly
-- be open to correction and review
-- help new contributors understand context when possible
-
-## Unacceptable behavior
-
-Examples of unacceptable behavior:
-
-- harassment, intimidation, or discrimination
-- personal attacks or insulting language
-- deliberate disruption of discussion or review
-- publishing private information without permission
-- hostile, bad-faith, or exclusionary conduct
+- Harassment, intimidation, or discrimination.
+- Personal attacks or insulting language.
+- Deliberate disruption of discussion or review.
+- Publishing private information without permission.
+- Bad-faith, hostile, or exclusionary conduct.
 
 ## Enforcement
 
-Project maintainers may remove or reject comments, issues, pull requests, or other participation that violates this policy.
+Maintainers may remove, edit, or reject comments, issues, pull requests, or other participation that violates this policy.
 
-If you experience or witness a serious problem, report it privately to the maintainer or through the repository's moderation or security channels if available.
+Report serious problems privately to the maintainer or through repository moderation and security channels when available.
 
 ## Scope
 
-This code of conduct applies to project spaces directly connected to this repository, including:
-
-- issue trackers
-- pull requests
-- review threads
-- repository-linked discussion spaces
+This code of conduct applies to project spaces connected to this repository, including issues, pull requests, review threads, and repository-linked discussions.
 
 ## Attribution
 
-This document is adapted from the Contributor Covenant 2.1:
+This document is adapted from Contributor Covenant 2.1:
 
 https://www.contributor-covenant.org/version/2/1/code_of_conduct/

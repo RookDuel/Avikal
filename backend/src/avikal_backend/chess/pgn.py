@@ -301,6 +301,15 @@ def read_game(handle: TextIO) -> Optional[Game]:
     current: GameNode = game
     board = game.board()
     branch_stack: list[tuple[GameNode, Board]] = []
+    parent_board_by_child: dict[int, Board] = {}
+
+    def cache_position(node: GameNode, source_board: Board, legal_moves: list[Move]) -> None:
+        if hasattr(node, "_avikal_legal_moves"):
+            return
+        sorted_legal = sorted(legal_moves, key=lambda move: move.uci())
+        setattr(node, "_avikal_board", source_board.copy())
+        setattr(node, "_avikal_legal_moves", sorted_legal)
+        setattr(node, "_avikal_move_index", {move: index for index, move in enumerate(sorted_legal)})
 
     for token in _scan_tokens(movetext):
         token = _strip_embedded_move_number(token)
@@ -308,8 +317,12 @@ def read_game(handle: TextIO) -> Optional[Game]:
             if current.parent is None:
                 continue
             branch_stack.append((current, board.copy()))
+            child = current
             current = current.parent
-            board = current.board()
+            parent_board = parent_board_by_child.get(id(child))
+            if parent_board is None:
+                parent_board = current.board()
+            board = parent_board.copy()
             continue
         if token == ")":
             if branch_stack:
@@ -322,12 +335,12 @@ def read_game(handle: TextIO) -> Optional[Game]:
                 game.headers["Result"] = token
             continue
 
-        move = board.parse_san(token)
+        legal_moves = board.legal_moves
+        cache_position(current, board, legal_moves)
+        move = board.parse_san(token, legal_moves)
+        parent_board = board.copy()
         current = current.add_variation(move)
+        parent_board_by_child[id(current)] = parent_board
         board.push(move)
 
     return game
-"""
-SPDX-License-Identifier: Apache-2.0
-Copyright (c) 2026 Atharva Sen Barai.
-"""

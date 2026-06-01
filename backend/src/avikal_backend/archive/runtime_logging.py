@@ -10,6 +10,8 @@ from __future__ import annotations
 import builtins
 import os
 
+from avikal_backend.core.redaction import redact_sensitive
+
 
 def _verbose_runtime_enabled() -> bool:
     flag = os.getenv("AVIKAL_VERBOSE_LOGS", "").strip().lower()
@@ -22,4 +24,4 @@ def _verbose_runtime_enabled() -> bool:
 
 def runtime_debug_print(*args, **kwargs) -> None:
     if _verbose_runtime_enabled():
-        builtins.print(*args, **kwargs)
+        builtins.print(*(redact_sensitive(arg) for arg in args), **kwargs)

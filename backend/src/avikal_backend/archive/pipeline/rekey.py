@@ -1,8 +1,4 @@
-"""
-Rekey support for wrapped-DEK Avikal archives.
-
-This operation rewrites keychain.pgn only. The encrypted payload.enc bytes are
-copied unchanged so large archives do not need payload decryption/re-encryption.
+"""Rekey support for wrapped-DEK Avikal archives.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -16,11 +12,13 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from avikal_backend.core.temp_janitor import register_temp_artifact, unregister_temp_artifact
+
 from ...mnemonic.generator import MNEMONIC_FORMAT_VERSION, normalize_mnemonic_words
 from ...mnemonic.wordlist import WORDLIST_ID
 from ..chess_metadata import decode_chess_to_metadata_enhanced, encode_metadata_to_chess_enhanced
 from ..format.container import open_avk_payload_stream
-from ..format.header import attach_header_to_keychain_pgn
+from ..format.header import attach_header_to_keychain_pgn, attach_public_route_tags_to_keychain_pgn
 from ..format.metadata import METADATA_FORMAT_VERSION, pack_cascade_metadata
 from ..security.crypto import derive_hierarchical_keys, has_user_secret, secure_zero
 from ..security.key_wrap import PAYLOAD_KEY_WRAP_ALGORITHM, unwrap_payload_key, wrap_payload_key
@@ -70,7 +68,7 @@ def rekey_avk_archive(
     temp_archive_path = None
 
     try:
-        with open_avk_payload_stream(str(source_path)) as (header_bytes, keychain_pgn, _payload_stream):
+        with open_avk_payload_stream(str(source_path)) as (header_bytes, keychain_pgn, _payload_stream, embedded_pqc_blob):
             metadata = decode_chess_to_metadata_enhanced(
                 keychain_pgn,
                 old_password,
@@ -83,8 +81,8 @@ def rekey_avk_archive(
             raise ValueError("Plaintext archives do not need rekey.")
         if metadata.get("timecapsule_provider") is not None:
             raise ValueError("Time-capsule rekey is not supported in this phase.")
-        if metadata.get("pqc_required"):
-            raise ValueError("PQC keyfile rekey is not supported in this phase.")
+        if metadata.get("pqc_required") or embedded_pqc_blob is not None:
+            raise ValueError("PQC rekey is not supported in this phase.")
         if not metadata.get("wrapped_payload_key"):
             raise ValueError(
                 "This archive was created before rekey support. Decrypt and create a new archive to enable rekey."
@@ -151,6 +149,13 @@ def rekey_avk_archive(
             aad=header_bytes,
         )
         rebuilt_keychain = attach_header_to_keychain_pgn(rebuilt_keychain, header_bytes)
+        rebuilt_keychain = attach_public_route_tags_to_keychain_pgn(
+            rebuilt_keychain,
+            requires_password=bool(new_password),
+            requires_keyphrase=bool(new_keyphrase),
+            requires_pqc=False,
+            keyphrase_wordlist_id=WORDLIST_ID if new_keyphrase_protected else None,
+        )
 
         temp_archive = tempfile.NamedTemporaryFile(
             suffix=".avk",
@@ -160,6 +165,7 @@ def rekey_avk_archive(
         )
         temp_archive_path = temp_archive.name
         temp_archive.close()
+        register_temp_artifact(temp_archive_path)
 
         with zipfile.ZipFile(str(source_path), "r") as source_zip, zipfile.ZipFile(temp_archive_path, "w") as output_zip:
             output_zip.writestr("keychain.pgn", rebuilt_keychain, compress_type=zipfile.ZIP_DEFLATED)
@@ -171,6 +177,7 @@ def rekey_avk_archive(
                     target_payload.write(chunk)
 
         os.replace(temp_archive_path, str(destination_path))
+        unregister_temp_artifact(temp_archive_path)
         temp_archive_path = None
 
         return {
@@ -185,6 +192,7 @@ def rekey_avk_archive(
     finally:
         if temp_archive_path and os.path.exists(temp_archive_path):
             os.remove(temp_archive_path)
+            unregister_temp_artifact(temp_archive_path)
         for secret in (old_master_key, old_access_key, new_master_key, new_access_key, payload_key, new_salt):
             if secret:
                 secure_zero(secret)

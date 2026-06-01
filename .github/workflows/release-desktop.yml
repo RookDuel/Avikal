@@ -1,4 +1,4 @@
-name: Release Desktop
+name: Release Windows Installers
 
 on:
   release:
@@ -100,10 +100,37 @@ jobs:
           echo '{"action":"seal","unlock_timestamp":9999999999,"key_b_base64":"dGVzdA=="}' | node backend/scripts/drand_timelock_helper.mjs
         shell: bash
 
-      - name: Build self-contained Windows installer
-        run: npm run package
+      - name: Build self-contained Windows GUI installer
+        run: npm run package:windows
 
-      - name: Verify packaged runtime and prepare installer release assets
+      - name: Build self-contained Windows CLI installer
+        run: npm run package:windows:cli
+
+      - name: Smoke-test Windows CLI installer
+        shell: powershell
+        run: |
+          $cliInstallerExe = (Resolve-Path "dist\RookDuel Avikal CLI-beta.exe").Path
+          & $cliInstallerExe
+          if ($LASTEXITCODE -ne 0) {
+            throw "CLI installer failed during smoke test."
+          }
+
+          $cliLauncher = Join-Path $env:LOCALAPPDATA "Programs\RookDuel Avikal CLI\avikal.cmd"
+          if (-not (Test-Path -LiteralPath $cliLauncher)) {
+            throw "CLI launcher was not installed: $cliLauncher"
+          }
+
+          & $cliLauncher --verify-runtime
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed CLI runtime verification failed."
+          }
+
+          & $cliLauncher --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed CLI help smoke test failed."
+          }
+
+      - name: Verify packaged runtimes and prepare release assets
         shell: powershell
         run: |
           $packagedOpenSsl = Resolve-Path dist\win-unpacked\resources\backend-runtime\pqc\bin\openssl.exe
@@ -117,33 +144,51 @@ jobs:
             throw "Installer executable was not produced in dist."
           }
 
+          $cliInstallerExe = Join-Path (Resolve-Path dist) "RookDuel Avikal CLI-beta.exe"
+          if (-not (Test-Path -LiteralPath $cliInstallerExe)) {
+            throw "CLI installer executable was not produced in dist."
+          }
+
           $installerHash = (Get-FileHash -LiteralPath $installerExe -Algorithm SHA256).Hash.ToLowerInvariant()
           $hashFilePath = "$installerExe.sha256"
           "$installerHash *$(Split-Path -Leaf $installerExe)" | Set-Content -LiteralPath $hashFilePath -NoNewline
 
+          $cliInstallerHash = (Get-FileHash -LiteralPath $cliInstallerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $cliHashFilePath = "$cliInstallerExe.sha256"
+          "$cliInstallerHash *$(Split-Path -Leaf $cliInstallerExe)" | Set-Content -LiteralPath $cliHashFilePath -NoNewline
+
           $metadata = [ordered]@{
             product_version = $env:RELEASE_TAG
-            installer_name = [System.IO.Path]::GetFileName($installerExe)
-            installer_sha256 = $installerHash
+            gui_installer_name = [System.IO.Path]::GetFileName($installerExe)
+            gui_installer_sha256 = $installerHash
+            cli_installer_name = [System.IO.Path]::GetFileName($cliInstallerExe)
+            cli_installer_sha256 = $cliInstallerHash
             openssl_runtime_version = $env:AVIKAL_OPENSSL_VERSION
             openssl_runtime_version_text = $packagedVersion
+            packaging_model = "bundled-gui-and-bundled-cli-with-shared-core-reuse"
           }
           $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json
 
       - name: Upload Windows installer artifacts to workflow
         uses: actions/upload-artifact@v4
         with:
-          name: avikal-windows-installer
+          name: avikal-windows-installers
           path: |
             dist/RookDuel Avikal-beta.exe
             dist/RookDuel Avikal-beta.exe.sha256
+            dist/RookDuel Avikal CLI-beta.exe
+            dist/RookDuel Avikal CLI-beta.exe.sha256
             dist/avikal-release-metadata.json
+            dist/avikal-cli-release-metadata.json
 
-      - name: Upload Windows installer to GitHub Release
+      - name: Upload Windows installers to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
             dist/RookDuel Avikal-beta.exe
             dist/RookDuel Avikal-beta.exe.sha256
+            dist/RookDuel Avikal CLI-beta.exe
+            dist/RookDuel Avikal CLI-beta.exe.sha256
             dist/avikal-release-metadata.json
+            dist/avikal-cli-release-metadata.json

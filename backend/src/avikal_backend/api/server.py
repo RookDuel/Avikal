@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-RookDuel Avikal Backend API Server
-FastAPI server for Electron frontend communication
+"""Legacy FastAPI server for non-desktop tooling and route tests.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
@@ -29,6 +27,9 @@ from avikal_backend.audit.activity_audit import activity_audit
 from fastapi.responses import JSONResponse
 
 import uvicorn
+
+from avikal_backend.version import __version__
+from avikal_backend.runtime_requirements import ensure_native_crypto_runtime
 
 from .archive_helpers import (
     best_effort_log_archive_creation as _best_effort_log_archive_creation,
@@ -96,14 +97,13 @@ def get_romanized_word_pairs(*args, **kwargs):
         raise HTTPException(status_code=500, detail="Mnemonic wordlist helper not available") from exc
     return implementation(*args, **kwargs)
 
-app = FastAPI(title="RookDuel Avikal API", version="1.0.0")
+app = FastAPI(title="RookDuel Avikal API", version=__version__)
 BACKEND_AUTH_HEADER = "X-Avikal-Backend-Token"
 _BACKEND_AUTH_TOKEN = os.getenv("AVIKAL_BACKEND_TOKEN", "").strip() or None
+BACKEND_AUTH_MISCONFIGURED_DETAIL = (
+    "Backend request token is not configured. This backend instance is misconfigured and must not be exposed."
+)
 
-# ---------------------------------------------------------------------------
-# Concurrency lock for encryption/decryption operations (Requirement 7.12)
-# Prevents race conditions when multiple requests hit the same file.
-# ---------------------------------------------------------------------------
 _crypto_lock = threading.Lock()
 
 from .errors import (
@@ -113,6 +113,7 @@ from .errors import (
 )
 from .drand import run_drand_helper
 from .preview_sessions import PreviewSessionStore
+from .aavrit_state import AavritConnectionState
 from .aavrit_crypto import (
     build_aavrit_commit_hash,
     create_aavrit_data_hash,
@@ -127,6 +128,7 @@ from .aavrit_client import (
     request_aavrit_commit,
     request_aavrit_reveal,
 )
+from avikal_backend.archive.security.pqc_keyfile import PQC_STORAGE_MODE_EMBEDDED
 
 _preview_sessions = PreviewSessionStore(_PREVIEW_SESSION_ROOT, log)
 _create_preview_session_dir = _preview_sessions.create
@@ -168,6 +170,7 @@ def _cleanup_stale_preview_sessions_in_background() -> None:
 
 @app.on_event("startup")
 async def schedule_preview_session_cleanup() -> None:
+    ensure_native_crypto_runtime("Avikal desktop backend")
     _cleanup_stale_preview_sessions_in_background()
     try:
         from avikal_backend.services.ntp_service import prime_ntp_cache_async
@@ -190,10 +193,23 @@ async def handle_request_validation_error(_request: Request, exc: RequestValidat
 
 # ---------------------------------------------------------------------------
 
-from .config import (
-    ALLOWED_CORS_ORIGINS,
-    DEFAULT_ALLOWED_CORS_ORIGINS,
-)
+DEFAULT_ALLOWED_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+]
+
+
+def _parse_allowed_cors_origins() -> list[str]:
+    raw = os.getenv("AVIKAL_ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return DEFAULT_ALLOWED_CORS_ORIGINS.copy()
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or DEFAULT_ALLOWED_CORS_ORIGINS.copy()
+
+
+ALLOWED_CORS_ORIGINS = _parse_allowed_cors_origins()
 
 log.info("Configured backend CORS origins: %s", ", ".join(ALLOWED_CORS_ORIGINS))
 
@@ -208,11 +224,15 @@ app.add_middleware(
 
 @app.middleware("http")
 async def require_backend_token(request: Request, call_next):
-    if _BACKEND_AUTH_TOKEN is None:
-        return await call_next(request)
-
     if request.method.upper() == "OPTIONS" or request.url.path == "/health":
         return await call_next(request)
+
+    if _BACKEND_AUTH_TOKEN is None:
+        log.error("Rejecting request because the backend token is not configured")
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": BACKEND_AUTH_MISCONFIGURED_DETAIL},
+        )
 
     provided_token = request.headers.get(BACKEND_AUTH_HEADER)
     if provided_token != _BACKEND_AUTH_TOKEN:
@@ -223,10 +243,7 @@ async def require_backend_token(request: Request, call_next):
 
     return await call_next(request)
 
-# Global Aavrit session storage (in production, use secure storage)
-current_aavrit_session_token = None
-current_aavrit_server_url = None
-current_aavrit_mode = None
+_aavrit_connection = AavritConnectionState()
 
 from .schemas import (
     ArchiveInspectRequest,
@@ -242,43 +259,40 @@ from .schemas import (
 
 
 def set_current_aavrit_server_url(raw_url: str) -> str:
-    global current_aavrit_server_url
-
     normalized = normalize_aavrit_server_url(raw_url)
-    current_aavrit_server_url = normalized
+    _aavrit_connection.set_server_url(normalized)
     return normalized
 
 def get_aavrit_server_url(explicit_url: str | None = None, *, required: bool = True) -> str | None:
-    candidate = explicit_url or current_aavrit_server_url
+    candidate = explicit_url or _aavrit_connection.get_server_url()
     if not candidate:
         if required:
             raise HTTPException(status_code=400, detail="Aavrit server URL is not configured.")
         return None
     return normalize_aavrit_server_url(candidate)
 
+def set_current_aavrit_mode(mode: str | None) -> str | None:
+    return _aavrit_connection.set_mode(mode)
+
+
+def get_current_aavrit_mode() -> str | None:
+    return _aavrit_connection.get_mode()
+
+
 def clear_aavrit_auth_state() -> None:
-    global current_aavrit_session_token, current_aavrit_server_url, current_aavrit_mode
+    _aavrit_connection.clear()
 
-    current_aavrit_session_token = None
-    current_aavrit_server_url = None
-    current_aavrit_mode = None
 
-# Dependency function
 def get_aavrit_session_token(
     x_aavrit_session: str | None = Header(default=None, alias="X-Aavrit-Session"),
     x_aavrit_server_url: str | None = Header(default=None, alias="X-Aavrit-Server-URL"),
 ):
-    """Get the current Aavrit session token and optionally restore the active Aavrit server."""
-    global current_aavrit_session_token
-
-    session_token = current_aavrit_session_token or x_aavrit_session
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated. Please login first.")
-    if not current_aavrit_session_token and x_aavrit_session:
-        current_aavrit_session_token = x_aavrit_session
-        log.info("Adopted Aavrit session from X-Aavrit-Session header (backend was restarted)")
+    """Return the caller-provided Aavrit session token without persisting it server-side."""
     if x_aavrit_server_url:
         set_current_aavrit_server_url(x_aavrit_server_url)
+    session_token = x_aavrit_session.strip() if isinstance(x_aavrit_session, str) else ""
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Authentication session required")
     return session_token
 
 # Helper functions
@@ -365,7 +379,11 @@ def validate_public_route_inputs(request: DecryptRequest, route_hints: dict) -> 
         missing.append("password")
     if route_hints.get("requires_keyphrase") and not request.keyphrase:
         missing.append("21-word keyphrase")
-    if route_hints.get("requires_pqc") and not request.pqc_keyfile:
+    if (
+        route_hints.get("requires_pqc")
+        and route_hints.get("pqc_storage_mode") != PQC_STORAGE_MODE_EMBEDDED
+        and not request.pqc_keyfile
+    ):
         missing.append(".avkkey")
 
     if missing:
@@ -413,10 +431,8 @@ def validate_public_timecapsule_lock(route_hints: dict) -> None:
 
 
 def require_aavrit_auth_if_needed(aavrit_url: str, session_token: str | None) -> dict:
-    global current_aavrit_mode
-
     config = fetch_aavrit_capabilities(aavrit_url)
-    current_aavrit_mode = config["mode"]
+    set_current_aavrit_mode(config["mode"])
     if config["mode"] == "private":
         if not session_token:
             raise HTTPException(status_code=401, detail="Aavrit private mode requires authentication")
@@ -610,7 +626,7 @@ def create_timecapsule_via_aavrit(request: EncryptRequest, session_token: str | 
         )
         tracker.update("prepare", "Validating Aavrit session", 0.2, force=True)
         aavrit_url = get_aavrit_server_url()
-        require_aavrit_auth_if_needed(aavrit_url, session_token)
+        config = require_aavrit_auth_if_needed(aavrit_url, session_token)
         validate_unlock_datetime_against_ntp(unlock_dt)
         tracker.update("prepare", "Trusted time verified", 1.0)
 
@@ -661,7 +677,9 @@ def create_timecapsule_via_aavrit(request: EncryptRequest, session_token: str | 
                     aavrit_server_key_id=commit_payload["server_key_id"],
                     aavrit_commit_signature=commit_signature,
                     pqc_enabled=request.pqc_enabled,
+                    pqc_storage_mode=request.pqc_storage_mode,
                     pqc_keyfile_output=request.pqc_keyfile_output,
+                    excluded_input_paths=request.excluded_input_paths,
                 )
             else:
                 result = create_avk_file(
@@ -680,7 +698,9 @@ def create_timecapsule_via_aavrit(request: EncryptRequest, session_token: str | 
                     aavrit_server_key_id=commit_payload["server_key_id"],
                     aavrit_commit_signature=commit_signature,
                     pqc_enabled=request.pqc_enabled,
+                    pqc_storage_mode=request.pqc_storage_mode,
                     pqc_keyfile_output=request.pqc_keyfile_output,
+                    excluded_input_paths=request.excluded_input_paths,
                 )
 
         return {
@@ -690,7 +710,7 @@ def create_timecapsule_via_aavrit(request: EncryptRequest, session_token: str | 
             "result": result,
             "provider": "aavrit",
             "aavrit": {
-                "mode": current_aavrit_mode,
+                "mode": config["mode"],
                 "server_url": aavrit_url,
                 "commit_id": commit_payload["commit_id"],
                 "commit_hash": commit_payload["commit_hash"],
@@ -747,7 +767,9 @@ def create_timecapsule_via_drand(request: EncryptRequest, unlock_dt: datetime):
                     drand_ciphertext=helper_result.get("ciphertext"),
                     drand_beacon_id=helper_result.get("beacon_id"),
                     pqc_enabled=request.pqc_enabled,
+                    pqc_storage_mode=request.pqc_storage_mode,
                     pqc_keyfile_output=request.pqc_keyfile_output,
+                    excluded_input_paths=request.excluded_input_paths,
                 )
             else:
                 from avikal_backend.archive.pipeline.encoder import create_avk_file
@@ -766,6 +788,7 @@ def create_timecapsule_via_drand(request: EncryptRequest, unlock_dt: datetime):
                     drand_ciphertext=helper_result.get("ciphertext"),
                     drand_beacon_id=helper_result.get("beacon_id"),
                     pqc_enabled=request.pqc_enabled,
+                    pqc_storage_mode=request.pqc_storage_mode,
                     pqc_keyfile_output=request.pqc_keyfile_output,
                 )
 
@@ -812,6 +835,7 @@ def create_regular_encryption(request: EncryptRequest, unlock_dt: datetime):
                     unlock_datetime=unlock_dt,
                     use_timecapsule=False,
                     pqc_enabled=request.pqc_enabled,
+                    pqc_storage_mode=request.pqc_storage_mode,
                     pqc_keyfile_output=request.pqc_keyfile_output,
                 )
             else:
@@ -823,6 +847,7 @@ def create_regular_encryption(request: EncryptRequest, unlock_dt: datetime):
                     unlock_datetime=unlock_dt,
                     use_timecapsule=False,
                     pqc_enabled=request.pqc_enabled,
+                    pqc_storage_mode=request.pqc_storage_mode,
                     pqc_keyfile_output=request.pqc_keyfile_output,
                 )
         
@@ -845,25 +870,14 @@ def read_avk_metadata_only(
     header_bytes: bytes | None = None,
     keychain_pgn: str | None = None,
 ) -> dict:
-    """
-    Read only metadata from .avk file without decrypting the full payload.
-    Used for provider-backed time-capsule flows without decrypting the full payload.
-    
-    Args:
-        avk_filepath: Path to .avk file
-        password: Password for metadata decryption (optional)
-        keyphrase: Keyphrase list for metadata decryption (optional)
-    
-    Returns:
-        dict: Parsed archive metadata
-    """
+    """Read archive metadata without decrypting the full payload."""
     from avikal_backend.archive.format.container import open_avk_payload_stream
     from avikal_backend.archive.format.header import parse_header_bytes, validate_metadata_against_header
     from avikal_backend.archive.chess_metadata import decode_chess_to_metadata_enhanced
     
     if header_bytes is None or keychain_pgn is None:
         try:
-            with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, _payload_stream):
+            with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, _payload_stream, _embedded_pqc):
                 pass
         except Exception as e:
             raise ValueError(f"Failed to open .avk file: {str(e)}")
@@ -1008,6 +1022,9 @@ def decrypt_timecapsule_via_drand(request: DecryptRequest, metadata: dict | None
             "action": "open",
             "ciphertext": drand_ciphertext,
             "round": drand_round,
+            "expected_chain_hash": metadata.get("drand_chain_hash"),
+            "expected_chain_url": metadata.get("drand_chain_url"),
+            "expected_beacon_id": metadata.get("drand_beacon_id"),
         })
         tracker.update("provider", "drand unlock shard received", 1.0)
 
@@ -1035,6 +1052,7 @@ app.include_router(api_router)
 
 def start_server(host: str | None = None, port: int | None = None):
     """Start the API server"""
+    ensure_native_crypto_runtime("Avikal desktop backend")
     resolved_host = host or os.getenv("AVIKAL_BACKEND_HOST", "127.0.0.1")
     resolved_port = port if port is not None else int(os.getenv("AVIKAL_BACKEND_PORT", "5000"))
     uvicorn.run(app, host=resolved_host, port=resolved_port, log_level="info")

@@ -1,38 +1,181 @@
 /**
  * RookDuel Avikal Electron Main Process
- * Manages window, Python backend, and IPC
+ * Manages window, the local Avikal core process, and IPC
  */
 
 const { app, BrowserWindow, ipcMain, dialog, safeStorage, Menu, Tray } = require('electron');
 const fs = require('fs');
+const https = require('https');
 const path = require('path');
-const { spawn } = require('child_process');
+const os = require('os');
+const { pathToFileURL } = require('url');
+const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
-const net = require('net');
-const isDev = process.env.NODE_ENV === 'development';
-const DEFAULT_BACKEND_HOST = '127.0.0.1';
-const DEFAULT_BACKEND_PORT = 5000;
-const BACKEND_READY_TIMEOUT_MS = isDev ? 30000 : 45000;
+const sourceDevMode = process.env.AVIKAL_USE_SOURCE_BACKEND === '1';
+const devServerUrl = normalizeDevServerUrl(process.env.AVIKAL_DEV_SERVER_URL);
+const frontendDevMode = Boolean(devServerUrl);
+const BACKEND_READY_TIMEOUT_MS = sourceDevMode ? 30000 : 45000;
 const BACKEND_HEALTH_POLL_INTERVAL_MS = 250;
 const BACKEND_HEALTH_REQUEST_TIMEOUT_MS = 1500;
-const BACKEND_AUTH_HEADER = 'X-Avikal-Backend-Token';
+const CORE_TRANSPORT_URL = 'stdio://avikal-core';
+const UPDATE_REPO_OWNER = process.env.AVIKAL_UPDATE_REPO_OWNER || 'RookDuel';
+const UPDATE_REPO_NAME = process.env.AVIKAL_UPDATE_REPO_NAME || 'Avikal';
+const UPDATE_RELEASES_API_URL = process.env.AVIKAL_UPDATE_RELEASES_API_URL || `https://api.github.com/repos/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
+const UPDATE_RELEASES_PAGE_URL = process.env.AVIKAL_UPDATE_RELEASES_PAGE_URL || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
 const MAX_DIRECTORY_SCAN_DEPTH = 12;
 const MAX_DIRECTORY_SCAN_ENTRIES = 20000;
 const MAX_SAVED_TEXT_BYTES = 5 * 1024 * 1024;
+const SHARED_CORE_VENDOR_DIR = path.join('RookDuel', 'Avikal', 'Core');
+const PRODUCTION_RENDERER_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: file:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
+const CORE_METHOD_POLICIES = Object.freeze({
+  'runtime.status': { timeoutMs: 5000 },
+  'archive.encrypt': { timeoutMs: 0 },
+  'archive.decrypt': { timeoutMs: 0 },
+  'archive.inspect': { timeoutMs: 30000 },
+  'archive.rekey': { timeoutMs: 120000 },
+  'pqc.keyfileInspect': { timeoutMs: 10000 },
+  'preview.cleanupSession': { timeoutMs: 10000 },
+  'preview.cleanupAll': { timeoutMs: 10000 },
+  'preview.cancel': { timeoutMs: 10000 },
+  'keyphrase.generate': { timeoutMs: 30000 },
+  'keyphrase.romanMap': { timeoutMs: 30000 },
+  'time.ntp': { timeoutMs: 8000 },
+  'auth.checkAavritServer': { timeoutMs: 30000 },
+  'auth.login': { timeoutMs: 30000 },
+  'auth.verifySession': { timeoutMs: 30000 },
+  'auth.profile': { timeoutMs: 30000 },
+  'auth.aavritDiagnostics': { timeoutMs: 30000 },
+  'auth.logout': { timeoutMs: 30000 },
+  'security.settings': { timeoutMs: 30000 },
+  'security.preferencesUpdate': { timeoutMs: 30000 },
+  'security.activityLogExport': { timeoutMs: 30000 },
+  'security.activityLogClear': { timeoutMs: 30000 },
+});
 
 let mainWindow;
 let pythonProcess;
+let coreRpcClient = null;
 let tray = null;
 let pendingLaunchAction = parseLaunchAction(process.argv);
 let isQuitting = false;
-let backendHost = DEFAULT_BACKEND_HOST;
-let backendPort = DEFAULT_BACKEND_PORT;
-let backendAuthToken = crypto.randomBytes(32).toString('hex');
 let backendStartupState = createBackendStartupState();
 let backendRuntimeStatus = createBackendRuntimeStatus('idle');
+const allowedFilePaths = new Set();
+const allowedFileRoots = new Set();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeVersion(value) {
+  const match = String(value || '').trim().replace(/^v/i, '').match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  if (!match) return null;
+  return match.slice(1, 4).map((part) => Number(part));
+}
+
+function compareVersions(left, right) {
+  const a = normalizeVersion(left);
+  const b = normalizeVersion(right);
+  if (!a || !b) return 0;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] > b[index]) return 1;
+    if (a[index] < b[index]) return -1;
+  }
+  return 0;
+}
+
+function httpsJson(url) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'user-agent': `RookDuel-Avikal/${app.getVersion()}`,
+      },
+      timeout: 15000,
+    }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 1024 * 1024) {
+          request.destroy(new Error('Update response is too large'));
+        }
+      });
+      response.on('end', () => {
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`Update server returned HTTP ${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body));
+        } catch (_error) {
+          reject(new Error('Update server returned invalid JSON'));
+        }
+      });
+    });
+    request.on('timeout', () => request.destroy(new Error('Update check timed out')));
+    request.on('error', reject);
+  });
+}
+
+async function checkLatestRelease() {
+  const payload = await httpsJson(UPDATE_RELEASES_API_URL);
+  const currentVersion = app.getVersion();
+  const latestVersion = String(payload.tag_name || payload.name || '').replace(/^v/i, '');
+  if (!normalizeVersion(latestVersion)) {
+    throw new Error('Latest release version is unavailable');
+  }
+  const assets = Array.isArray(payload.assets)
+    ? payload.assets
+        .filter((asset) => asset && typeof asset.name === 'string')
+        .map((asset) => ({
+          name: asset.name,
+          size: Number(asset.size || 0),
+          url: asset.browser_download_url || '',
+        }))
+        .filter((asset) => asset.url.startsWith('https://'))
+    : [];
+  return {
+    success: true,
+    currentVersion,
+    latestVersion,
+    updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
+    releaseName: String(payload.name || payload.tag_name || `v${latestVersion}`),
+    releaseUrl: String(payload.html_url || UPDATE_RELEASES_PAGE_URL),
+    publishedAt: payload.published_at || null,
+    prerelease: Boolean(payload.prerelease),
+    assets,
+  };
+}
+
+function normalizeDevServerUrl(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().replace(/\/+$/, '');
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return null;
+    }
+    return trimmed;
+  } catch {
+    return null;
+  }
 }
 
 function createBackendStartupState() {
@@ -40,47 +183,11 @@ function createBackendStartupState() {
     spawnError: null,
     lastOutputLine: null,
     lastErrorLine: null,
-    listeningAnnounced: false,
   };
 }
 
 function getBackendBaseUrl() {
-  return `http://${backendHost}:${backendPort}`;
-}
-
-function getBackendReadyLogMarker() {
-  return `Uvicorn running on ${getBackendBaseUrl()}`;
-}
-
-function createBackendRequestConfig() {
-  return {
-    baseUrl: getBackendBaseUrl(),
-    authHeader: BACKEND_AUTH_HEADER,
-    authToken: backendAuthToken,
-  };
-}
-
-function reserveBackendPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on('error', reject);
-    server.listen(0, backendHost, () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Failed to reserve a backend port')));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(port);
-      });
-    });
-  });
+  return CORE_TRANSPORT_URL;
 }
 
 function resetBackendStartupState() {
@@ -103,6 +210,119 @@ function publishBackendRuntimeStatus(state, error = null) {
   }
 }
 
+class CoreRpcClient {
+  constructor(childProcess) {
+    this.childProcess = childProcess;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.buffer = Buffer.alloc(0);
+    this.disposed = false;
+    childProcess.stdout.on('data', (chunk) => this._handleData(chunk));
+  }
+
+  request(method, params = {}, timeoutMs = 300000) {
+    if (this.disposed || !this.childProcess.stdin || this.childProcess.exitCode !== null) {
+      return Promise.reject(new Error('Avikal core process is not available'));
+    }
+
+    const id = this.nextId++;
+    const message = { jsonrpc: '2.0', id, method, params };
+    const body = Buffer.from(JSON.stringify(message), 'utf8');
+    const frame = Buffer.concat([
+      Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'),
+      body,
+    ]);
+
+    return new Promise((resolve, reject) => {
+      const timeout = timeoutMs > 0 ? setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Avikal core request timed out: ${method}`));
+      }, timeoutMs) : null;
+      this.pending.set(id, { resolve, reject, timeout, method });
+      this.childProcess.stdin.write(frame, (error) => {
+        if (!error) return;
+        if (timeout) clearTimeout(timeout);
+        this.pending.delete(id);
+        reject(error);
+      });
+    });
+  }
+
+  cancel(id) {
+    return this.request('request.cancel', { id }, 5000).catch(() => null);
+  }
+
+  dispose(error = new Error('Avikal core process stopped')) {
+    this.disposed = true;
+    for (const [id, pending] of this.pending.entries()) {
+      if (pending.timeout) clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.pending.delete(id);
+    }
+  }
+
+  _handleData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const headerEnd = this.buffer.indexOf('\r\n\r\n');
+      if (headerEnd === -1) return;
+      const headerText = this.buffer.subarray(0, headerEnd).toString('ascii');
+      const match = /content-length:\s*(\d+)/i.exec(headerText);
+      if (!match) {
+        console.error('Avikal core emitted malformed JSON-RPC header');
+        this.buffer = Buffer.alloc(0);
+        return;
+      }
+      const bodyLength = Number(match[1]);
+      const frameEnd = headerEnd + 4 + bodyLength;
+      if (this.buffer.length < frameEnd) return;
+
+      const body = this.buffer.subarray(headerEnd + 4, frameEnd);
+      this.buffer = this.buffer.subarray(frameEnd);
+      try {
+        this._handleMessage(JSON.parse(body.toString('utf8')));
+      } catch (error) {
+        console.error('Failed to parse Avikal core JSON-RPC frame:', error);
+      }
+    }
+  }
+
+  _handleMessage(message) {
+    if (Object.prototype.hasOwnProperty.call(message, 'id')) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      if (pending.timeout) clearTimeout(pending.timeout);
+      this.pending.delete(message.id);
+      if (message.error) {
+        const error = new Error(message.error.message || `Avikal core request failed: ${pending.method}`);
+        error.code = message.error.code;
+        error.data = message.error.data;
+        pending.reject(error);
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+
+    if (message.method === 'progress.update') {
+      const line = `__AVIKAL_PROGRESS__${JSON.stringify(message.params || {})}`;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend-log', line);
+      }
+      return;
+    }
+
+    if (message.method === 'runtime.statusChanged') {
+      publishBackendRuntimeStatus(message.params?.state || 'ready', message.params?.error || null);
+      return;
+    }
+
+    if (message.method === 'log.event' && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backend-log', String(message.params?.message || ''));
+    }
+  }
+}
+
 function recordBackendOutput(chunk, source) {
   const lines = String(chunk)
     .split(/\r?\n/)
@@ -114,31 +334,24 @@ function recordBackendOutput(chunk, source) {
     if (source === 'stderr') {
       backendStartupState.lastErrorLine = line;
     }
-    if (!backendStartupState.listeningAnnounced && line.includes(getBackendReadyLogMarker())) {
-      backendStartupState.listeningAnnounced = true;
-    }
   }
 }
 
 async function probeBackendHealth() {
-  const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), BACKEND_HEALTH_REQUEST_TIMEOUT_MS);
-
   try {
-    const response = await fetch(`${getBackendBaseUrl()}/health`, {
-      signal: controller.signal,
-    });
-    if (response.ok) {
+    if (!coreRpcClient) {
+      return { ok: false, error: new Error('Avikal core RPC is not initialized') };
+    }
+    const response = await coreRpcClient.request('runtime.status', {}, BACKEND_HEALTH_REQUEST_TIMEOUT_MS);
+    if (response?.success) {
       return { ok: true, error: null };
     }
     return {
       ok: false,
-      error: new Error(`Backend health check returned ${response.status}`),
+      error: new Error('Avikal core runtime status check failed'),
     };
   } catch (error) {
     return { ok: false, error };
-  } finally {
-    clearTimeout(timeoutHandle);
   }
 }
 
@@ -148,11 +361,7 @@ async function waitForBackendReady(timeoutMs = BACKEND_READY_TIMEOUT_MS) {
 
   while (Date.now() - startedAt < timeoutMs) {
     if (backendStartupState.spawnError) {
-      throw new Error(`Python backend failed to start: ${backendStartupState.spawnError.message || backendStartupState.spawnError}`);
-    }
-
-    if (backendStartupState.listeningAnnounced) {
-      return;
+      throw new Error(`Avikal core failed to start: ${backendStartupState.spawnError.message || backendStartupState.spawnError}`);
     }
 
     const probe = await probeBackendHealth();
@@ -162,7 +371,7 @@ async function waitForBackendReady(timeoutMs = BACKEND_READY_TIMEOUT_MS) {
     lastError = probe.error;
 
     if (pythonProcess && pythonProcess.exitCode !== null) {
-      throw new Error(`Python backend exited early with code ${pythonProcess.exitCode}`);
+      throw new Error(`Avikal core exited early with code ${pythonProcess.exitCode}`);
     }
 
     await sleep(BACKEND_HEALTH_POLL_INTERVAL_MS);
@@ -206,7 +415,7 @@ function monitorBackendReadyAfterSlowStart() {
         return;
       }
 
-      console.error('Python backend failed while starting:', error);
+      console.error('Avikal core failed while starting:', error);
       publishBackendRuntimeStatus('error', error.message || String(error));
     });
 }
@@ -231,11 +440,173 @@ function isAllowedExternalUrl(value) {
   }
 }
 
+function isTrustedRendererUrl(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return false;
+  }
+  if (frontendDevMode && devServerUrl) {
+    return value === devServerUrl || value.startsWith(`${devServerUrl}/`);
+  }
+  const trustedIndexUrl = pathToFileURL(getRendererIndexPath()).href;
+  return value === trustedIndexUrl || value.startsWith(`${trustedIndexUrl}?`) || value.startsWith(`${trustedIndexUrl}#`);
+}
+
+function assertTrustedIpcSender(event, channel) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    throw new Error(`IPC channel ${channel} is unavailable because the main window is not ready`);
+  }
+  if (event.sender !== mainWindow.webContents) {
+    throw new Error(`IPC channel ${channel} rejected an unexpected sender`);
+  }
+  const senderUrl = event.senderFrame?.url || event.sender.getURL?.() || '';
+  if (!isTrustedRendererUrl(senderUrl)) {
+    throw new Error(`IPC channel ${channel} rejected an untrusted renderer origin`);
+  }
+}
+
+function registerTrustedHandler(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    assertTrustedIpcSender(event, channel);
+    return handler(event, ...args);
+  });
+}
+
+function registerTrustedListener(channel, handler) {
+  ipcMain.on(channel, (event, ...args) => {
+    assertTrustedIpcSender(event, channel);
+    handler(event, ...args);
+  });
+}
+
 function resolveAbsolutePath(candidate, fieldName) {
   if (typeof candidate !== 'string' || candidate.trim().length === 0) {
     throw new Error(`${fieldName} must be a non-empty path`);
   }
   return path.resolve(candidate);
+}
+
+function normalizeCapabilityPath(candidate) {
+  const resolved = path.resolve(candidate);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function isPathInsideRoot(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function getPreviewCapabilityRoots() {
+  return [
+    path.join(app.getPath('userData'), 'preview_sessions'),
+    path.join(os.tmpdir(), 'avikal-runtime', 'preview_sessions'),
+  ].map(normalizeCapabilityPath);
+}
+
+function registerPathCapability(candidate) {
+  if (typeof candidate !== 'string' || candidate.trim().length === 0) {
+    return;
+  }
+  const normalized = normalizeCapabilityPath(candidate);
+  try {
+    const stats = fs.lstatSync(normalized);
+    if (stats.isSymbolicLink()) {
+      throw new Error('Symbolic links are not accepted as capability roots');
+    }
+    if (stats.isDirectory()) {
+      allowedFileRoots.add(normalized);
+      return;
+    }
+  } catch {
+    // Paths selected for save may not exist yet; keep an exact-file capability.
+  }
+  allowedFilePaths.add(normalized);
+}
+
+function registerSaveDestination(candidate) {
+  registerPathCapability(candidate);
+  if (typeof candidate === 'string' && candidate.trim().length > 0) {
+    registerPathCapability(path.dirname(path.resolve(candidate)));
+  }
+}
+
+function registerPathCapabilities(paths) {
+  if (!Array.isArray(paths)) {
+    return;
+  }
+  for (const candidate of paths) {
+    registerPathCapability(candidate);
+  }
+}
+
+function isPathCapabilityAllowed(candidate) {
+  const normalized = normalizeCapabilityPath(candidate);
+  if (allowedFilePaths.has(normalized)) {
+    return true;
+  }
+  for (const root of allowedFileRoots) {
+    if (isPathInsideRoot(root, normalized)) {
+      return true;
+    }
+  }
+  for (const root of getPreviewCapabilityRoots()) {
+    if (isPathInsideRoot(root, normalized)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function assertPathCapability(candidate, action) {
+  if (!isPathCapabilityAllowed(candidate)) {
+    throw new Error(`${action} rejected an unapproved source path`);
+  }
+}
+
+function registerCoreResultCapabilities(value) {
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      registerCoreResultCapabilities(item);
+    }
+    return;
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    if (
+      typeof nested === 'string'
+      && ['path', 'output_file', 'output_dir', 'output_directory', 'destinationPath'].includes(key)
+    ) {
+      if (key === 'output_file') {
+        registerSaveDestination(nested);
+      } else {
+        registerPathCapability(nested);
+      }
+      continue;
+    }
+    if (nested && typeof nested === 'object') {
+      registerCoreResultCapabilities(nested);
+    }
+  }
+}
+
+function normalizeCoreTimeout(method, requestedTimeoutMs) {
+  const policy = CORE_METHOD_POLICIES[method];
+  if (!policy) {
+    throw new Error('Unsupported Avikal core method');
+  }
+  const requested = Number(requestedTimeoutMs);
+  if (policy.timeoutMs === 0) {
+    return 0;
+  }
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return policy.timeoutMs;
+  }
+  return Math.min(Math.floor(requested), policy.timeoutMs);
 }
 
 function normalizeRelativePath(candidate) {
@@ -373,6 +744,7 @@ function hideMainWindow() {
 
 function dispatchLaunchAction(action) {
   if (!action) return;
+  registerPathCapabilities(action.paths);
 
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoadingMainFrame()) {
     mainWindow.webContents.send('launch-action', action);
@@ -385,7 +757,7 @@ function dispatchLaunchAction(action) {
 
 function getAppIconPath() {
   const iconFile = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
-  return isDev
+  return sourceDevMode
     ? path.join(__dirname, '../assets', iconFile)
     : path.join(process.resourcesPath, 'assets', iconFile);
 }
@@ -433,20 +805,28 @@ function createTray() {
 }
 
 function getBackendRoot() {
-  return isDev
+  return sourceDevMode
     ? path.join(__dirname, '../backend')
     : path.join(process.resourcesPath, 'backend');
 }
 
+function getRendererIndexPath() {
+  return path.resolve(__dirname, '../frontend/dist/index.html');
+}
+
 function getPythonRuntimeRoot(backendRoot) {
-  return isDev
+  const sharedRuntimeRoot = path.join(path.dirname(backendRoot), 'backend-runtime');
+  if (!sourceDevMode && fs.existsSync(sharedRuntimeRoot)) {
+    return sharedRuntimeRoot;
+  }
+  return sourceDevMode
     ? path.join(backendRoot, 'venv')
     : path.join(process.resourcesPath, 'backend-runtime');
 }
 
 function getPythonExecutable(backendRoot) {
   const runtimeRoot = getPythonRuntimeRoot(backendRoot);
-  if (isDev) {
+  if (sourceDevMode) {
     return process.platform === 'win32'
       ? path.join(runtimeRoot, 'Scripts', 'python.exe')
       : path.join(runtimeRoot, 'bin', 'python');
@@ -457,12 +837,166 @@ function getPythonExecutable(backendRoot) {
 }
 
 function getPackagedBackendExecutable(backendRoot) {
-  if (isDev) {
+  if (sourceDevMode) {
     return null;
   }
   return process.platform === 'win32'
     ? path.join(backendRoot, 'avikal-backend.exe')
     : path.join(backendRoot, 'avikal-backend');
+}
+
+function getSharedCoreVersionRoot() {
+  const localAppData = process.env.LOCALAPPDATA || app.getPath('userData');
+  return path.join(localAppData, SHARED_CORE_VENDOR_DIR, app.getVersion());
+}
+
+function getSharedCoreBackendRoot(coreRoot) {
+  return path.join(coreRoot, 'backend');
+}
+
+function hashFileIfPresent(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const hash = crypto.createHash('sha256');
+    hash.update(fs.readFileSync(filePath));
+    return hash.digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function getPqcRuntimeExecutable(coreRoot) {
+  return process.platform === 'win32'
+    ? path.join(coreRoot, 'backend-runtime', 'pqc', 'bin', 'openssl.exe')
+    : path.join(coreRoot, 'backend-runtime', 'pqc', 'bin', 'openssl');
+}
+
+function getNativeModulePath(coreRoot) {
+  const candidates = [
+    path.join(coreRoot, 'backend', '_internal', 'avikal_backend', '_native.pyd'),
+    path.join(coreRoot, 'backend', 'avikal_backend', '_native.pyd'),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function readSharedCoreManifest(coreRoot) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(coreRoot, 'core.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function verifySharedCoreManifest(coreRoot, executablePath) {
+  const manifest = readSharedCoreManifest(coreRoot);
+  if (!manifest || manifest.version !== app.getVersion() || manifest.platform !== process.platform) {
+    return false;
+  }
+  if (manifest.executablePath && path.normalize(manifest.executablePath) !== path.normalize(executablePath)) {
+    return false;
+  }
+
+  const nativeModulePath = getNativeModulePath(coreRoot);
+  const pqcExecutable = getPqcRuntimeExecutable(coreRoot);
+  if (!nativeModulePath || !fs.existsSync(pqcExecutable)) {
+    return false;
+  }
+  return manifest.nativeModuleHash === hashFileIfPresent(nativeModulePath)
+    && manifest.pqcRuntimeHash === hashFileIfPresent(pqcExecutable);
+}
+
+function runCoreRuntimeVerification(executablePath) {
+  if (!fs.existsSync(executablePath)) {
+    return false;
+  }
+  const result = spawnSync(executablePath, ['--verify-runtime'], {
+    cwd: path.dirname(executablePath),
+    env: {
+      ...process.env,
+      AVIKAL_USER_DATA_DIR: app.getPath('userData'),
+      AVIKAL_PQC_TEMP_DIR: path.join(app.getPath('userData'), 'pqc-work'),
+    },
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30000,
+  });
+  if (result.status !== 0) {
+    console.warn('Shared Avikal core verification failed:', result.stderr || result.stdout || result.error);
+    return false;
+  }
+  return true;
+}
+
+function verifyCoreExecutable(executablePath, coreRoot) {
+  if (!fs.existsSync(executablePath) || !verifySharedCoreManifest(coreRoot, executablePath)) {
+    return false;
+  }
+  return runCoreRuntimeVerification(executablePath);
+}
+
+function writeSharedCoreManifest(coreRoot, executablePath) {
+  const nativeModulePath = getNativeModulePath(coreRoot);
+  const pqcExecutable = getPqcRuntimeExecutable(coreRoot);
+  if (!nativeModulePath) {
+    throw new Error('Bundled Avikal core is missing the native crypto module');
+  }
+  if (!fs.existsSync(pqcExecutable)) {
+    throw new Error('Bundled Avikal core is missing the PQC runtime');
+  }
+  const manifest = {
+    version: app.getVersion(),
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    executablePath,
+    nativeModuleHash: hashFileIfPresent(nativeModulePath),
+    pqcRuntimeHash: hashFileIfPresent(pqcExecutable),
+    archiveCompatibility: 'avk-v1',
+    installedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.join(coreRoot, 'core.json'), JSON.stringify(manifest, null, 2), 'utf8');
+}
+
+function ensureSharedCoreInstalled(bundledBackendRoot) {
+  if (sourceDevMode || !process.resourcesPath) {
+    return null;
+  }
+  const coreRoot = getSharedCoreVersionRoot();
+  const sharedBackendRoot = getSharedCoreBackendRoot(coreRoot);
+  const sharedExecutable = getPackagedBackendExecutable(sharedBackendRoot);
+  if (sharedExecutable && verifyCoreExecutable(sharedExecutable, coreRoot)) {
+    return sharedBackendRoot;
+  }
+
+  const bundledRuntimeRoot = path.join(process.resourcesPath, 'backend-runtime');
+  const bundledExecutable = getPackagedBackendExecutable(bundledBackendRoot);
+  if (!bundledExecutable || !fs.existsSync(bundledExecutable) || !fs.existsSync(bundledRuntimeRoot)) {
+    return null;
+  }
+
+  const parent = path.dirname(coreRoot);
+  const tempRoot = `${coreRoot}.tmp-${process.pid}`;
+  fs.mkdirSync(parent, { recursive: true });
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+  fs.mkdirSync(tempRoot, { recursive: true });
+  fs.cpSync(bundledBackendRoot, path.join(tempRoot, 'backend'), { recursive: true });
+  fs.cpSync(bundledRuntimeRoot, path.join(tempRoot, 'backend-runtime'), { recursive: true });
+  const tempExecutable = getPackagedBackendExecutable(path.join(tempRoot, 'backend'));
+  const finalExecutable = getPackagedBackendExecutable(sharedBackendRoot);
+  writeSharedCoreManifest(tempRoot, finalExecutable);
+
+  if (!runCoreRuntimeVerification(tempExecutable)) {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    throw new Error('Bundled Avikal core failed verification and cannot be shared');
+  }
+
+  fs.rmSync(coreRoot, { recursive: true, force: true });
+  fs.renameSync(tempRoot, coreRoot);
+  if (!verifyCoreExecutable(finalExecutable, coreRoot)) {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+    throw new Error('Installed Avikal shared core failed manifest verification');
+  }
+  return sharedBackendRoot;
 }
 
 const gotTheLock = app.requestSingleInstanceLock()
@@ -479,23 +1013,24 @@ if (!gotTheLock) {
   });
 }
 
-// Python backend management
+// Avikal core process management
 function startPythonBackend() {
   if (pythonProcess && pythonProcess.exitCode === null) {
     return waitForBackendReady();
   }
 
-  const backendRoot = getBackendRoot();
+  const bundledBackendRoot = getBackendRoot();
+  const backendRoot = ensureSharedCoreInstalled(bundledBackendRoot) || bundledBackendRoot;
   const runtimeRoot = getPythonRuntimeRoot(backendRoot);
   const packagedBackendExecutable = getPackagedBackendExecutable(backendRoot);
-  const usePackagedBackend = !isDev && packagedBackendExecutable && fs.existsSync(packagedBackendExecutable);
-  const pythonScript = path.join(backendRoot, 'api_server.py');
+  const usePackagedBackend = !sourceDevMode && packagedBackendExecutable && fs.existsSync(packagedBackendExecutable);
+  const pythonScript = path.join(backendRoot, 'core_server.py');
   const pythonExecutable = getPythonExecutable(backendRoot);
   let backendCommand = packagedBackendExecutable;
-  let backendArgs = [];
+  let backendArgs = ['--gui-mode'];
 
   if (usePackagedBackend) {
-    console.log(`Starting packaged backend with: ${packagedBackendExecutable}`);
+    console.log(`Starting packaged Avikal core with: ${packagedBackendExecutable}`);
   } else {
     if (!fs.existsSync(pythonExecutable)) {
       throw new Error(`Python runtime not found: ${pythonExecutable}`);
@@ -505,9 +1040,9 @@ function startPythonBackend() {
       throw new Error(`Backend entrypoint not found: ${pythonScript}`);
     }
 
-    console.log(`Starting Python backend with: ${pythonExecutable}`);
+    console.log(`Starting source Avikal core with: ${pythonExecutable}`);
     backendCommand = pythonExecutable;
-    backendArgs = [pythonScript];
+    backendArgs = [pythonScript, '--gui-mode'];
   }
   resetBackendStartupState();
 
@@ -515,10 +1050,8 @@ function startPythonBackend() {
     ...process.env,
     PYTHONIOENCODING: 'utf-8',
     PYTHONUNBUFFERED: '1',
-    AVIKAL_BACKEND_HOST: backendHost,
-    AVIKAL_BACKEND_PORT: String(backendPort),
-    AVIKAL_BACKEND_TOKEN: backendAuthToken,
-    // Pass the Electron executable path to the Python backend.
+    AVIKAL_STDIO_RPC: '1',
+    // Pass the Electron executable path to the Avikal core.
     // drand.py uses this with ELECTRON_RUN_AS_NODE=1 to run the drand helper script
     // using Electron's bundled Node.js runtime — no external Node.js installation needed.
     // This is the official Electron-documented pattern used by VS Code, Cursor, etc.
@@ -526,7 +1059,7 @@ function startPythonBackend() {
     AVIKAL_PQC_TEMP_DIR: path.join(app.getPath('userData'), 'pqc-work'),
   };
 
-  if (!isDev && !usePackagedBackend) {
+  if (!sourceDevMode && !usePackagedBackend) {
     pythonEnv.AVIKAL_USER_DATA_DIR = app.getPath('userData');
     pythonEnv.PYTHONHOME = runtimeRoot;
     pythonEnv.PYTHONPATH = [
@@ -537,7 +1070,7 @@ function startPythonBackend() {
     pythonEnv.PYTHONNOUSERSITE = '1';
   }
 
-  if (!isDev && usePackagedBackend) {
+  if (!sourceDevMode && usePackagedBackend) {
     pythonEnv.AVIKAL_USER_DATA_DIR = app.getPath('userData');
   }
 
@@ -552,27 +1085,24 @@ function startPythonBackend() {
     backendStartupState.spawnError = error;
     console.error('Python process failed to start:', error);
   });
-  
-  pythonProcess.stdout.on('data', (data) => {
-    const message = data.toString();
-    recordBackendOutput(message, 'stdout');
-    console.log(`[Python] ${message}`);
-    if (mainWindow) {
-      mainWindow.webContents.send('backend-log', message);
-    }
-  });
+
+  coreRpcClient = new CoreRpcClient(pythonProcess);
   
   pythonProcess.stderr.on('data', (data) => {
     recordBackendOutput(data.toString(), 'stderr');
-    console.error(`[Python Error] ${data}`);
+    console.error(`[Avikal Core Error] ${data}`);
   });
   
   pythonProcess.on('close', (code) => {
-    console.log(`Python process exited with code ${code}`);
+    console.log(`Avikal core process exited with code ${code}`);
+    if (coreRpcClient) {
+      coreRpcClient.dispose(new Error(`Avikal core exited with code ${code}`));
+      coreRpcClient = null;
+    }
     if (!isQuitting) {
       publishBackendRuntimeStatus(
         code === 0 ? 'stopped' : 'error',
-        code === 0 ? null : `Python backend exited with code ${code}`
+        code === 0 ? null : `Avikal core exited with code ${code}`
       );
     }
   });
@@ -581,6 +1111,10 @@ function startPythonBackend() {
 }
 
 function stopPythonBackend() {
+  if (coreRpcClient) {
+    coreRpcClient.dispose();
+    coreRpcClient = null;
+  }
   if (pythonProcess) {
     pythonProcess.kill();
     pythonProcess = null;
@@ -589,13 +1123,9 @@ function stopPythonBackend() {
 
 async function cleanupBackendPreviewSessions() {
   try {
-    await fetch(`${getBackendBaseUrl()}/api/decrypt/cleanup-all`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        [BACKEND_AUTH_HEADER]: backendAuthToken,
-      },
-    });
+    if (coreRpcClient) {
+      await coreRpcClient.request('preview.cleanupAll', {}, 10000);
+    }
   } catch (error) {
     console.warn('Preview session cleanup failed during shutdown:', error);
   }
@@ -609,8 +1139,7 @@ async function createWindow() {
   }
 
   if (!pythonProcess || pythonProcess.exitCode !== null) {
-    backendPort = await reserveBackendPort();
-    backendAuthToken = crypto.randomBytes(32).toString('hex');
+    coreRpcClient = null;
   }
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -622,6 +1151,9 @@ async function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      webviewTag: false,
+      spellcheck: false,
       preload: path.join(__dirname, 'preload.js')
     },
     frame: false,
@@ -629,7 +1161,7 @@ async function createWindow() {
   });
   
   // Load app immediately
-  if (isDev) {
+  if (frontendDevMode) {
     try {
       await mainWindow.webContents.session.clearCache();
       await mainWindow.webContents.session.clearStorageData({
@@ -638,9 +1170,17 @@ async function createWindow() {
     } catch (error) {
       console.warn('Failed to clear dev renderer cache:', error);
     }
-    mainWindow.loadURL(`http://localhost:5173/?devts=${Date.now()}`);
+    mainWindow.loadURL(`${devServerUrl}/?devts=${Date.now()}`);
   } else {
-    const indexPath = path.join(__dirname, '../frontend/dist/index.html');
+    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [PRODUCTION_RENDERER_CSP],
+        },
+      });
+    });
+    const indexPath = getRendererIndexPath();
     console.log(`Loading frontend from: ${indexPath}`);
     mainWindow.loadFile(indexPath);
   }
@@ -651,7 +1191,7 @@ async function createWindow() {
     mainWindow.show();
   });
 
-  // Start Python backend in the background without blocking the UI
+  // Start the Avikal core in the background without blocking the UI
   publishBackendRuntimeStatus('starting');
   startPythonBackend()
     .then(() => {
@@ -659,7 +1199,7 @@ async function createWindow() {
     })
     .catch((error) => {
       if (isBackendStartupTimeout(error) && pythonProcess && pythonProcess.exitCode === null) {
-        console.warn('Python backend is still starting after initial readiness window:', error);
+        console.warn('Avikal core is still starting after initial readiness window:', error);
         publishBackendRuntimeStatus(
           'starting',
           'Backend is still loading. You can keep the app open while startup finishes.'
@@ -668,11 +1208,11 @@ async function createWindow() {
         return;
       }
 
-      console.error('Failed to start Python backend:', error);
+      console.error('Failed to start Avikal core:', error);
       publishBackendRuntimeStatus('error', error.message || String(error));
       dialog.showErrorBox(
         'RookDuel Avikal Startup Error',
-        `The embedded backend could not be started.\n\n${error.message || error}`
+        `The Avikal core could not be started.\n\n${error.message || error}`
       );
       app.quit();
     });
@@ -699,43 +1239,73 @@ async function createWindow() {
     event.preventDefault();
     hideMainWindow();
   });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedExternalUrl(url)) {
+      require('electron').shell.openExternal(url).catch((error) => {
+        console.error('Failed to open external URL:', error);
+      });
+    }
+    return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedRendererUrl(url)) {
+      event.preventDefault();
+    }
+  });
+
+  mainWindow.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault();
+  });
+
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
+  });
 }
 
 // IPC Handlers
-ipcMain.handle('dialog:openFile', async (event, options) => {
+registerTrustedHandler('dialog:openFile', async (_event, options) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile', 'multiSelections'],
     ...options
   });
+  registerPathCapabilities(result.filePaths);
   return result.canceled ? [] : result.filePaths;
 });
 
-ipcMain.handle('dialog:saveFile', async (event, options) => {
+registerTrustedHandler('dialog:saveFile', async (_event, options) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: 'encrypted.avk',
     filters: [{ name: 'RookDuel Avikal Files', extensions: ['avk'] }],
     ...options
   });
+  if (result.filePath) {
+    registerSaveDestination(result.filePath);
+  }
   return result.filePath;
 });
 
-ipcMain.handle('dialog:openDirectory', async () => {
+registerTrustedHandler('dialog:openDirectory', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory']
   });
+  registerPathCapabilities(result.filePaths);
   return result.filePaths[0];
 });
 
-ipcMain.handle('dialog:openFolders', async () => {
+registerTrustedHandler('dialog:openFolders', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory', 'multiSelections']
   });
+  registerPathCapabilities(result.filePaths);
   return result.canceled ? [] : result.filePaths;
 });
 
 // Recursive directory scanner — builds a full tree for the UI
-ipcMain.handle('fs:scanDirectory', async (event, dirPath) => {
+registerTrustedHandler('fs:scanDirectory', async (_event, dirPath) => {
   try {
+    assertPathCapability(dirPath, 'Directory scan');
     return await buildDirectoryNode(dirPath);
   } catch (error) {
     console.error('fs:scanDirectory error:', error);
@@ -744,7 +1314,7 @@ ipcMain.handle('fs:scanDirectory', async (event, dirPath) => {
   }
 });
 
-ipcMain.handle('file:saveText', async (event, options = {}) => {
+registerTrustedHandler('file:saveText', async (_event, options = {}) => {
   const content = typeof options.content === 'string' ? options.content : '';
   if (Buffer.byteLength(content, 'utf8') > MAX_SAVED_TEXT_BYTES) {
     throw new Error('Text export is too large to save safely');
@@ -761,11 +1331,13 @@ ipcMain.handle('file:saveText', async (event, options = {}) => {
   const destination = resolveAbsolutePath(result.filePath, 'Destination path');
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
   await fs.promises.writeFile(destination, content, 'utf8');
+  registerSaveDestination(destination);
   return destination;
 });
 
-ipcMain.handle('file:exportCopy', async (event, options = {}) => {
+registerTrustedHandler('file:exportCopy', async (_event, options = {}) => {
   const source = resolveAbsolutePath(options.sourcePath, 'Source path');
+  assertPathCapability(source, 'File export');
   const sourceStats = await fs.promises.stat(source);
   if (!sourceStats.isFile()) {
     throw new Error('Source path must point to a file');
@@ -782,10 +1354,11 @@ ipcMain.handle('file:exportCopy', async (event, options = {}) => {
   const destination = resolveAbsolutePath(result.filePath, 'Destination path');
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
   await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+  registerSaveDestination(destination);
   return destination;
 });
 
-ipcMain.handle('file:exportFilesToDirectory', async (event, options = {}) => {
+registerTrustedHandler('file:exportFilesToDirectory', async (_event, options = {}) => {
   const fileEntries = Array.isArray(options.files) ? options.files : [];
   if (fileEntries.length === 0) {
     throw new Error('At least one file is required for export');
@@ -804,11 +1377,13 @@ ipcMain.handle('file:exportFilesToDirectory', async (event, options = {}) => {
 
   for (const entry of fileEntries) {
     const source = resolveAbsolutePath(entry?.sourcePath, 'Source path');
+    assertPathCapability(source, 'Directory export');
     const relativePath = normalizeRelativePath(entry?.relativePath);
     const destination = path.join(destinationRoot, relativePath);
 
     await fs.promises.mkdir(path.dirname(destination), { recursive: true });
     await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+    registerSaveDestination(destination);
     copiedCount += 1;
   }
 
@@ -818,14 +1393,15 @@ ipcMain.handle('file:exportFilesToDirectory', async (event, options = {}) => {
   };
 });
 
-ipcMain.handle('shell:openPath', async (event, targetPath) => {
+registerTrustedHandler('shell:openPath', async (_event, targetPath) => {
   const { shell } = require('electron');
   const resolvedPath = resolveAbsolutePath(targetPath, 'Path');
+  assertPathCapability(resolvedPath, 'Open path');
   await fs.promises.access(resolvedPath, fs.constants.F_OK);
   return shell.openPath(resolvedPath);
 });
 
-ipcMain.handle('shell:openExternal', async (event, url) => {
+registerTrustedHandler('shell:openExternal', async (_event, url) => {
   const { shell } = require('electron');
   if (!isAllowedExternalUrl(url)) {
     throw new Error('Only https and mailto links can be opened externally');
@@ -834,15 +1410,15 @@ ipcMain.handle('shell:openExternal', async (event, url) => {
   return true;
 });
 
-ipcMain.on('theme:update', (event, { isDark }) => {
+registerTrustedListener('theme:update', (_event, { isDark }) => {
   // Native titleBarOverlay is removed; theme context is handled purely via React/CSS.
 });
 
-ipcMain.handle('window:minimize', () => {
+registerTrustedHandler('window:minimize', async () => {
   mainWindow.minimize();
 });
 
-ipcMain.handle('window:maximize', () => {
+registerTrustedHandler('window:maximize', async () => {
   if (mainWindow.isMaximized()) {
     mainWindow.unmaximize();
   } else {
@@ -850,41 +1426,80 @@ ipcMain.handle('window:maximize', () => {
   }
 });
 
-ipcMain.handle('window:close', () => {
+registerTrustedHandler('window:close', async () => {
   hideMainWindow();
 });
 
-ipcMain.handle('launchAction:getPending', async () => {
+registerTrustedHandler('launchAction:getPending', async () => {
   const action = pendingLaunchAction;
   pendingLaunchAction = null;
+  if (action) {
+    registerPathCapabilities(action.paths);
+  }
   return action;
 });
 
-ipcMain.handle('backend:getStatus', async () => {
+registerTrustedHandler('backend:getStatus', async () => {
   return backendRuntimeStatus;
 });
 
-ipcMain.handle('backend:getRequestConfig', async () => {
-  return createBackendRequestConfig();
+registerTrustedHandler('app:getInfo', async () => {
+  return {
+    name: app.getName(),
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    packaged: app.isPackaged,
+    updateFeed: UPDATE_RELEASES_PAGE_URL,
+  };
+});
+
+registerTrustedHandler('updates:check', async () => {
+  return checkLatestRelease();
+});
+
+registerTrustedHandler('updates:openLatest', async () => {
+  const { shell } = require('electron');
+  await shell.openExternal(UPDATE_RELEASES_PAGE_URL);
+  return true;
+});
+
+registerTrustedHandler('core:invoke', async (_event, method, params = {}, timeoutMs = 300000) => {
+  if (typeof method !== 'string' || method.length === 0 || method.length > 128) {
+    throw new Error('Invalid Avikal core method');
+  }
+  if (!coreRpcClient) {
+    throw new Error('Avikal core is not ready');
+  }
+  const safeTimeoutMs = normalizeCoreTimeout(method, timeoutMs);
+  const result = await coreRpcClient.request(method, params && typeof params === 'object' ? params : {}, safeTimeoutMs);
+  registerCoreResultCapabilities(result);
+  return result;
 });
 
 // Secure token storage
-ipcMain.handle('safeStorage:encrypt', async (event, data) => {
+registerTrustedHandler('safeStorage:encrypt', async (_event, data) => {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('Secure storage is unavailable on this system')
+  }
+  if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > 16384) {
+    throw new Error('Secure storage input must be a string up to 16 KB')
   }
   return safeStorage.encryptString(data).toString('base64')
 })
 
-ipcMain.handle('safeStorage:decrypt', async (event, encryptedData) => {
+registerTrustedHandler('safeStorage:decrypt', async (_event, encryptedData) => {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('Secure storage is unavailable on this system')
+  }
+  if (typeof encryptedData !== 'string' || encryptedData.length > 65536) {
+    throw new Error('Secure storage payload is invalid')
   }
   const buffer = Buffer.from(encryptedData, 'base64')
   return safeStorage.decryptString(buffer)
 })
 
-ipcMain.handle('safeStorage:isAvailable', async () => {
+registerTrustedHandler('safeStorage:isAvailable', async () => {
   return safeStorage.isEncryptionAvailable()
 })
 

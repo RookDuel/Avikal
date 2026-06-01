@@ -16,6 +16,7 @@ BACKEND_OUTPUT_ROOT = PROJECT_ROOT / ".app-build" / "backend"
 PQC_RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "pqc"
 PYINSTALLER_SPEC = BACKEND_ROOT / "pyinstaller-backend.spec"
 PYINSTALLER_TMP_ROOT = PROJECT_ROOT / ".tmp_build" / "pyinstaller-backend"
+NATIVE_BUILD_SCRIPT = BACKEND_ROOT / "scripts" / "build_native_extension.py"
 
 
 def copy_pqc_runtime() -> bool:
@@ -53,6 +54,16 @@ def build_backend_bundle() -> Path:
     return executable_path
 
 
+def build_native_extension() -> None:
+    if not NATIVE_BUILD_SCRIPT.exists():
+        raise FileNotFoundError(f"Missing native build script: {NATIVE_BUILD_SCRIPT}")
+    subprocess.run([sys.executable, str(NATIVE_BUILD_SCRIPT)], cwd=str(PROJECT_ROOT), check=True)
+
+
+def verify_packaged_backend_native_runtime(backend_executable: Path) -> None:
+    subprocess.run([str(backend_executable), "--verify-native-runtime"], cwd=str(BACKEND_OUTPUT_ROOT), check=True)
+
+
 def write_manifest(*, backend_executable: Path, pqc_runtime_present: bool) -> None:
     manifest = {
         "runtime_root": str(OUTPUT_ROOT),
@@ -75,8 +86,10 @@ def main() -> None:
         shutil.rmtree(PYINSTALLER_TMP_ROOT)
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    build_native_extension()
     pqc_runtime_present = copy_pqc_runtime()
     backend_executable = build_backend_bundle()
+    verify_packaged_backend_native_runtime(backend_executable)
     write_manifest(backend_executable=backend_executable, pqc_runtime_present=pqc_runtime_present)
 
     print(f"Prepared production backend bundle at {BACKEND_OUTPUT_ROOT}")

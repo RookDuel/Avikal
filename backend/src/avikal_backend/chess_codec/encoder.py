@@ -1,82 +1,83 @@
-"""
-Chess PGN encoder - UNLIMITED VARIATIONS version for Time Capsule
-Uses mainline + distributed variations with NO LIMIT on variations per move.
-
-Key improvements:
-- Removed MAX_VARIATIONS_PER_MOVE limit
-- Round-robin distribution ensures even spread
-- Natural limit: stops when all legal moves used
-- Keeps MAX_VAR_PLIES = 40 for variation depth
+"""Chess PGN encoder for Avikal metadata integers.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Atharva Sen Barai.
 """
 
+import os
+
 from .. import chess
 
 
-class ChessGenerator:
+def _escape_tag(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
-    """Encodes NUM into a single chess game with NESTED RECURSIVE variations."""
-    MAX_VAR_PLIES = 40  # Max plies for each variation branch (applies to all levels)
-    MAX_MAINLINE_PLIES = 250  # Max plies for mainline (forces use of variations)
-    VARIATIONS_PER_ROUND = 5  # Number of variations to add per position per round
-    MAX_RECURSION_DEPTH = 10  # Maximum nesting depth (only used if USE_DEPTH_LIMIT = True)
-    USE_DEPTH_LIMIT = False  # Set to True to enforce MAX_RECURSION_DEPTH, False for unlimited
-    
+
+def _format_ply(board: chess.Board, move: chess.Move, legal_moves: list) -> str:
+    prefix = f"{board.fullmove_number}. " if board.turn else f"{board.fullmove_number}... "
+    return prefix + board.san(move, legal_moves)
+
+
+class ChessGenerator:
+    """Encode integers into a single chess game with recursive variations."""
+
+    MAX_VAR_PLIES = 40
+    MAX_MAINLINE_PLIES = 250
+    VARIATIONS_PER_ROUND = 5
+    MAX_RECURSION_DEPTH = 10
+    USE_DEPTH_LIMIT = False
+
     def __init__(self, variations_per_round: int = 5, use_depth_limit: bool = False):
-        """
-        Initialize encoder with nested variation support.
-        
-        Args:
-            variations_per_round: Number of variations to add per position per round.
-                                 Default is 5.
-            use_depth_limit: If True, enforce MAX_RECURSION_DEPTH limit.
-                           If False, nest as deep as needed (natural limit: remaining=0).
-                           Default is False (unlimited nesting).
-        """
+        """Initialize encoder variation settings."""
         self.variations_per_round = max(1, variations_per_round)
         self.use_depth_limit = use_depth_limit
-        
-        # Stats tracking
+        self._move_text = {}
         self.stats = {
-            'mainline_plies': 0,
-            'variation_plies': 0,
-            'total_variations': 0,
-            'total_plies': 0,
-            'max_variations_at_position': 0,
-            'positions_with_variations': 0,
-            'max_nesting_depth': 0,  # Track deepest nesting level
-            'total_variation_branches': 0  # Track all variation branches at all levels
+            "mainline_plies": 0,
+            "variation_plies": 0,
+            "total_variations": 0,
+            "total_plies": 0,
+            "max_variations_at_position": 0,
+            "positions_with_variations": 0,
+            "max_nesting_depth": 0,
+            "total_variation_branches": 0,
         }
-    
+
     def get_stats(self) -> dict:
         """Return encoding statistics."""
         return self.stats.copy()
-    
+
     def _reset_stats(self):
-        """Reset stats for new encoding."""
+        """Reset stats for a new encoding run."""
+        self._move_text = {}
         self.stats = {
-            'mainline_plies': 0,
-            'variation_plies': 0,
-            'total_variations': 0,
-            'total_plies': 0,
-            'max_variations_at_position': 0,
-            'positions_with_variations': 0,
-            'max_nesting_depth': 0,
-            'total_variation_branches': 0
+            "mainline_plies": 0,
+            "variation_plies": 0,
+            "total_variations": 0,
+            "total_plies": 0,
+            "max_variations_at_position": 0,
+            "positions_with_variations": 0,
+            "max_nesting_depth": 0,
+            "total_variation_branches": 0,
         }
-    
+
     def encode_to_pgn(self, num: int) -> str:
-        """Encode NUM into a single chess PGN with unlimited distributed variations."""
+        """Encode NUM into a single chess PGN."""
         if num < 1:
             raise ValueError("NUM must be >= 1")
-        
+
+        if self._native_route_allowed():
+            from .native_bridge import native_chess_available, native_encode_chess_pgn_integer
+
+            if native_chess_available():
+                pgn_text, native_stats = native_encode_chess_pgn_integer(num, self.variations_per_round)
+                self._reset_stats()
+                self.stats.update({key: int(value) for key, value in native_stats.items() if key in self.stats})
+                return pgn_text
+
         self._reset_stats()
-        
         game = chess.pgn.Game()
-        
-        # Set custom PGN headers
+
         game.headers["Event"] = "Chess PGN Crypto"
         game.headers["Site"] = "Encrypted Data"
         game.headers["Date"] = "????.??.??"
@@ -84,292 +85,250 @@ class ChessGenerator:
         game.headers["White"] = "RookDuel Encode"
         game.headers["Black"] = "Message"
         game.headers["Result"] = "*"
-        game.headers["VariationsPerRound"] = str(self.variations_per_round)  # Store for decoder
-        
-        # Step 1: Encode mainline first
+        game.headers["VariationsPerRound"] = str(self.variations_per_round)
+
         remaining = self._encode_mainline(game, num)
-        
-        # Step 2: If data remains, distribute variations across mainline moves
-        # ROUND-ROBIN: Each position gets variations evenly
         if remaining > 0:
             remaining = self._distribute_variations(game, remaining)
-        
+
         if remaining > 0:
             raise ValueError(f"Could not encode all data (remaining: {remaining})")
-        
-        # Calculate total plies
-        self.stats['total_plies'] = self.stats['mainline_plies'] + self.stats['variation_plies']
-        
-        return str(game)
-    
+
+        self.stats["total_plies"] = self.stats["mainline_plies"] + self.stats["variation_plies"]
+        return self._export_generated_pgn(game)
+
+    def _native_route_allowed(self) -> bool:
+        """Use Rust only for the production codec shape it can prove by parity."""
+        return (
+            os.environ.get("AVIKAL_CHESS_CODEC_FORCE_PYTHON") != "1"
+            and self.MAX_MAINLINE_PLIES == 250
+            and self.MAX_VAR_PLIES == 40
+            and not self.use_depth_limit
+        )
+
+    def _add_encoded_move(self, node: chess.pgn.GameNode, board: chess.Board, move: chess.Move, legal_moves: list) -> chess.pgn.GameNode:
+        """Add a move and cache its PGN text while the source board is already available."""
+        move_text = _format_ply(board, move, legal_moves)
+        child = node.add_variation(move)
+        self._move_text[id(child)] = move_text
+        board.push(move)
+        return child
+
+    def _export_generated_pgn(self, game: chess.pgn.Game) -> str:
+        """Write the generated PGN using cached SAN text from encode time."""
+        ordered = []
+        seen = set()
+        for tag in chess.pgn.MAIN_TAGS:
+            if tag in game.headers:
+                ordered.append((tag, game.headers[tag]))
+                seen.add(tag)
+        for tag, value in game.headers.items():
+            if tag not in seen:
+                ordered.append((tag, value))
+
+        header_lines = [f'[{name} "{_escape_tag(value)}"]' for name, value in ordered]
+        movetext = self._write_cached_line(game)
+        movetext.append(game.headers.get("Result", "*"))
+        return "\n".join(header_lines) + "\n\n" + " ".join(movetext).strip() + "\n"
+
+    def _write_cached_branch(self, branch: chess.pgn.ChildNode) -> str:
+        segments = [self._move_text.get(id(branch))]
+        if segments[0] is None:
+            raise ValueError("Generated PGN is missing cached move text")
+        segments.extend(self._write_cached_line(branch))
+        return " ".join(segments)
+
+    def _write_cached_line(self, node: chess.pgn.GameNode) -> list[str]:
+        segments = []
+        cursor = node
+        while cursor.variations:
+            mainline = cursor.variations[0]
+            move_text = self._move_text.get(id(mainline))
+            if move_text is None:
+                raise ValueError("Generated PGN is missing cached mainline text")
+            segments.append(move_text)
+            for sideline in cursor.variations[1:]:
+                segments.append(f"({self._write_cached_branch(sideline)})")
+            cursor = mainline
+        return segments
+
     def _encode_mainline(self, game: chess.pgn.Game, num: int) -> int:
-        """
-        Encode into mainline with MAX_MAINLINE_PLIES limit.
-        
-        This ensures balanced usage between mainline and variations.
-        After 250 plies, remaining data goes into nested variations.
-        """
+        """Encode the first segment into the mainline."""
         node = game
         remaining = num
-        
-        while remaining > 0 and self.stats['mainline_plies'] < self.MAX_MAINLINE_PLIES:
-            board = node.board()
-            if board.is_game_over():
-                break
-            
+        board = chess.Board()
+
+        while remaining > 0 and self.stats["mainline_plies"] < self.MAX_MAINLINE_PLIES:
             legal_moves = sorted(board.legal_moves, key=lambda m: m.uci())
             if not legal_moves:
                 break
-            
+
             base = len(legal_moves)
             move_index = (remaining - 1) % base
             remaining = (remaining - 1) // base
-            
-            node = node.add_variation(legal_moves[move_index])
-            self.stats['mainline_plies'] += 1
-        
+
+            node = self._add_encoded_move(node, board, legal_moves[move_index], legal_moves)
+            self.stats["mainline_plies"] += 1
+
         return remaining
-    
+
     def _distribute_variations(self, game: chess.pgn.Game, num: int) -> int:
-        """
-        Distribute variations using NESTED RECURSIVE structure.
-        
-        Algorithm:
-        1. Add N variations to each mainline position
-        2. If more data remains, recursively add N sub-variations to end of each variation
-        3. Continue recursively until data encoded or max depth reached
-        
-        Structure:
-        Mainline → V1, V2, V3, V4, V5
-                   ├─ V1 → V1.1, V1.2, V1.3, V1.4, V1.5
-                   │       └─ V1.1 → V1.1.1, V1.1.2, ...
-                   ├─ V2 → V2.1, V2.2, ...
-                   └─ ...
-        """
-        remaining = num
-        
-        # Start recursive distribution from mainline (depth 0)
-        remaining = self._distribute_variations_recursive(game, remaining, depth=0)
-        
-        return remaining
-    
-    def _distribute_variations_recursive(self, parent_node: chess.pgn.Game, 
-                                        num: int, depth: int) -> int:
-        """
-        Recursively distribute variations at current depth level.
-        
-        Args:
-            parent_node: Node to add variations to (could be game or variation)
-            num: Remaining data to encode
-            depth: Current recursion depth (0 = mainline level)
-        
-        Returns:
-            Remaining data after encoding
-        """
-        # Natural stopping conditions (always checked)
+        """Distribute remaining data across recursive variations."""
+        return self._distribute_variations_recursive(game, num, depth=0)
+
+    def _distribute_variations_recursive(self, parent_node: chess.pgn.Game, num: int, depth: int) -> int:
+        """Recursively distribute variations at the current depth."""
         if num == 0:
-            return num  # No more data to encode
-        
-        # Optional depth limit (only if USE_DEPTH_LIMIT = True)
+            return num
         if self.use_depth_limit and depth >= self.MAX_RECURSION_DEPTH:
-            return num  # Depth limit reached
-        
+            return num
+
         remaining = num
-        
-        # Collect positions at current level
         positions = self._collect_positions_at_level(parent_node, depth)
-        
         if not positions:
             return remaining
-        
-        # Track if we're at mainline level for stats
-        is_mainline_level = (depth == 0)
-        
-        # Round-robin: Add N variations to each position at this level
-        round_number = 0
-        variation_endpoints = []  # Track endpoints for recursive sub-variations
-        
+
+        is_mainline_level = depth == 0
+        variation_endpoints = []
+
         while remaining > 0:
             made_progress = False
-            
             for pos_info in positions:
                 if remaining == 0:
                     break
-                
-                node = pos_info['node']
-                legal_moves = pos_info['legal_moves']
-                
-                # Calculate available moves
-                used_moves = {v.move for v in node.variations}
-                available_moves = [m for m in legal_moves if m not in used_moves]
-                
+
+                node = pos_info["node"]
+                legal_moves = pos_info["legal_moves"]
+                board = pos_info["board"]
+                available_moves = pos_info["available_moves"]
                 if not available_moves:
                     continue
-                
-                # Add N variations at this position
+
                 for _ in range(self.variations_per_round):
                     if remaining == 0 or not available_moves:
                         break
-                    
-                    # Add single variation and get its endpoint
+
                     remaining, endpoint = self._add_single_variation_with_endpoint(
-                        node, available_moves, remaining
+                        node,
+                        board,
+                        legal_moves,
+                        available_moves,
+                        remaining,
                     )
-                    
                     if endpoint:
                         variation_endpoints.append(endpoint)
-                    
-                    self.stats['total_variations'] += 1
-                    self.stats['total_variation_branches'] += 1
+
+                    self.stats["total_variations"] += 1
+                    self.stats["total_variation_branches"] += 1
                     made_progress = True
-                    
-                    # Recalculate available moves
-                    used_moves = {v.move for v in node.variations}
-                    available_moves = [m for m in legal_moves if m not in used_moves]
-            
+
             if not made_progress:
                 break
-            
-            round_number += 1
-        
-        # Update stats for mainline level
+
         if is_mainline_level:
             for pos_info in positions:
-                node = pos_info['node']
+                node = pos_info["node"]
                 num_vars = len(node.variations) - 1
                 if num_vars > 0:
-                    self.stats['positions_with_variations'] += 1
-                self.stats['max_variations_at_position'] = max(
-                    self.stats['max_variations_at_position'], 
-                    num_vars
+                    self.stats["positions_with_variations"] += 1
+                self.stats["max_variations_at_position"] = max(
+                    self.stats["max_variations_at_position"],
+                    num_vars,
                 )
-        
-        # Update max nesting depth
-        self.stats['max_nesting_depth'] = max(self.stats['max_nesting_depth'], depth)
-        
-        # If data remains, recursively add sub-variations to variation endpoints
-        # Natural limit: stops when remaining = 0 (no more data)
-        # Optional limit: stops when depth limit reached (if USE_DEPTH_LIMIT = True)
+
+        self.stats["max_nesting_depth"] = max(self.stats["max_nesting_depth"], depth)
         if remaining > 0 and variation_endpoints:
-            # Check depth limit only if enabled
             if not self.use_depth_limit or depth + 1 < self.MAX_RECURSION_DEPTH:
                 for endpoint in variation_endpoints:
                     if remaining == 0:
                         break
                     remaining = self._distribute_variations_recursive(endpoint, remaining, depth + 1)
-        
+
         return remaining
-    
+
     def _collect_positions_at_level(self, parent_node, depth: int) -> list:
-        """
-        Collect positions at current level.
-        
-        For depth 0: Collect mainline positions
-        For depth > 0: Parent node is a variation endpoint, return it as single position
-        """
+        """Collect positions at the current variation level."""
         if depth == 0:
-            # Mainline level - collect all mainline positions
             return self._collect_mainline_positions(parent_node)
-        else:
-            # Variation level - parent_node is the endpoint of a variation
-            # Return it as a single position to add sub-variations to
-            board = parent_node.board()
-            legal_moves = sorted(board.legal_moves, key=lambda m: m.uci())
-            
-            if len(legal_moves) > 0:  # Need at least 1 move for variations
-                return [{
-                    'node': parent_node,
-                    'legal_moves': legal_moves,
-                    'board': board.copy()
-                }]
-            return []
-    
+
+        board = parent_node.board()
+        legal_moves = sorted(board.legal_moves, key=lambda m: m.uci())
+        if legal_moves:
+            return [{
+                "node": parent_node,
+                "legal_moves": legal_moves,
+                "available_moves": legal_moves[:],
+                "board": board.copy(),
+            }]
+        return []
+
     def _collect_mainline_positions(self, game: chess.pgn.Game) -> list:
-        """Collect info about all mainline positions."""
+        """Collect all mainline positions that can hold variations."""
         positions = []
         node = game
         board = chess.Board()
-        
+
         while node.variations:
             legal_moves = sorted(board.legal_moves, key=lambda m: m.uci())
-            
-            if len(legal_moves) > 1:  # Need at least 2 moves for variations
+
+            if len(legal_moves) > 1:
                 mainline_move = node.variations[0].move
                 mainline_index = legal_moves.index(mainline_move)
-                
-                positions.append({
-                    'node': node,
-                    'mainline_index': mainline_index,
-                    'legal_moves': legal_moves,
-                    'board': board.copy()
-                })
-            
+                positions.append(
+                    {
+                        "node": node,
+                        "mainline_index": mainline_index,
+                        "legal_moves": legal_moves,
+                        "available_moves": [m for m in legal_moves if m != mainline_move],
+                        "board": board.copy(),
+                    }
+                )
+
             board.push(node.variations[0].move)
             node = node.variations[0]
-        
+
         return positions
-    
-    def _add_single_variation(self, node: chess.pgn.GameNode, 
-                              available_moves: list, num: int) -> int:
-        """Add a single variation at a node, encoding data into it."""
-        remaining, _ = self._add_single_variation_with_endpoint(node, available_moves, num)
+
+    def _add_single_variation(self, node: chess.pgn.GameNode, available_moves: list, num: int) -> int:
+        """Add a single variation and return remaining data."""
+        remaining, _ = self._add_single_variation_with_endpoint(node, node.board(), available_moves, available_moves, num)
         return remaining
-    
-    def _add_single_variation_with_endpoint(self, node: chess.pgn.GameNode, 
-                                           available_moves: list, num: int) -> tuple:
-        """
-        Add a single variation at a node, encoding data into it.
-        Returns (remaining, endpoint_node) where endpoint is the last node of the variation.
-        """
+
+    def _add_single_variation_with_endpoint(self, node: chess.pgn.GameNode, board: chess.Board, legal_moves: list, available_moves: list, num: int) -> tuple:
+        """Add a single variation and return remaining data plus endpoint."""
         if not available_moves or num == 0:
             return num, None
-        
+
         remaining = num
-        
-        # Select which move to use for this variation
         base = len(available_moves)
         move_index = (remaining - 1) % base
         remaining = (remaining - 1) // base
-        
-        # Create the variation
-        var_node = node.add_variation(available_moves[move_index])
-        self.stats['variation_plies'] += 1
-        
-        # Encode more data along this variation branch (up to MAX_VAR_PLIES)
-        remaining, endpoint = self._encode_variation_branch_with_endpoint(var_node, remaining, 1)
-        
-        return remaining, endpoint
-    
-    def _encode_variation_branch(self, node: chess.pgn.GameNode, 
-                                  num: int, ply_count: int) -> int:
-        """Encode data along a variation branch, respecting MAX_VAR_PLIES."""
-        remaining, _ = self._encode_variation_branch_with_endpoint(node, num, ply_count)
+        selected_move = available_moves.pop(move_index)
+
+        branch_board = board.copy()
+        var_node = self._add_encoded_move(node, branch_board, selected_move, legal_moves)
+        self.stats["variation_plies"] += 1
+        return self._encode_variation_branch_with_endpoint(var_node, branch_board, remaining, 1)
+
+    def _encode_variation_branch(self, node: chess.pgn.GameNode, num: int, ply_count: int) -> int:
+        """Encode data along a variation branch."""
+        remaining, _ = self._encode_variation_branch_with_endpoint(node, node.board(), num, ply_count)
         return remaining
-    
-    def _encode_variation_branch_with_endpoint(self, node: chess.pgn.GameNode, 
-                                               num: int, ply_count: int) -> tuple:
-        """
-        Encode data along a variation branch, respecting MAX_VAR_PLIES.
-        Returns (remaining, endpoint_node) where endpoint is the last node.
-        """
+
+    def _encode_variation_branch_with_endpoint(self, node: chess.pgn.GameNode, board: chess.Board, num: int, ply_count: int) -> tuple:
+        """Encode a variation branch and return its endpoint."""
         if num == 0 or ply_count >= self.MAX_VAR_PLIES:
-            return num, node  # Return current node as endpoint
-        
-        board = node.board()
-        if board.is_game_over():
             return num, node
-        
+
         legal_moves = sorted(board.legal_moves, key=lambda m: m.uci())
         if not legal_moves:
             return num, node
-        
+
         remaining = num
         base = len(legal_moves)
         move_index = (remaining - 1) % base
         remaining = (remaining - 1) // base
-        
-        next_node = node.add_variation(legal_moves[move_index])
-        self.stats['variation_plies'] += 1
-        
-        # Continue encoding in this branch
-        return self._encode_variation_branch_with_endpoint(next_node, remaining, ply_count + 1)
+
+        next_node = self._add_encoded_move(node, board, legal_moves[move_index], legal_moves)
+        self.stats["variation_plies"] += 1
+        return self._encode_variation_branch_with_endpoint(next_node, board, remaining, ply_count + 1)
