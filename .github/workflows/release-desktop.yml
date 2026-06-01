@@ -57,9 +57,10 @@ jobs:
       - name: Install OpenSSL PQC runtime build tools
         shell: powershell
         run: |
-          choco install strawberryperl nasm -y --no-progress
+          choco install strawberryperl nasm nsis -y --no-progress
           "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Ensure PQC runtime is available
         shell: powershell
@@ -110,7 +111,7 @@ jobs:
         shell: powershell
         run: |
           $cliInstallerExe = (Resolve-Path "dist\RookDuel Avikal CLI-beta.exe").Path
-          & $cliInstallerExe
+          & $cliInstallerExe /S
           if ($LASTEXITCODE -ne 0) {
             throw "CLI installer failed during smoke test."
           }
@@ -143,10 +144,16 @@ jobs:
           if (-not (Test-Path -LiteralPath $installerExe)) {
             throw "Installer executable was not produced in dist."
           }
+          if ((Get-Item -LiteralPath $installerExe).Length -lt 50MB) {
+            throw "GUI installer is too small to be a bundled local installer. Refusing to release: $((Get-Item -LiteralPath $installerExe).Length) bytes."
+          }
 
           $cliInstallerExe = Join-Path (Resolve-Path dist) "RookDuel Avikal CLI-beta.exe"
           if (-not (Test-Path -LiteralPath $cliInstallerExe)) {
             throw "CLI installer executable was not produced in dist."
+          }
+          if ((Get-Item -LiteralPath $cliInstallerExe).Length -lt 25MB) {
+            throw "CLI installer is too small to be a bundled local installer. Refusing to release: $((Get-Item -LiteralPath $cliInstallerExe).Length) bytes."
           }
 
           $installerHash = (Get-FileHash -LiteralPath $installerExe -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -99,7 +99,7 @@ interface UpdateCheckPayload {
 
 const CUSTOM_AAVRIT_REQUEST_URL =
   import.meta.env.VITE_CUSTOM_AAVRIT_REQUEST_URL ||
-  'https://avikal.rookdue.tech/aavrit'
+  'https://avikal.rookduel.tech/aavrit'
 const DOCS_URL = import.meta.env.VITE_AVIKAL_DOCS_URL || 'https://avikal.rookduel.tech/docs'
 const SUPPORT_URL = import.meta.env.VITE_AVIKAL_SUPPORT_URL || 'https://avikal.rookduel.tech/support'
 const SECURITY_URL = import.meta.env.VITE_AVIKAL_SECURITY_URL || 'https://avikal.rookduel.tech/security'

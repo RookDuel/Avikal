@@ -42,6 +42,30 @@ function Get-Sha256Hex {
     }
 }
 
+function Resolve-Makensis {
+    $command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $candidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
+        (Join-Path $env:ProgramFiles "NSIS\makensis.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "NSIS makensis.exe was not found. Install NSIS before building the CLI installer."
+}
+
+function ConvertTo-NsisString {
+    param([string]$Value)
+    return ($Value -replace '"', '$\"')
+}
+
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $Version = Get-ProjectVersion -ProjectRoot $projectRoot -ExplicitVersion $Version
 
@@ -63,9 +87,8 @@ try {
     $distRoot = Join-Path $projectRoot "dist"
     $workRoot = Join-Path $projectRoot ".tmp_build\windows-cli-installer"
     $payloadRoot = Join-Path $workRoot "payload"
-    $payloadZip = Join-Path $workRoot "avikal-cli-payload.zip"
     $installerPath = Join-Path $distRoot "RookDuel Avikal CLI-beta.exe"
-    $markerText = "AVIKAL_CLI_INSTALLER_PAYLOAD_V1"
+    $nsiPath = Join-Path $workRoot "avikal-cli-installer.nsi"
 
     if (Test-Path -LiteralPath $workRoot) {
         Remove-Item -LiteralPath $workRoot -Recurse -Force
@@ -78,126 +101,82 @@ try {
     Copy-RequiredDirectory -Source (Join-Path $projectRoot "packaging\windows") -Destination (Join-Path $payloadRoot "packaging\windows")
     Copy-Item -LiteralPath (Join-Path $projectRoot "package.json") -Destination (Join-Path $payloadRoot "package.json") -Force
 
-    Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
-
     if (Test-Path -LiteralPath $installerPath) {
         Remove-Item -LiteralPath $installerPath -Force
     }
 
-    $escapedMarker = $markerText
-    $source = @"
-using System;
-using System.Diagnostics;
-using System.IO;
-using System.IO.Compression;
-using System.Text;
+    $payloadRootForNsis = ConvertTo-NsisString -Value $payloadRoot
+    $installerPathForNsis = ConvertTo-NsisString -Value $installerPath
+    $versionForNsis = ConvertTo-NsisString -Value $Version
+    $nsisScript = @"
+Unicode true
+RequestExecutionLevel user
+Name "RookDuel Avikal CLI Beta"
+OutFile "$installerPathForNsis"
+InstallDir "`$LOCALAPPDATA\Programs\RookDuel Avikal CLI"
+BrandingText "RookDuel Avikal CLI"
+SetCompressor /SOLID lzma
 
-public static class AvikalCliInstaller
-{
-    private const string MarkerText = "$escapedMarker";
+!include "MUI2.nsh"
+!include "LogicLib.nsh"
 
-    public static int Main(string[] args)
-    {
-        string tempRoot = Path.Combine(Path.GetTempPath(), "avikal-cli-installer-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            Directory.CreateDirectory(tempRoot);
-            string exePath = Process.GetCurrentProcess().MainModule.FileName;
-            byte[] allBytes = File.ReadAllBytes(exePath);
-            byte[] marker = Encoding.ASCII.GetBytes(MarkerText);
-            if (allBytes.Length < marker.Length + 8)
-            {
-                throw new InvalidOperationException("Installer payload marker is missing.");
-            }
+!define MUI_ABORTWARNING
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
 
-            int markerOffset = allBytes.Length - marker.Length;
-            for (int i = 0; i < marker.Length; i++)
-            {
-                if (allBytes[markerOffset + i] != marker[i])
-                {
-                    throw new InvalidOperationException("Installer payload marker is invalid.");
-                }
-            }
+Section "Install"
+  SetOutPath "`$INSTDIR\payload"
+  File /r "$payloadRootForNsis\*.*"
 
-            long payloadLength = BitConverter.ToInt64(allBytes, markerOffset - 8);
-            long payloadOffset = markerOffset - 8 - payloadLength;
-            if (payloadLength <= 0 || payloadOffset < 0)
-            {
-                throw new InvalidOperationException("Installer payload length is invalid.");
-            }
+  DetailPrint "Installing shared Avikal core..."
+  nsExec::ExecToLog '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-shared-core.ps1" -SourceRoot "`$INSTDIR\payload" -Version "$versionForNsis"'
+  Pop `$0
+  `${If} `$0 != "0"
+    MessageBox MB_ICONSTOP "Shared Avikal core installation failed."
+    Abort
+  `${EndIf}
 
-            string zipPath = Path.Combine(tempRoot, "payload.zip");
-            using (FileStream output = File.Create(zipPath))
-            {
-                output.Write(allBytes, (int)payloadOffset, (int)payloadLength);
-            }
+  DetailPrint "Installing Avikal CLI launcher..."
+  nsExec::ExecToLog '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-cli-launcher.ps1" -Version "$versionForNsis"'
+  Pop `$0
+  `${If} `$0 != "0"
+    MessageBox MB_ICONSTOP "Avikal CLI launcher installation failed."
+    Abort
+  `${EndIf}
 
-            string extractRoot = Path.Combine(tempRoot, "payload");
-            ZipFile.ExtractToDirectory(zipPath, extractRoot);
-            string installCore = Path.Combine(extractRoot, "packaging", "windows", "install-shared-core.ps1");
-            string installLauncher = Path.Combine(extractRoot, "packaging", "windows", "install-cli-launcher.ps1");
+  WriteUninstaller "`$INSTDIR\Uninstall.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "DisplayName" "RookDuel Avikal CLI Beta"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "DisplayVersion" "$versionForNsis"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "Publisher" "RookDuel"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "InstallLocation" "`$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "DisplayIcon" "`$INSTDIR\payload\backend\avikal-backend.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "UninstallString" '"`$INSTDIR\Uninstall.exe"'
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "NoModify" 1
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "NoRepair" 1
+SectionEnd
 
-            RunPowerShell(installCore, "-SourceRoot", Quote(extractRoot));
-            RunPowerShell(installLauncher);
-
-            Console.WriteLine("Avikal CLI installation completed.");
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine("Avikal CLI installation failed: " + ex.Message);
-            return 1;
-        }
-        finally
-        {
-            try { Directory.Delete(tempRoot, true); } catch { }
-        }
-    }
-
-    private static string Quote(string value)
-    {
-        return "\"" + value.Replace("\"", "\\\"") + "\"";
-    }
-
-    private static void RunPowerShell(string scriptPath, params string[] extraArgs)
-    {
-        string arguments = "-NoProfile -ExecutionPolicy Bypass -File " + Quote(scriptPath);
-        if (extraArgs != null && extraArgs.Length > 0)
-        {
-            arguments += " " + string.Join(" ", extraArgs);
-        }
-
-        ProcessStartInfo startInfo = new ProcessStartInfo("powershell.exe", arguments);
-        startInfo.UseShellExecute = false;
-        Process process = Process.Start(startInfo);
-        process.WaitForExit();
-        if (process.ExitCode != 0)
-        {
-            throw new InvalidOperationException("Installer script failed: " + Path.GetFileName(scriptPath));
-        }
-    }
-}
+Section "Uninstall"
+  Delete "`$INSTDIR\avikal.cmd"
+  Delete "`$INSTDIR\Uninstall.exe"
+  RMDir /r "`$INSTDIR\payload"
+  RMDir "`$INSTDIR"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta"
+SectionEnd
 "@
 
-    Add-Type `
-        -TypeDefinition $source `
-        -Language CSharp `
-        -OutputAssembly $installerPath `
-        -OutputType ConsoleApplication `
-        -ReferencedAssemblies @("System.IO.Compression.dll", "System.IO.Compression.FileSystem.dll")
-
-    $payloadStream = [System.IO.File]::OpenRead($payloadZip)
-    $installerStream = [System.IO.File]::Open($installerPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
-    try {
-        $payloadStream.CopyTo($installerStream)
-        $lengthBytes = [System.BitConverter]::GetBytes([Int64]$payloadStream.Length)
-        $markerBytes = [System.Text.Encoding]::ASCII.GetBytes($markerText)
-        $installerStream.Write($lengthBytes, 0, $lengthBytes.Length)
-        $installerStream.Write($markerBytes, 0, $markerBytes.Length)
+    $nsisScript | Set-Content -LiteralPath $nsiPath -Encoding UTF8
+    $makensis = Resolve-Makensis
+    & $makensis "/V2" $nsiPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "NSIS CLI installer build failed."
     }
-    finally {
-        $installerStream.Dispose()
-        $payloadStream.Dispose()
+    if (-not (Test-Path -LiteralPath $installerPath)) {
+        throw "NSIS CLI installer was not produced: $installerPath"
     }
 
     $hash = Get-Sha256Hex -Path $installerPath
@@ -207,13 +186,13 @@ public static class AvikalCliInstaller
         product_version = $Version
         installer_name = [System.IO.Path]::GetFileName($installerPath)
         installer_sha256 = $hash
-        payload_format = "embedded-zip"
+        payload_format = "nsis-local-installer"
         installs_shared_core = $true
         installs_cli_launcher = $true
     }
     $metadata | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $distRoot "avikal-cli-release-metadata.json")
 
-    Write-Host "Built self-contained Avikal CLI installer at $installerPath"
+    Write-Host "Built self-contained NSIS Avikal CLI installer at $installerPath"
 }
 finally {
     Pop-Location

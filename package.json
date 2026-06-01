@@ -122,6 +122,7 @@
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",
       "displayLanguageSelector": false,
+      "differentialPackage": false,
       "runAfterFinish": true
     },
     "mac": {
