@@ -112,8 +112,8 @@ jobs:
         run: |
           $cliInstallerExe = (Resolve-Path "dist\RookDuel Avikal CLI-beta.exe").Path
           $cliInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel Avikal CLI"
-          & $cliInstallerExe /S "/D=$cliInstallDir"
-          $installerExitCode = $LASTEXITCODE
+          $installerProcess = Start-Process -FilePath $cliInstallerExe -ArgumentList "/S" -Wait -PassThru
+          $installerExitCode = $installerProcess.ExitCode
           Write-Host "CLI installer exit code: $installerExitCode"
           if (Test-Path -LiteralPath $cliInstallDir) {
             Get-ChildItem -LiteralPath $cliInstallDir -Force -Recurse -ErrorAction SilentlyContinue | Select-Object -First 80 FullName,Length | Format-Table -AutoSize
