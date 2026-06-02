@@ -1,0 +1,55 @@
+name: Feature request
+description: Suggest a practical Avikal improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Avikal is maintainer-led. Feature requests are welcome for review, but acceptance depends on security, architecture, and release priorities.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or developer problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you want.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Desktop GUI
+        - CLI
+        - Archive format
+        - Cryptography / PQC
+        - TimeCapsule
+        - Aavrit
+        - Packaging / installer
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Tradeoffs or risks
+      description: Mention security, compatibility, performance, or usability concerns if known.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: This request does not weaken archive security or request a crypto fallback.
+          required: true
+        - label: I understand the maintainer may decline or defer this request.
+          required: true
