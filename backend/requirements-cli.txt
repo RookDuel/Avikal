@@ -1,7 +1,7 @@
 requests==2.33.1
 
 # Core encryption dependencies
-cryptography==46.0.7
+cryptography==48.0.1
 
 # Compression libraries
 brotli==1.2.0
