@@ -101,9 +101,23 @@ jobs:
       - name: Run targeted backend security tests
         env:
           PYTHONPATH: ${{ github.workspace }}\backend\src
+        shell: powershell
         run: |
-          python -m pytest backend/tests/test_native_crypto.py -q
-          python -m pytest backend/tests/test_local_backend_security.py -q
-          python -m pytest backend/tests/test_archive_security_guards.py -q
-          python -m pytest backend/tests/test_archive_fuzz_smoke.py -q
-          python -m pytest backend/tests/test_api_archive_routing.py -q
+          $tests = @(
+            "backend\tests\test_native_crypto.py",
+            "backend\tests\test_local_backend_security.py",
+            "backend\tests\test_archive_security_guards.py",
+            "backend\tests\test_archive_fuzz_smoke.py",
+            "backend\tests\test_api_archive_routing.py"
+          )
+          foreach ($test in $tests) {
+            if (Test-Path -LiteralPath $test) {
+              python -m pytest $test -q
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+            else {
+              Write-Host "$test is not present; skipping."
+            }
+          }
