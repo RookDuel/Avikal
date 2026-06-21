@@ -20,6 +20,7 @@ import {
   PlugZap,
   RefreshCw,
   BadgeInfo,
+  Copy,
   type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -95,6 +96,14 @@ interface UpdateCheckPayload {
   publishedAt?: string | null
   prerelease?: boolean
   assets?: Array<{ name: string; size: number; url: string }>
+  metadataVerified?: boolean
+  recommendedInstallers?: Array<{
+    kind: 'windows-gui' | 'windows-cli'
+    name: string
+    size: number
+    url: string
+    sha256?: string | null
+  }>
 }
 
 const CUSTOM_AAVRIT_REQUEST_URL =
@@ -1126,6 +1135,134 @@ function RuntimeTab({
 }
 
 function UpdatesTab({
+  appInfo,
+  updateInfo,
+  checkingUpdates,
+  checkForUpdates,
+  openExternalUrl,
+}: {
+  appInfo: AppInfoPayload | null
+  updateInfo: UpdateCheckPayload | null
+  checkingUpdates: boolean
+  checkForUpdates: () => void
+  openExternalUrl: (url: string) => Promise<void>
+}) {
+  const releaseUrl = updateInfo?.releaseUrl || appInfo?.updateFeed || RELEASES_URL
+  const recommendedInstallers = updateInfo?.recommendedInstallers ?? []
+  const copyChecksum = async (hash: string) => {
+    try {
+      await navigator.clipboard.writeText(hash)
+      toast.success('SHA-256 copied')
+    } catch {
+      toast.error('Could not copy checksum')
+    }
+  }
+
+  return (
+    <div className="space-y-7">
+      <SectionHeader title="Manual Verified Updates" description="Check official releases without silent installation." />
+      <Card className="space-y-5">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <Stat label="Current version" value={appInfo?.version ? `v${appInfo.version}` : 'unknown'} />
+          <Stat label="Platform" value={appInfo ? `${appInfo.platform}-${appInfo.arch}` : 'unknown'} />
+          <Stat label="Install type" value={appInfo?.packaged ? 'Packaged' : 'Development'} />
+        </div>
+
+        {updateInfo && (
+          <div className={cn('rounded-2xl border p-4', updateInfo.updateAvailable ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-av-border bg-av-border/5')}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-sm font-bold text-av-main">
+                  {updateInfo.updateAvailable ? `Update available: v${updateInfo.latestVersion}` : 'Avikal is up to date'}
+                </p>
+                <p className="mt-1 text-sm text-av-muted">
+                  Latest release: {updateInfo.releaseName || `v${updateInfo.latestVersion}`}
+                  {updateInfo.publishedAt ? ` · ${new Date(updateInfo.publishedAt).toLocaleDateString()}` : ''}
+                </p>
+              </div>
+              <span className={cn(
+                'rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.14em]',
+                updateInfo.metadataVerified
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+                  : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300',
+              )}>
+                {updateInfo.metadataVerified ? 'Metadata verified' : 'Metadata unavailable'}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {recommendedInstallers.length > 0 && (
+          <div className="space-y-3">
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-av-muted">Recommended downloads</p>
+            {recommendedInstallers.map((asset) => (
+              <div key={asset.url} className="rounded-2xl border border-av-border bg-av-border/5 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="font-bold text-av-main">
+                      {asset.kind === 'windows-gui' ? 'Windows App Installer' : 'Windows CLI Installer'}
+                    </p>
+                    <p className="mt-1 truncate text-xs text-av-muted">{asset.name} · {formatBytes(asset.size)}</p>
+                  </div>
+                  <button
+                    onClick={() => void openExternalUrl(asset.url)}
+                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-av-main px-4 py-2.5 text-sm font-bold text-av-surface transition-opacity hover:opacity-90"
+                    type="button"
+                  >
+                    <Download className="h-4 w-4" />
+                    Download
+                  </button>
+                </div>
+                {asset.sha256 && (
+                  <div className="mt-3 rounded-xl border border-av-border/70 bg-av-surface/70 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-av-muted">SHA-256</span>
+                      <button
+                        type="button"
+                        onClick={() => void copyChecksum(asset.sha256!)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-av-border px-2.5 py-1 text-[11px] font-bold text-av-main transition-colors hover:bg-av-border/10"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy
+                      </button>
+                    </div>
+                    <p className="break-all font-mono text-[11px] leading-5 text-av-muted">{asset.sha256}</p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-3">
+          <button
+            onClick={checkForUpdates}
+            disabled={checkingUpdates}
+            className="inline-flex items-center gap-2 rounded-xl bg-av-main px-5 py-3 text-sm font-bold text-av-surface shadow-sm transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            type="button"
+          >
+            <RefreshCw className={cn('h-4 w-4', checkingUpdates && 'animate-spin')} />
+            {checkingUpdates ? 'Checking...' : 'Check for Updates'}
+          </button>
+          <button
+            onClick={() => void openExternalUrl(releaseUrl)}
+            className="inline-flex items-center gap-2 rounded-xl border border-av-border px-5 py-3 text-sm font-bold text-av-main transition-colors hover:bg-av-border/12"
+            type="button"
+          >
+            <ExternalLink className="h-4 w-4" />
+            Open Releases
+          </button>
+        </div>
+
+        <p className="text-xs leading-6 text-av-muted">
+          Avikal uses manual verified updates. It checks the official GitHub release feed, shows bundled installer hashes when available, and never installs updates silently.
+        </p>
+      </Card>
+    </div>
+  )
+}
+
+function LegacyUpdatesTab({
   appInfo,
   updateInfo,
   checkingUpdates,

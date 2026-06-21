@@ -876,7 +876,7 @@ impl Game {
 }
 
 fn stats_dict(py: Python<'_>, stats: &CodecStats) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("mainline_plies", stats.mainline_plies)?;
     dict.set_item("variation_plies", stats.variation_plies)?;
     dict.set_item("total_variations", stats.total_variations)?;
@@ -1870,7 +1870,7 @@ pub fn decode_chess_pgn_integer(
     let decoder = NativeDecoder::parse(pgn_text).map_err(value_error)?;
     let (num_bytes, stats) = decoder.decode().map_err(value_error)?;
     Ok((
-        PyBytes::new_bound(py, &num_bytes).into(),
+        PyBytes::new(py, &num_bytes).into(),
         stats_dict(py, &stats)?,
     ))
 }

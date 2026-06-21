@@ -22,6 +22,16 @@ const UPDATE_REPO_OWNER = process.env.AVIKAL_UPDATE_REPO_OWNER || 'RookDuel';
 const UPDATE_REPO_NAME = process.env.AVIKAL_UPDATE_REPO_NAME || 'Avikal';
 const UPDATE_RELEASES_API_URL = process.env.AVIKAL_UPDATE_RELEASES_API_URL || `https://api.github.com/repos/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
 const UPDATE_RELEASES_PAGE_URL = process.env.AVIKAL_UPDATE_RELEASES_PAGE_URL || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
+const OFFICIAL_RELEASE_HOSTS = new Set([
+  'api.github.com',
+  'github.com',
+  'objects.githubusercontent.com',
+  'github-releases.githubusercontent.com',
+]);
+const ALLOWED_EXTERNAL_HOSTS = new Set([
+  'avikal.rookduel.tech',
+  'github.com',
+]);
 const MAX_DIRECTORY_SCAN_DEPTH = 12;
 const MAX_DIRECTORY_SCAN_ENTRIES = 20000;
 const MAX_SAVED_TEXT_BYTES = 5 * 1024 * 1024;
@@ -95,8 +105,23 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function httpsJson(url) {
+function assertOfficialReleaseUrl(url) {
+  const parsed = new URL(String(url));
+  if (parsed.protocol !== 'https:' || !OFFICIAL_RELEASE_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error('Update metadata must come from the official GitHub release source');
+  }
+  return parsed;
+}
+
+function httpsText(url, redirectCount = 0) {
   return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = assertOfficialReleaseUrl(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
     const request = https.get(url, {
       headers: {
         accept: 'application/vnd.github+json',
@@ -104,6 +129,16 @@ function httpsJson(url) {
       },
       timeout: 15000,
     }, (response) => {
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+        response.resume();
+        if (redirectCount >= 4) {
+          reject(new Error('Update metadata redirect limit exceeded'));
+          return;
+        }
+        const nextUrl = new URL(response.headers.location, parsed).href;
+        httpsText(nextUrl, redirectCount + 1).then(resolve, reject);
+        return;
+      }
       let body = '';
       response.setEncoding('utf8');
       response.on('data', (chunk) => {
@@ -117,11 +152,7 @@ function httpsJson(url) {
           reject(new Error(`Update server returned HTTP ${response.statusCode}`));
           return;
         }
-        try {
-          resolve(JSON.parse(body));
-        } catch (_error) {
-          reject(new Error('Update server returned invalid JSON'));
-        }
+        resolve(body);
       });
     });
     request.on('timeout', () => request.destroy(new Error('Update check timed out')));
@@ -129,10 +160,78 @@ function httpsJson(url) {
   });
 }
 
+async function httpsJson(url) {
+  const body = await httpsText(url);
+  try {
+    return JSON.parse(body);
+  } catch (_error) {
+    throw new Error('Update server returned invalid JSON');
+  }
+}
+
+function findReleaseAsset(assets, pattern) {
+  return assets.find((asset) => pattern.test(asset.name));
+}
+
+async function readReleaseMetadataAsset(assets) {
+  const metadataAsset = findReleaseAsset(assets, /^avikal-release-metadata\.json$/i);
+  if (!metadataAsset) {
+    return null;
+  }
+  try {
+    return await httpsJson(metadataAsset.url);
+  } catch (error) {
+    console.warn('Failed to read release metadata asset:', error);
+    return null;
+  }
+}
+
+function normalizeSha256(value) {
+  const hash = String(value || '').trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(hash) ? hash : null;
+}
+
+function buildRecommendedInstaller(asset, hash, kind) {
+  if (!asset) return null;
+  return {
+    kind,
+    name: asset.name,
+    size: asset.size,
+    url: asset.url,
+    sha256: normalizeSha256(hash),
+  };
+}
+
+function validateReleaseUrl(url) {
+  try {
+    const parsed = new URL(String(url));
+    return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'github.com'
+      ? parsed.href
+      : UPDATE_RELEASES_PAGE_URL;
+  } catch {
+    return UPDATE_RELEASES_PAGE_URL;
+  }
+}
+
+function assertReleaseMetadataMatchesAssets(metadata, assets) {
+  if (!metadata || typeof metadata !== 'object') return false;
+  const guiName = String(metadata.gui_installer_name || '');
+  const cliName = String(metadata.cli_installer_name || '');
+  if (!guiName || !cliName) return false;
+  if (!normalizeSha256(metadata.gui_installer_sha256) || !normalizeSha256(metadata.cli_installer_sha256)) return false;
+  if (!assets.some((asset) => asset.name === guiName)) return false;
+  if (!assets.some((asset) => asset.name === cliName)) return false;
+  return true;
+}
+
+function getReleaseTagVersion(payload) {
+  return String(payload.tag_name || payload.name || '').replace(/^v/i, '');
+}
+
 async function checkLatestRelease() {
   const payload = await httpsJson(UPDATE_RELEASES_API_URL);
   const currentVersion = app.getVersion();
-  const latestVersion = String(payload.tag_name || payload.name || '').replace(/^v/i, '');
+  const latestVersion = getReleaseTagVersion(payload);
   if (!normalizeVersion(latestVersion)) {
     throw new Error('Latest release version is unavailable');
   }
@@ -144,18 +243,40 @@ async function checkLatestRelease() {
           size: Number(asset.size || 0),
           url: asset.browser_download_url || '',
         }))
-        .filter((asset) => asset.url.startsWith('https://'))
+        .filter((asset) => {
+          try {
+            assertOfficialReleaseUrl(asset.url);
+            return true;
+          } catch {
+            return false;
+          }
+        })
     : [];
+  const metadata = await readReleaseMetadataAsset(assets);
+  const metadataVerified = assertReleaseMetadataMatchesAssets(metadata, assets);
+  const guiAsset = metadataVerified
+    ? findReleaseAsset(assets, new RegExp(`^${metadata.gui_installer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
+    : findReleaseAsset(assets, /^RookDuel Avikal-beta\.exe$/i);
+  const cliAsset = metadataVerified
+    ? findReleaseAsset(assets, new RegExp(`^${metadata.cli_installer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
+    : findReleaseAsset(assets, /^RookDuel Avikal CLI-beta\.exe$/i);
+  const recommendedInstallers = [
+    buildRecommendedInstaller(guiAsset, metadataVerified ? metadata.gui_installer_sha256 : null, 'windows-gui'),
+    buildRecommendedInstaller(cliAsset, metadataVerified ? metadata.cli_installer_sha256 : null, 'windows-cli'),
+  ].filter(Boolean);
   return {
     success: true,
     currentVersion,
     latestVersion,
     updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
     releaseName: String(payload.name || payload.tag_name || `v${latestVersion}`),
-    releaseUrl: String(payload.html_url || UPDATE_RELEASES_PAGE_URL),
+    releaseUrl: validateReleaseUrl(payload.html_url || UPDATE_RELEASES_PAGE_URL),
     publishedAt: payload.published_at || null,
     prerelease: Boolean(payload.prerelease),
     assets,
+    metadataVerified,
+    releaseMetadata: metadataVerified ? metadata : null,
+    recommendedInstallers,
   };
 }
 
@@ -434,7 +555,10 @@ function normalizeLaunchPath(value) {
 function isAllowedExternalUrl(value) {
   try {
     const parsed = new URL(String(value));
-    return parsed.protocol === 'https:' || parsed.protocol === 'mailto:';
+    if (parsed.protocol === 'mailto:') {
+      return true;
+    }
+    return parsed.protocol === 'https:' && ALLOWED_EXTERNAL_HOSTS.has(parsed.hostname.toLowerCase());
   } catch {
     return false;
   }

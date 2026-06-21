@@ -25,8 +25,15 @@ jobs:
       - name: Install root dependencies
         run: npm ci
 
+      - name: Audit root dependencies
+        run: npm audit --audit-level=high
+
       - name: Install frontend dependencies
         run: npm ci
+        working-directory: frontend
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
         working-directory: frontend
 
       - name: Build frontend
@@ -45,19 +52,58 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install -e backend
+          pip install -r backend/requirements-build.txt
+          pip install pip-audit
+          pip install pytest
 
-      - name: Compile backend package
-        run: python -m compileall backend/src/avikal_backend
+      - name: Audit backend Python dependencies
+        run: |
+          python -m pip_audit -r backend/requirements.txt
+          python -m pip_audit -r backend/requirements-build.txt
 
-      - name: Check backend CLI version
+      - name: Build native backend extension
+        run: python backend/scripts/build_native_extension.py
+
+      - name: Lint native Rust crypto core
+        run: cargo clippy --locked -- -D warnings
+        working-directory: backend/native/avikal_backend_native
+
+      - name: Audit native Rust dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --deny warnings
+        working-directory: backend/native/avikal_backend_native
+
+      - name: Compile key backend modules
+        run: |
+          python -m py_compile backend/api_server.py
+          python -m py_compile backend/src/avikal_backend/api/server.py
+          python -m py_compile backend/src/avikal_backend/archive/pipeline/encoder.py
+          python -m py_compile backend/src/avikal_backend/archive/pipeline/decoder.py
+
+      - name: Check backend CLI
+        env:
+          PYTHONPATH: ${{ github.workspace }}\backend\src
         run: python -m avikal_backend --version
 
-      - name: Run backend CLI smoke checks
+      - name: Run backend doctor
+        env:
+          PYTHONPATH: ${{ github.workspace }}\backend\src
+        run: python -m avikal_backend doctor --json
+
+      - name: Run targeted backend security tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}\backend\src
         run: |
-          python -m avikal_backend --help
-          python -m avikal_backend diag --json
+          python -m pytest backend/tests/test_native_crypto.py -q
+          python -m pytest backend/tests/test_local_backend_security.py -q
+          python -m pytest backend/tests/test_archive_security_guards.py -q
+          python -m pytest backend/tests/test_archive_fuzz_smoke.py -q
+          python -m pytest backend/tests/test_api_archive_routing.py -q

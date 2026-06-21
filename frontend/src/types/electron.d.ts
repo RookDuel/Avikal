@@ -77,6 +77,14 @@ export interface UpdateAsset {
   url: string
 }
 
+export interface RecommendedInstaller {
+  kind: 'windows-gui' | 'windows-cli'
+  name: string
+  size: number
+  url: string
+  sha256?: string | null
+}
+
 export interface UpdateCheckResult {
   success: boolean
   currentVersion: string
@@ -87,6 +95,9 @@ export interface UpdateCheckResult {
   publishedAt?: string | null
   prerelease?: boolean
   assets?: UpdateAsset[]
+  metadataVerified?: boolean
+  releaseMetadata?: Record<string, unknown> | null
+  recommendedInstallers?: RecommendedInstaller[]
 }
 
 declare global {

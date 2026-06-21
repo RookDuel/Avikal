@@ -236,17 +236,28 @@
   }
 
   .av-titlebar-glass {
-    background: rgb(255 255 255 / 0.38);
-    border-bottom: 1px solid rgb(255 255 255 / 0.26);
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.28) inset, 0 10px 26px rgb(15 23 42 / 0.055);
-    backdrop-filter: blur(22px) saturate(165%);
-    -webkit-backdrop-filter: blur(22px) saturate(165%);
+    isolation: isolate;
+    background: rgb(248 250 252 / 0.88);
+    border-bottom: 1px solid rgb(203 213 225 / 0.72);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.55) inset, 0 10px 30px rgb(15 23 42 / 0.08);
+    backdrop-filter: blur(18px) saturate(145%);
+    -webkit-backdrop-filter: blur(18px) saturate(145%);
   }
 
   .dark .av-titlebar-glass {
-    background: rgb(5 5 5 / 0.46);
-    border-bottom-color: rgb(255 255 255 / 0.065);
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.055) inset, 0 10px 30px rgb(0 0 0 / 0.22);
+    background: rgb(5 5 5 / 0.88);
+    border-bottom-color: rgb(255 255 255 / 0.08);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.055) inset, 0 10px 30px rgb(0 0 0 / 0.32);
+  }
+
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .av-titlebar-glass {
+      background: rgb(248 250 252 / 0.96);
+    }
+
+    .dark .av-titlebar-glass {
+      background: rgb(5 5 5 / 0.96);
+    }
   }
 
   .security-keyphrase-card {
@@ -363,6 +374,19 @@
     color: #be123c;
   }
 
+  .keyphrase-generate-button {
+    background: #6d28d9 !important;
+    border-color: #6d28d9 !important;
+    color: #ffffff !important;
+    box-shadow: 0 12px 26px rgb(126 34 206 / 0.18);
+  }
+
+  .keyphrase-generate-button:hover {
+    background: #5b21b6 !important;
+    border-color: #5b21b6 !important;
+    color: #ffffff !important;
+  }
+
   .dark .security-keyphrase-secondary {
     background: #101010;
     border-color: #262626;
@@ -374,6 +398,91 @@
     background: rgb(239 68 68 / 0.1);
     border-color: rgb(239 68 68 / 0.3);
     color: #fca5a5;
+  }
+
+  .dark .keyphrase-generate-button {
+    background: rgb(168 85 247 / 0.1) !important;
+    border-color: rgb(168 85 247 / 0.2) !important;
+    color: #d8b4fe !important;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
+  }
+
+  .dark .keyphrase-generate-button:hover {
+    background: rgb(168 85 247 / 0.15) !important;
+    border-color: rgb(168 85 247 / 0.4) !important;
+    color: #e9d5ff !important;
+  }
+
+  .trusted-time-notice-danger {
+    background: #fee2e2;
+    border-color: #dc2626;
+  }
+
+  .trusted-time-notice-danger .trusted-time-notice-icon,
+  .trusted-time-notice-danger .trusted-time-notice-title {
+    color: #7f1d1d;
+  }
+
+  .trusted-time-notice-danger .trusted-time-notice-body {
+    color: #991b1b;
+  }
+
+  .trusted-time-notice-danger .trusted-time-notice-detail {
+    color: #b91c1c;
+  }
+
+  .trusted-time-notice-warning {
+    background: #ffedd5;
+    border-color: #d97706;
+  }
+
+  .trusted-time-notice-warning .trusted-time-notice-icon,
+  .trusted-time-notice-warning .trusted-time-notice-title {
+    color: #78350f;
+  }
+
+  .trusted-time-notice-warning .trusted-time-notice-body {
+    color: #92400e;
+  }
+
+  .trusted-time-notice-warning .trusted-time-notice-detail {
+    color: #b45309;
+  }
+
+  .dark .trusted-time-notice-danger {
+    background: rgb(127 29 29 / 0.34);
+    border-color: rgb(239 68 68 / 0.35);
+  }
+
+  .dark .trusted-time-notice-danger .trusted-time-notice-icon,
+  .dark .trusted-time-notice-danger .trusted-time-notice-title {
+    color: #fca5a5;
+  }
+
+  .dark .trusted-time-notice-danger .trusted-time-notice-body {
+    color: rgb(252 165 165 / 0.86);
+  }
+
+  .dark .trusted-time-notice-danger .trusted-time-notice-detail {
+    color: rgb(252 165 165 / 0.72);
+  }
+
+  .dark .trusted-time-notice-warning {
+    background: rgb(120 53 15 / 0.3);
+    border-color: rgb(245 158 11 / 0.35);
+  }
+
+  .dark .trusted-time-notice-warning .trusted-time-notice-icon,
+  .dark .trusted-time-notice-warning .trusted-time-notice-title {
+    color: #fcd34d;
+  }
+
+  .dark .trusted-time-notice-warning .trusted-time-notice-body {
+    color: rgb(252 211 77 / 0.86);
+  }
+
+  .dark .trusted-time-notice-warning .trusted-time-notice-detail {
+    color: rgb(252 211 77 / 0.72);
   }
 
   .security-pqc-info {

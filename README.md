@@ -251,7 +251,7 @@ More setup details are in [SETUP.md](./SETUP.md).
 - [CONTRIBUTING.md](./CONTRIBUTING.md) - contribution workflow
 - [ROADMAP.md](./ROADMAP.md) - project direction
 - [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) - third-party license notes
-- [updates.md](./updates.md) - v1.0.4 update summary
+- [updates.md](./updates.md) - v1.0.5 update summary
 
 ## Project Status
 

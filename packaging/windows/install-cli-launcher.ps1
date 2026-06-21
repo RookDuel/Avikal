@@ -1,6 +1,5 @@
 param(
-    [string]$Version = "",
-    [switch]$SkipPathUpdate
+    [string]$Version = ""
 )
 
 Set-StrictMode -Version Latest
@@ -31,31 +30,5 @@ $launcherPath = Join-Path $launcherRoot "avikal.cmd"
 "$backendExe" %*
 "@ | Set-Content -LiteralPath $launcherPath -Encoding ASCII
 
-if (-not $SkipPathUpdate) {
-    $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $pathEntries = @()
-    if (-not [string]::IsNullOrWhiteSpace($currentUserPath)) {
-        $pathEntries = $currentUserPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    }
-
-    $alreadyPresent = $false
-    foreach ($entry in $pathEntries) {
-        if ([string]::Equals($entry.TrimEnd("\"), $launcherRoot.TrimEnd("\"), [System.StringComparison]::OrdinalIgnoreCase)) {
-            $alreadyPresent = $true
-            break
-        }
-    }
-
-    if (-not $alreadyPresent) {
-        $newUserPath = if ([string]::IsNullOrWhiteSpace($currentUserPath)) {
-            $launcherRoot
-        } else {
-            "$currentUserPath;$launcherRoot"
-        }
-        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-        Write-Host "Added Avikal CLI launcher directory to the user PATH."
-    }
-}
-
 Write-Host "Installed Avikal CLI launcher at $launcherPath"
-Write-Host "Open a new terminal before running avikal if PATH was updated."
+Write-Host "Add $launcherRoot to PATH if it is not already present."

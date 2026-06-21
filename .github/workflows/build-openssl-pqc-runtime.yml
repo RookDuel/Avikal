@@ -61,31 +61,11 @@ jobs:
           pip install -r backend/requirements.txt
           pip install pytest
 
-      - name: Smoke-test PQC provider against bundled OpenSSL
+      - name: Run PQC provider tests against bundled OpenSSL
         env:
           AVIKAL_OPENSSL_EXEC: ${{ github.workspace }}\runtime\pqc\bin\openssl.exe
           PYTHONPATH: ${{ github.workspace }}\backend\src
-        shell: pwsh
-        run: |
-          @'
-          from avikal_backend.archive.security.pqc_provider import (
-              create_pqc_archive_material,
-              decapsulate_pqc_archive_material,
-              provider_status,
-          )
-
-          status = provider_status()
-          assert status["available"], status
-          material = create_pqc_archive_material(archive_filename="workflow-smoke.avk")
-          recovered = decapsulate_pqc_archive_material(
-              public_bundle=material["public_bundle"],
-              private_bundle=material["private_bundle"],
-              pqc_ciphertext=material["ciphertext"],
-              expected_key_id=material["key_id"],
-          )
-          assert recovered == material["shared_secret"]
-          print("PQC provider smoke test passed")
-          '@ | python -
+        run: python -m pytest backend/tests/test_pqc_provider.py -q
 
       - name: Package runtime artifact
         shell: powershell

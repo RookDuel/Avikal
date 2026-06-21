@@ -345,7 +345,7 @@ impl PayloadStreamEncoder {
             return Err(value_error("PayloadStreamEncoder is already finalized"));
         }
         if chunk.is_empty() {
-            return Ok(PyBytes::new_bound(py, &[]).into());
+            return Ok(PyBytes::new(py, &[]).into());
         }
 
         self.original_size = self.original_size.saturating_add(chunk.len() as u64);
@@ -362,7 +362,7 @@ impl PayloadStreamEncoder {
             compressed
         };
 
-        Ok(PyBytes::new_bound(py, &output).into())
+        Ok(PyBytes::new(py, &output).into())
     }
 
     fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<EncoderFinalizeResult> {
@@ -386,9 +386,9 @@ impl PayloadStreamEncoder {
 
         let checksum = self.checksum.clone().finalize();
         Ok((
-            PyBytes::new_bound(py, &output).into(),
-            tag.map(|tag_bytes| PyBytes::new_bound(py, &tag_bytes).into()),
-            PyBytes::new_bound(py, checksum.as_slice()).into(),
+            PyBytes::new(py, &output).into(),
+            tag.map(|tag_bytes| PyBytes::new(py, &tag_bytes).into()),
+            PyBytes::new(py, checksum.as_slice()).into(),
             self.original_size,
             self.compressed_size,
         ))
@@ -533,7 +533,7 @@ impl PayloadStreamDecoder {
         let output = decompress_all(&mut self.decompressor, &compressed, FlushDecompress::None)?;
         compressed.zeroize();
         self.absorb_output(&output)?;
-        Ok(PyBytes::new_bound(py, &output).into())
+        Ok(PyBytes::new(py, &output).into())
     }
 
     fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<(Py<PyBytes>, Py<PyBytes>, u64)> {
@@ -575,8 +575,8 @@ impl PayloadStreamDecoder {
 
         let checksum = self.checksum.clone().finalize();
         Ok((
-            PyBytes::new_bound(py, &combined_output).into(),
-            PyBytes::new_bound(py, checksum.as_slice()).into(),
+            PyBytes::new(py, &combined_output).into(),
+            PyBytes::new(py, checksum.as_slice()).into(),
             self.output_size,
         ))
     }
@@ -591,7 +591,7 @@ fn random_bytes(py: Python<'_>, length: usize) -> PyResult<Py<PyBytes>> {
     }
     let mut output = vec![0u8; length];
     OsRng.fill_bytes(&mut output);
-    Ok(PyBytes::new_bound(py, &output).into())
+    Ok(PyBytes::new(py, &output).into())
 }
 
 #[pyfunction]
@@ -621,7 +621,7 @@ fn derive_argon2id_key(
     argon2
         .hash_password_into(&secret, salt, &mut output)
         .map_err(|exc| runtime_error(format!("Argon2id derivation failed: {exc}")))?;
-    Ok(PyBytes::new_bound(py, &output).into())
+    Ok(PyBytes::new(py, &output).into())
 }
 
 #[pyfunction]
@@ -634,7 +634,7 @@ fn hkdf_sha256(
     length: usize,
 ) -> PyResult<Py<PyBytes>> {
     let output = hkdf_sha256_impl(ikm, salt, info, length)?;
-    Ok(PyBytes::new_bound(py, &output).into())
+    Ok(PyBytes::new(py, &output).into())
 }
 
 #[pyfunction]
@@ -647,7 +647,7 @@ fn hkdf_sha3_256(
     length: usize,
 ) -> PyResult<Py<PyBytes>> {
     let output = hkdf_sha3_256_impl(ikm, salt, info, length)?;
-    Ok(PyBytes::new_bound(py, &output).into())
+    Ok(PyBytes::new(py, &output).into())
 }
 
 #[pyfunction]
@@ -659,7 +659,7 @@ fn aes256gcm_encrypt(
     aad: &[u8],
 ) -> PyResult<Py<PyBytes>> {
     let ciphertext = aes256gcm_encrypt_impl(key, nonce, plaintext, aad)?;
-    Ok(PyBytes::new_bound(py, &ciphertext).into())
+    Ok(PyBytes::new(py, &ciphertext).into())
 }
 
 #[pyfunction]
@@ -671,7 +671,7 @@ fn aes256gcm_decrypt(
     aad: &[u8],
 ) -> PyResult<Py<PyBytes>> {
     let plaintext = aes256gcm_decrypt_impl(key, nonce, ciphertext, aad)?;
-    Ok(PyBytes::new_bound(py, &plaintext).into())
+    Ok(PyBytes::new(py, &plaintext).into())
 }
 
 #[pyfunction]
@@ -713,7 +713,7 @@ fn avp_encode_chunk(
     let mut encoded = Vec::with_capacity(chunk_header.len() + output_data.len());
     encoded.extend_from_slice(&chunk_header);
     encoded.extend_from_slice(&output_data);
-    Ok((PyBytes::new_bound(py, &encoded).into(), stored_len))
+    Ok((PyBytes::new(py, &encoded).into(), stored_len))
 }
 
 #[pyfunction]
@@ -760,13 +760,13 @@ fn avp_decode_chunk(
     if plaintext.len() != original_len {
         return Err(value_error("Payload chunk size verification failed"));
     }
-    Ok(PyBytes::new_bound(py, &plaintext).into())
+    Ok(PyBytes::new(py, &plaintext).into())
 }
 
 #[pyfunction]
 fn sha256_digest(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyBytes>> {
     let digest = Sha256::digest(data);
-    Ok(PyBytes::new_bound(py, digest.as_slice()).into())
+    Ok(PyBytes::new(py, digest.as_slice()).into())
 }
 
 #[pymodule]
@@ -823,13 +823,13 @@ mod tests {
 
     #[test]
     fn payload_stream_roundtrip_succeeds() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let key = [0x41u8; AES256_KEY_BYTES];
         let nonce = [0x24u8; AESGCM_NONCE_BYTES];
         let aad = b"avikal-payload-aad";
         let plaintext = b"payload data ".repeat(2048);
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let mut encoder =
                 PayloadStreamEncoder::new(Some(&key), Some(&nonce), Some(aad), 6).unwrap();
             let mut ciphertext = Vec::new();

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent, FormEvent, KeyboardEvent } from 'react'
-import { Check, Trash2, X } from 'lucide-react'
+import { Check, FileText, Trash2, X } from 'lucide-react'
 import type { KeyphraseWordPair } from '../lib/api'
 
 export function splitKeyphraseWords(value: string): string[] {
@@ -13,6 +13,42 @@ function normalizeRoman(value: string): string {
 
 function hasBlockedKeyphraseCharacters(value: string): boolean {
   return /[^\p{L}\p{M}\s]/u.test(value)
+}
+
+function extractStructuredKeyphraseText(value: string): { text: string; structured: boolean } {
+  const normalized = value.normalize('NFKC').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = normalized.split('\n')
+
+  const numberedStart = lines.findIndex(line => /^Numbered words\s*:/i.test(line.trim()))
+  if (numberedStart >= 0) {
+    const numberedWords: string[] = []
+    for (const line of lines.slice(numberedStart + 1)) {
+      const trimmed = line.trim()
+      if (!trimmed && numberedWords.length > 0) break
+      const match = trimmed.match(/^\d{1,2}\s*[\.)-]?\s+(.+?)\s*$/u)
+      if (match?.[1]) numberedWords.push(match[1].trim())
+    }
+    if (numberedWords.length >= 21) {
+      return { text: numberedWords.slice(0, 21).join(' '), structured: true }
+    }
+  }
+
+  const plainStart = lines.findIndex(line => /^Plain keyphrase\s*:/i.test(line.trim()))
+  if (plainStart >= 0) {
+    const plainLines: string[] = []
+    for (const line of lines.slice(plainStart + 1)) {
+      const trimmed = line.trim()
+      if (!trimmed && plainLines.length > 0) break
+      if (!trimmed) continue
+      if (/^Numbered words\s*:/i.test(trimmed)) break
+      plainLines.push(trimmed)
+    }
+    if (plainLines.length > 0) {
+      return { text: plainLines.join(' '), structured: true }
+    }
+  }
+
+  return { text: normalized, structured: false }
 }
 
 interface ResolveResult {
@@ -77,6 +113,7 @@ export default function KeyphraseAssistInput({
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const lastBlockedNoticeRef = useRef<{ value: string; at: number }>({ value: '', at: 0 })
   const words = splitKeyphraseWords(value)
   const queryText = query.normalize('NFKC').trim()
@@ -134,18 +171,18 @@ export default function KeyphraseAssistInput({
     commitWords(words.filter((_, wordIndex) => wordIndex !== index))
   }
 
-  const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
-    const text = event.clipboardData.getData('text')
-    if (!text.trim()) return
-    if (hasBlockedKeyphraseCharacters(text)) {
-      event.preventDefault()
-      announceBlockedCharacters(text)
-      return
+  const applyKeyphraseText = (text: string, options: { replace?: boolean; source?: string } = {}) => {
+    const extracted = extractStructuredKeyphraseText(text)
+    const candidate = extracted.text.trim()
+    if (!candidate) return false
+
+    if (hasBlockedKeyphraseCharacters(candidate)) {
+      announceBlockedCharacters(candidate)
+      return false
     }
 
-    const resolved = resolveKeyphraseText(text, pairs)
+    const resolved = resolveKeyphraseText(candidate, pairs)
     if (resolved.ambiguous.length || resolved.invalid.length) {
-      event.preventDefault()
       const firstAmbiguous = resolved.ambiguous[0]?.token
       const firstInvalid = resolved.invalid[0]
       onIssue?.(
@@ -154,14 +191,39 @@ export default function KeyphraseAssistInput({
           : `No keyphrase word found for "${firstInvalid}".`,
       )
       setQuery(firstAmbiguous || firstInvalid || '')
-      if (resolved.words.length) commitWords([...words, ...resolved.words])
-      return
+      if (resolved.words.length) {
+        commitWords(options.replace || extracted.structured ? resolved.words : [...words, ...resolved.words])
+      }
+      return false
     }
 
     if (resolved.words.length) {
-      event.preventDefault()
-      commitWords([...words, ...resolved.words])
+      commitWords(options.replace || extracted.structured ? resolved.words : [...words, ...resolved.words])
       setQuery('')
+      return true
+    }
+
+    onIssue?.(`No keyphrase words found${options.source ? ` in ${options.source}` : ''}.`)
+    return false
+  }
+
+  const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
+    const text = event.clipboardData.getData('text')
+    if (!text.trim()) return
+    event.preventDefault()
+    applyKeyphraseText(text, { source: 'clipboard' })
+  }
+
+  const handleImportFile = async (file: File | undefined) => {
+    if (!file) return
+    try {
+      const text = await file.text()
+      const imported = applyKeyphraseText(text, { replace: true, source: file.name })
+      if (!imported) return
+    } catch {
+      onIssue?.('Could not read the selected keyphrase file.')
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
 
@@ -269,6 +331,27 @@ export default function KeyphraseAssistInput({
             Clear
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            fileInputRef.current?.click()
+          }}
+          disabled={disabled}
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-av-border/40 bg-av-border/10 px-2.5 text-[11px] font-semibold text-av-muted transition-colors hover:border-purple-500/25 hover:bg-purple-500/10 hover:text-purple-500 disabled:opacity-40"
+          title="Import structured keyphrase text"
+        >
+          <FileText className="h-3.5 w-3.5" />
+          Import .txt
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".txt,text/plain"
+          className="hidden"
+          onChange={event => void handleImportFile(event.target.files?.[0])}
+        />
 
         {words.length < 21 && (
           <input

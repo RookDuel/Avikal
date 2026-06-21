@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
-import { Archive, CheckCircle2, ChevronDown, Eye, EyeOff, File, FileKey2, Fingerprint, Key, RotateCw, ShieldAlert, X } from 'lucide-react'
+import { Archive, CheckCircle2, ChevronDown, Download, Eye, EyeOff, File, FileKey2, Fingerprint, Key, RotateCw, ShieldAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '../lib/api'
@@ -10,6 +10,8 @@ import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
 import KeyphraseAssistInput, { splitKeyphraseWords } from '../components/KeyphraseAssistInput'
 import ProcessingOverlay from '../components/ProcessingOverlay'
+import { copyKeyphraseToClipboard, downloadStructuredKeyphrase } from '../lib/keyphraseExport'
+import PasswordStrengthMeter from '../components/PasswordStrengthMeter'
 
 interface ArchiveInspectHints {
   provider?: 'aavrit' | 'drand' | null
@@ -46,18 +48,6 @@ function deriveDefaultRekeyPath(inputFile: string): string {
   if (!directory) return nextName
   const separator = inputFile.includes('\\') ? '\\' : '/'
   return `${directory}${separator}${nextName}`
-}
-
-function getStrength(password: string): number {
-  if (!password) return 0
-  let score = 0
-  if (password.length > 8) score += 25
-  if (password.length > 11) score += 25
-  if (/[A-Z]/.test(password)) score += 15
-  if (/[a-z]/.test(password)) score += 15
-  if (/[0-9]/.test(password)) score += 10
-  if (/[^A-Za-z0-9]/.test(password)) score += 10
-  return Math.min(score, 100)
 }
 
 function formatProtectionSet(passwordEnabled: boolean, keyphraseEnabled: boolean): string {
@@ -208,11 +198,22 @@ export default function Rekey() {
     }
   }
 
-  const handleCopyKeyphrase = () => {
+  const handleCopyKeyphrase = async () => {
     if (!newKeyphrase) return
-    navigator.clipboard.writeText(newKeyphrase)
-    setIsCopied(true)
-    setTimeout(() => setIsCopied(false), 2000)
+    const copied = await copyKeyphraseToClipboard(newKeyphrase)
+    if (copied) {
+      setIsCopied(true)
+      toast.success('Keyphrase copied')
+      setTimeout(() => setIsCopied(false), 2000)
+    } else {
+      toast.error('Clipboard copy failed. Use Download instead.')
+    }
+  }
+
+  const handleDownloadKeyphrase = async () => {
+    if (!newKeyphrase) return
+    const saved = await downloadStructuredKeyphrase(newKeyphrase, 'Rekey replacement keyphrase')
+    if (saved) toast.success('Keyphrase document saved')
   }
 
   const unsupportedReason = useMemo(() => {
@@ -231,7 +232,6 @@ export default function Rekey() {
 
   const currentNeedsBoth = Boolean(archiveHints?.password_hint && archiveHints?.keyphrase_hint)
   const newKeyphraseWordCount = splitKeyphraseWords(newKeyphrase).length
-  const passwordStrength = getStrength(newPassword)
   const hasMinLen = newPassword.length >= 12
   const hasUpper = /[A-Z]/.test(newPassword)
   const hasLower = /[a-z]/.test(newPassword)
@@ -598,29 +598,7 @@ export default function Rekey() {
                         </button>
                       </div>
 
-                      <div className="p-3 bg-container-bg border border-av-border/30 rounded-xl shadow-[inset_0_4px_15px_var(--container-bg)]">
-                        <div className="flex items-center justify-between text-[10px] font-bold text-av-main opacity-80 mb-2.5 uppercase tracking-[0.15em]">
-                          <span>Password Strength</span>
-                          <span className={passwordStrength < 40 ? 'text-red-400' : passwordStrength < 80 ? 'text-amber-400' : 'text-emerald-400'}>
-                            {passwordStrength < 40 ? 'WEAK' : passwordStrength < 80 ? 'MODERATE' : 'OPTIMAL'}
-                          </span>
-                        </div>
-                        <div className="h-1.5 bg-av-border/40 rounded-full overflow-hidden mb-4">
-                          <div
-                            style={{ width: `${passwordStrength}%` }}
-                            className={`h-full rounded-full transition-all duration-500 ${
-                              passwordStrength < 40 ? 'bg-red-400' : passwordStrength < 80 ? 'bg-amber-400' : 'bg-emerald-400'
-                            }`}
-                          />
-                        </div>
-                        <div className="grid grid-cols-2 gap-y-2 text-[10.5px] font-medium text-av-main opacity-90 tracking-wide">
-                          <RuleDot ok={hasMinLen} label="Length >= 12" />
-                          <RuleDot ok={hasUpper} label="Uppercase" />
-                          <RuleDot ok={hasLower} label="Lowercase" />
-                          <RuleDot ok={hasNumber} label="Numeric" />
-                          <RuleDot ok={hasSpecial} label="Symbolic Character" className="col-span-2" />
-                        </div>
-                      </div>
+                      <PasswordStrengthMeter password={newPassword} compact />
                     </div>
                   )}
                 </div>
@@ -640,12 +618,17 @@ export default function Rekey() {
                   {newKeyphraseEnabled && (
                     <div className="px-3.5 pb-3.5 space-y-3">
                       <div className="flex items-center gap-2">
-                        <button onClick={handleGenerateKeyphrase} className="flex-1 rounded-xl border border-purple-500/20 bg-purple-500/10 py-2.5 text-[13px] font-semibold text-purple-700 shadow-sm transition-colors hover:border-purple-500/40 hover:bg-purple-500/15 dark:text-purple-300">
+                        <button onClick={handleGenerateKeyphrase} className="keyphrase-generate-button flex-1 rounded-xl border py-2.5 text-[13px] font-semibold transition-colors">
                           {newKeyphrase ? 'Regenerate Keyphrase' : 'Generate New Keyphrase'}
                         </button>
                         {newKeyphrase && (
                           <button onClick={handleCopyKeyphrase} className="rounded-xl border border-av-border/40 bg-av-border/10 px-4 py-2.5 text-xs font-semibold text-av-muted transition-colors hover:bg-av-border/20 hover:text-av-main">
                             {isCopied ? 'Copied' : 'Copy'}
+                          </button>
+                        )}
+                        {newKeyphrase && (
+                          <button onClick={handleDownloadKeyphrase} className="flex items-center gap-1.5 rounded-xl border border-av-border/40 bg-av-border/10 px-4 py-2.5 text-xs font-semibold text-av-muted transition-colors hover:bg-av-border/20 hover:text-av-main">
+                            <Download className="h-3.5 w-3.5" /> Download
                           </button>
                         )}
                       </div>
@@ -769,15 +752,6 @@ function CollapsibleSettingsCard({
           {children}
         </div>
       )}
-    </div>
-  )
-}
-
-function RuleDot({ ok, label, className = '' }: { ok: boolean; label: string; className?: string }) {
-  return (
-    <div className={`flex items-center gap-2 ${className}`}>
-      <div className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${ok ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]' : 'bg-av-border/50'}`} />
-      {label}
     </div>
   )
 }

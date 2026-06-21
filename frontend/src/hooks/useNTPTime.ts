@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { callCoreResponse } from '../lib/backend'
-const POLL_INTERVAL_MS = 60_000
+const DEFAULT_POLL_INTERVAL_MS = 60_000
 
 function getLocalTimeZoneLabel(ms: number): string {
   const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(new Date(ms))
@@ -30,7 +30,14 @@ export interface NTPTimeState {
   timeZoneLabel: string | null
 }
 
-export function useNTPTime(): NTPTimeState {
+interface UseNTPTimeOptions {
+  pollIntervalMs?: number
+  forceRefresh?: boolean
+}
+
+export function useNTPTime(options: UseNTPTimeOptions = {}): NTPTimeState {
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
+  const forceRefresh = options.forceRefresh ?? false
   const [state, setState] = useState<NTPTimeState>({
     timeDisplay: null,
     synced: false,
@@ -45,7 +52,17 @@ export function useNTPTime(): NTPTimeState {
 
   async function fetchNTPTime() {
     try {
-      const res = await callCoreResponse('time.ntp', {}, 8000)
+      const res = await callCoreResponse(
+        'time.ntp',
+        forceRefresh
+          ? {
+              method: 'POST',
+              body: JSON.stringify({ force_refresh: true }),
+              headers: { 'content-type': 'application/json' },
+            }
+          : {},
+        8000,
+      )
       const data = await res.json()
 
       if (data.success && data.timestamp) {
@@ -62,6 +79,7 @@ export function useNTPTime(): NTPTimeState {
         setState((prev) => ({
           ...prev,
           synced: false,
+          clockSkewWarning: null,
           error: data.error ?? 'NTP sync failed',
         }))
       }
@@ -69,6 +87,7 @@ export function useNTPTime(): NTPTimeState {
       setState((prev) => ({
         ...prev,
         synced: false,
+        clockSkewWarning: null,
         error: 'Time verification failed. Check your internet connection.',
       }))
     }
@@ -92,13 +111,13 @@ export function useNTPTime(): NTPTimeState {
   useEffect(() => {
     fetchNTPTime()
     startTick()
-    pollRef.current = setInterval(fetchNTPTime, POLL_INTERVAL_MS)
+    pollRef.current = setInterval(fetchNTPTime, pollIntervalMs)
 
     return () => {
       if (tickRef.current) clearInterval(tickRef.current)
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [])
+  }, [forceRefresh, pollIntervalMs])
 
   return state
 }

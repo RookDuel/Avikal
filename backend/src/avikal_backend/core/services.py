@@ -61,6 +61,7 @@ from avikal_backend.services.ntp_service import (
     get_clock_skew_warning,
     get_ntp_datetime_utc,
     get_ntp_timestamp,
+    invalidate_cache as invalidate_ntp_cache,
 )
 from avikal_backend.version import __version__
 
@@ -107,6 +108,7 @@ class ServiceError(Exception):
 _ERROR_PATTERNS = [
     (re.compile(r"authentication failed|auth.*fail|invalid.*token|not authenticated|login.*required", re.I), "Authentication failed. Please try again."),
     (re.compile(r"time.?capsule.*locked|locked.*unlock|unlocks in|time.?lock|still locked", re.I), "This capsule is still locked."),
+    (re.compile(r"password validation failed|password must be at least|password must contain|\.avkkey password validation failed", re.I), "Use a strong password with 12+ characters, uppercase, lowercase, number, and symbol."),
     (re.compile(r"password or keyphrase is required|required for protected archive mode", re.I), "This protected archive requires a password or keyphrase."),
     (re.compile(r"old password or keyphrase is required", re.I), "Enter the current archive password or keyphrase to continue."),
     (re.compile(r"new password or keyphrase is required", re.I), "Choose a new password or keyphrase for the rekeyed archive."),
@@ -173,6 +175,26 @@ def _validate_pqc_keyfile_password_policy(request: EncryptRequest) -> None:
         validate_password_strength(password, min_length=12)
     except ValueError as exc:
         _raise(400, f".avkkey password validation failed: {exc}")
+
+
+def _validate_archive_password_policy(request: EncryptRequest) -> None:
+    password = request.password
+    if not password:
+        return
+    try:
+        validate_password_strength(password, min_length=12)
+    except ValueError as exc:
+        _raise(400, f"Password validation failed: {exc}")
+
+
+def _validate_rekey_password_policy(request: RekeyRequest) -> None:
+    password = request.new_password
+    if not password:
+        return
+    try:
+        validate_password_strength(password, min_length=12)
+    except ValueError as exc:
+        _raise(400, f"Password validation failed: {exc}")
 
 
 def _request_error(exc: Exception, context: str = "external server") -> ServiceError:
@@ -786,6 +808,8 @@ async def verify_runtime(_params: dict[str, Any] | None = None) -> dict[str, Any
 
 async def ntp_time(_params: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
+        if (_params or {}).get("force_refresh"):
+            invalidate_ntp_cache()
         utc_dt = get_ntp_datetime_utc()
         return {"success": True, "timestamp": get_ntp_timestamp(), "utc": utc_dt.isoformat(), "clock_skew_warning": get_clock_skew_warning()}
     except RuntimeError:
@@ -1055,6 +1079,7 @@ async def archive_encrypt(params: dict[str, Any]) -> dict[str, Any]:
     unlock_dt = None
     provider = None
     try:
+        _validate_archive_password_policy(request)
         _validate_pqc_keyfile_password_policy(request)
         unlock_dt = _normalize_unlock_datetime_to_utc(request.unlock_datetime) if request.unlock_datetime else None
         if request.use_timecapsule:
@@ -1071,6 +1096,10 @@ async def archive_encrypt(params: dict[str, Any]) -> dict[str, Any]:
     except ServiceError as exc:
         _best_effort_log_archive_creation(request, started_at=started_at, unlock_dt=unlock_dt, error_message=str(exc), provider=provider)
         raise
+    except ValueError as exc:
+        user_message = friendly_error(str(exc))
+        _best_effort_log_archive_creation(request, started_at=started_at, unlock_dt=unlock_dt, error_message=user_message, provider=provider)
+        raise ServiceError(user_message, code=400) from exc
     except Exception as exc:
         user_message = friendly_error(str(exc))
         _best_effort_log_archive_creation(request, started_at=started_at, unlock_dt=unlock_dt, error_message=user_message, provider=provider)
@@ -1366,6 +1395,7 @@ async def archive_rekey(params: dict[str, Any]) -> dict[str, Any]:
     request = RekeyRequest(**params)
     started_at = time.perf_counter()
     try:
+        _validate_rekey_password_policy(request)
         _validate_avk_structure(request.input_file)
         _header_info, route_hints = await asyncio.to_thread(_read_avk_public_route, request.input_file)
         if route_hints.get("provider"):

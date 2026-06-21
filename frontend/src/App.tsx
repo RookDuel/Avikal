@@ -13,6 +13,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { cn } from './lib/utils'
 import { useBackendRuntime } from './hooks/useBackendRuntime'
 import type { ExternalLaunchAction, PendingExternalLaunchAction } from './lib/externalLaunch'
+import { AVIKAL_IS_BETA } from './lib/appMetadata'
 
 type Tab = 'encrypt' | 'decrypt' | 'rekey' | 'timecapsule'
 type SettingsTab = 'appearance' | 'aavrit' | 'privacy' | 'defaults' | 'runtime' | 'diagnostics' | 'updates' | 'help'
@@ -40,9 +41,11 @@ function BrandLockup({ compact = false }: { compact?: boolean }) {
       <span className={cn(compact ? 'text-sm leading-none font-medium tracking-wide text-av-main whitespace-nowrap' : 'text-[2.45rem] leading-none font-light tracking-[0.22em] text-av-main')}>
         RookDuel Avikal
       </span>
-      <div className={cn(compact ? 'flex items-center self-center' : 'pt-1')}>
-        <BetaBadge compact={compact} />
-      </div>
+      {AVIKAL_IS_BETA && (
+        <div className={cn(compact ? 'flex items-center self-center' : 'pt-1')}>
+          <BetaBadge compact={compact} />
+        </div>
+      )}
     </div>
   )
 }
@@ -73,10 +76,14 @@ function StartupShell({
           <BrandLockup />
           <div className="w-full max-w-md space-y-3">
             <p className="text-sm font-medium uppercase tracking-[0.24em] text-av-muted">
-              {isUnavailable ? 'Connection failed' : 'Initializing secure engine'}
+              {isUnavailable ? 'Connection failed' : AVIKAL_IS_BETA ? 'Initializing beta engine' : 'Initializing secure engine'}
             </p>
             <p className="text-sm leading-7 text-av-muted">
-              {isUnavailable ? backendDetail : 'Avikal opens when the local backend is ready.'}
+              {isUnavailable
+                ? backendDetail
+                : AVIKAL_IS_BETA
+                  ? 'Avikal Beta opens when the local backend is ready.'
+                  : 'Avikal opens when the local backend is ready.'}
             </p>
           </div>
           <div className="w-full max-w-md space-y-3">
@@ -94,7 +101,10 @@ function StartupShell({
                 initial={{ x: '-70%' }}
                 animate={isUnavailable ? { x: 0 } : { x: ['-70%', '10%', '92%'] }}
                 transition={isUnavailable ? { duration: 0.2 } : { duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
-                className={cn('h-full rounded-full', isUnavailable ? 'w-full bg-red-500/80' : 'w-1/4 bg-av-accent')}
+                className={cn(
+                  'h-full rounded-full',
+                  isUnavailable ? 'w-full bg-red-500/80' : AVIKAL_IS_BETA ? 'w-1/4 bg-av-accent' : 'w-1/3 bg-av-main',
+                )}
               />
             </div>
           </div>

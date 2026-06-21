@@ -41,22 +41,6 @@ def validate_password_strength(password: str, min_length: int = 12) -> tuple:
             f"Example strong password: MyS3cur3P@ssw0rd2026!"
         )
 
-    if re.search(r"(.)\1{2,}", password):  # 3+ repeated chars
-        raise ValueError(
-            "Password contains repeated characters (e.g., 'aaa', '111').\n"
-            "Please use a more varied password."
-        )
-
-    for i in range(len(password) - 2):
-        if password[i : i + 3].isdigit():
-            nums = [int(password[i + j]) for j in range(3)]
-            if nums[1] == nums[0] + 1 and nums[2] == nums[1] + 1:
-                raise ValueError(
-                    f"Password contains sequential numbers ('{password[i:i+3]}').\n"
-                    "Sequential patterns are easy to guess.\n"
-                    "Please use a more random password."
-                )
-
     return True, None
 
 

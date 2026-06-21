@@ -20,6 +20,7 @@ import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
 import KeyphraseAssistInput, { splitKeyphraseWords } from '../components/KeyphraseAssistInput'
 import ProcessingOverlay from '../components/ProcessingOverlay'
+import TrustedTimeNotice from '../components/TrustedTimeNotice'
 
 // ── Result Tree Types ─────────────────────────────────────────────
 interface ExtractedFile {
@@ -700,6 +701,7 @@ export default function Decrypt() {
 
   return (
     <div className="av-page-shell">
+      <TrustedTimeNotice enabled={archiveHints?.provider === 'drand'} context="decode" />
 
       {/* 60/40 Split Architecture */}
       <div className="av-work-grid">

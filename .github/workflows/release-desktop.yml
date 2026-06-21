@@ -9,6 +9,14 @@ on:
         description: Tag of the GitHub release to attach Windows installer assets to
         required: true
         type: string
+      release_channel:
+        description: Frontend release channel for visible UI branding
+        required: false
+        default: production
+        type: choice
+        options:
+          - beta
+          - production
 
 permissions:
   contents: write
@@ -19,6 +27,7 @@ jobs:
     env:
       OPENSSL_VERSION: "3.5.6"
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      VITE_AVIKAL_RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.release_channel || (contains(github.ref_name, 'beta') && 'beta' || 'production') }}
 
     steps:
       - name: Checkout
@@ -181,6 +190,10 @@ jobs:
             packaging_model = "bundled-gui-and-bundled-cli-with-shared-core-reuse"
           }
           $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json
+
+      - name: Verify release version, assets, and hashes
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File packaging\windows\verify-release-consistency.ps1 -ReleaseTag $env:RELEASE_TAG
 
       - name: Upload Windows installer artifacts to workflow
         uses: actions/upload-artifact@v4

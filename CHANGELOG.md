@@ -11,4 +11,4 @@
 - Added Settings-based update checking, diagnostics, and help/legal links.
 - Added tamper-evident local activity history.
 
-See [updates.md](./updates.md) for the v1.0.4 feature summary.
+See [updates.md](./updates.md) for the v1.0.5 feature summary.

@@ -5,6 +5,9 @@
 
 const LOG_KEY = 'avikal_error_log'
 const MAX_LOG_ENTRIES = 200
+const MAX_REDACTION_DEPTH = 4
+const SENSITIVE_KEY_PATTERN = /password|keyphrase|token|secret|authorization|pqc_keyfile_password/i
+const SENSITIVE_TEXT_PATTERN = /\b(password|keyphrase|token|secret|authorization|pqc_keyfile_password)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -14,6 +17,30 @@ export interface LogEntry {
   message: string
   context?: string
   details?: unknown
+}
+
+function redactText(value: string): string {
+  return value.replace(SENSITIVE_TEXT_PATTERN, '$1=[redacted]')
+}
+
+function redactDetails(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') return redactText(value)
+  if (typeof value !== 'object' || value === null) return value
+  if (depth >= MAX_REDACTION_DEPTH) return '[redacted-depth-limit]'
+  if (seen.has(value)) return '[redacted-circular]'
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    return value.map(item => redactDetails(item, depth + 1, seen))
+  }
+
+  const output: Record<string, unknown> = {}
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = SENSITIVE_KEY_PATTERN.test(key)
+      ? '[redacted]'
+      : redactDetails(nested, depth + 1, seen)
+  }
+  return output
 }
 
 function getStoredLogs(): LogEntry[] {
@@ -43,9 +70,9 @@ function createEntry(level: LogLevel, message: string, context?: string, details
   return {
     timestamp: new Date().toISOString(),
     level,
-    message,
+    message: redactText(message),
     context,
-    details,
+    details: redactDetails(details),
   }
 }
 

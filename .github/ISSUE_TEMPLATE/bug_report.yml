@@ -60,7 +60,7 @@ body:
     id: version
     attributes:
       label: Avikal version
-      placeholder: v1.0.4-beta
+      placeholder: v1.0.5
     validations:
       required: true
   - type: dropdown

@@ -20,6 +20,9 @@ import type { PendingExternalLaunchAction } from '../lib/externalLaunch'
 import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
 import ProcessingOverlay from '../components/ProcessingOverlay'
+import { copyKeyphraseToClipboard, downloadStructuredKeyphrase } from '../lib/keyphraseExport'
+import PasswordStrengthMeter from '../components/PasswordStrengthMeter'
+import TrustedTimeNotice from '../components/TrustedTimeNotice'
 import {
   getDefaultPqcStorageMode,
   getDefaultTimecapsuleProvider,
@@ -109,18 +112,6 @@ async function fetchNTPTime(): Promise<Date> {
     // backend unavailable — try world time API
   }
   throw new Error('Trusted time is currently unavailable')
-}
-
-// ─── Password strength ────────────────────────────────────────────────────────
-function getStrength(pass: string): number {
-  if (!pass) return 0
-  let s = 0
-  if (pass.length > 8)  s += 25
-  if (pass.length > 11) s += 25
-  if (/[A-Z]/.test(pass)) s += 15
-  if (/[0-9]/.test(pass)) s += 15
-  if (/[^A-Za-z0-9]/.test(pass)) s += 20
-  return Math.min(100, s)
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -314,10 +305,10 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       /[^A-Za-z0-9]/.test(pqcKeyfilePassword) &&
       (!passwordEnabled || pqcKeyfilePassword !== password)
     )
-  const strength = getStrength(password)
-  const strengthColor = strength < 40 ? 'bg-red-400' : strength < 80 ? 'bg-amber-400' : 'bg-emerald-400'
-  const strengthLabel = strength < 40 ? 'WEAK' : strength < 80 ? 'MODERATE' : 'OPTIMAL'
-  const strengthLabelColor = strength < 40 ? 'text-red-400' : strength < 80 ? 'text-amber-400' : 'text-emerald-400'
+  const pqcKeyfilePasswordIssue =
+    pqcKeyfilePassword && passwordEnabled && pqcKeyfilePassword === password
+      ? 'Must be different from archive password.'
+      : ''
 
   const normalizeKeyphrase = (value: unknown): string => {
     if (Array.isArray(value)) return value.filter(Boolean).join(' ')
@@ -470,11 +461,22 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
     } catch { toast.error('Failed to generate keyphrase') }
   }
 
-  const handleCopyKeyphrase = () => {
+  const handleCopyKeyphrase = async () => {
     if (!keyphrase) return
-    navigator.clipboard.writeText(keyphrase)
-    setIsCopied(true)
-    setTimeout(() => setIsCopied(false), 2000)
+    const copied = await copyKeyphraseToClipboard(keyphrase)
+    if (copied) {
+      setIsCopied(true)
+      toast.success('Keyphrase copied')
+      setTimeout(() => setIsCopied(false), 2000)
+    } else {
+      toast.error('Clipboard copy failed. Use Download instead.')
+    }
+  }
+
+  const handleDownloadKeyphrase = async () => {
+    if (!keyphrase) return
+    const saved = await downloadStructuredKeyphrase(keyphrase, 'Time-Capsule recovery keyphrase')
+    if (saved) toast.success('Keyphrase document saved')
   }
 
   const togglePasswordProtection = () => {
@@ -696,6 +698,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
 
   return (
     <div className="av-page-shell">
+      <TrustedTimeNotice enabled context="timecapsule" />
 
       {/* 60/40 Split Architecture */}
       <div className="av-work-grid">
@@ -1116,22 +1119,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                 </button>
               </div>
 
-              <div className="p-4 bg-container-bg border border-av-border/30 rounded-xl shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 backdrop-blur-md">
-                 <div className="flex items-center justify-between text-[10px] font-bold text-av-muted mb-2.5 uppercase tracking-[0.15em]">
-                   <span>Password Strength</span>
-                   <span className={`${strengthLabelColor} transition-colors duration-300`}>{strengthLabel}</span>
-                 </div>
-                 <div className="h-1.5 bg-av-border/40 dark:bg-black/40 rounded-full overflow-hidden mb-4 shadow-[inset_0_2px_4px_rgba(0,0,0,0.5)]">
-                   <div style={{ width: `${strength}%` }} className={`h-full rounded-full transition-all duration-500 ease-out ${strengthColor}`} />
-                 </div>
-                 <div className="grid grid-cols-2 gap-y-2.5 text-[11px] font-medium text-av-muted tracking-wide">
-                    <div className="flex items-center gap-2"><div className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${hasMinLen ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]' : 'bg-av-border/50 dark:bg-white/10'}`}/> Length &ge; 12</div>
-                    <div className="flex items-center gap-2"><div className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${hasUpper ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]' : 'bg-av-border/50 dark:bg-white/10'}`}/> Uppercase</div>
-                    <div className="flex items-center gap-2"><div className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${hasLower ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]' : 'bg-av-border/50 dark:bg-white/10'}`}/> Lowercase</div>
-                    <div className="flex items-center gap-2"><div className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${hasNumber ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]' : 'bg-av-border/50 dark:bg-white/10'}`}/> Numeric</div>
-                    <div className="flex items-center gap-2 col-span-2"><div className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${hasSpecial ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]' : 'bg-av-border/50 dark:bg-white/10'}`}/> Symbolic Character</div>
-                 </div>
-              </div>
+              <PasswordStrengthMeter password={password} />
 
             </div>
           )}
@@ -1170,7 +1158,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           {keyphraseEnabled && (
              <div className="px-5 pb-5 space-y-4 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
                {!keyphrase ? (
-                 <button onClick={handleGenerateKeyphrase} className="w-full py-3.5 rounded-xl border border-purple-500/20 bg-purple-500/10 shadow-sm hover:bg-purple-500/15 text-[13px] font-semibold transition-all duration-300 flex items-center justify-center gap-2.5 text-purple-700 dark:text-purple-300 hover:border-purple-500/40">
+                 <button onClick={handleGenerateKeyphrase} className="keyphrase-generate-button w-full py-3.5 rounded-xl border text-[13px] font-semibold transition-all duration-300 flex items-center justify-center gap-2.5">
                     <RefreshCw className="w-4 h-4" /> Generate Recovery Keyphrase
                  </button>
                ) : (
@@ -1187,9 +1175,12 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                        </div>
                      ))}
                    </div>
-                   <div className="security-keyphrase-actions mt-4 flex items-center gap-3 pt-4">
+                   <div className="security-keyphrase-actions mt-4 flex flex-col gap-2 pt-4 sm:flex-row sm:items-center sm:gap-3">
                       <button onClick={handleCopyKeyphrase} className="security-keyphrase-copy flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-xs font-semibold transition-colors duration-300">
                         {isCopied ? <><CheckCircle2 className="w-4 h-4 text-emerald-500 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]"/> Copied</> : <><Copy className="w-4 h-4"/> Copy</>}
+                      </button>
+                      <button onClick={handleDownloadKeyphrase} className="security-keyphrase-secondary flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition-colors duration-300">
+                        <DownloadCloud className="w-4 h-4" /> Download
                       </button>
                       <button onClick={handleGenerateKeyphrase} className="security-keyphrase-secondary rounded-lg px-4 py-2 text-xs font-semibold transition-colors duration-300">
                         Regenerate
@@ -1310,11 +1301,12 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                           {showPqcKeyfilePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                         </button>
                       </div>
-                      <p className={`text-[11px] ${isValidPqcKeyfilePassword ? 'text-emerald-500' : 'text-amber-500'}`}>
-                        {pqcKeyfilePassword && passwordEnabled && pqcKeyfilePassword === password
-                          ? 'Must be different from archive password.'
-                          : 'Use 12+ chars with upper, lower, number, and symbol.'}
-                      </p>
+                      <PasswordStrengthMeter
+                        password={pqcKeyfilePassword}
+                        title=".avkkey Password Strength"
+                        compact
+                        invalidMessage={pqcKeyfilePasswordIssue}
+                      />
                     </div>
                   )}
                   {!pqcKeyfilePasswordEnabled && (
