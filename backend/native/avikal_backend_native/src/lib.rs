@@ -676,6 +676,7 @@ fn aes256gcm_decrypt(
 
 #[pyfunction]
 #[pyo3(signature = (key, base_nonce, archive_aad, payload_header, chunk_index, plaintext, compress_payload))]
+#[allow(clippy::too_many_arguments)]
 fn avp_encode_chunk(
     py: Python<'_>,
     key: Option<&[u8]>,
@@ -718,6 +719,7 @@ fn avp_encode_chunk(
 
 #[pyfunction]
 #[pyo3(signature = (key, base_nonce, archive_aad, payload_header, chunk_header, data, compressed))]
+#[allow(clippy::too_many_arguments)]
 fn avp_decode_chunk(
     py: Python<'_>,
     key: Option<&[u8]>,

@@ -65,7 +65,14 @@ jobs:
         env:
           AVIKAL_OPENSSL_EXEC: ${{ github.workspace }}\runtime\pqc\bin\openssl.exe
           PYTHONPATH: ${{ github.workspace }}\backend\src
-        run: python -m pytest backend/tests/test_pqc_provider.py -q
+        shell: powershell
+        run: |
+          if (Test-Path -LiteralPath "backend\tests\test_pqc_provider.py") {
+            python -m pytest backend/tests/test_pqc_provider.py -q
+          }
+          else {
+            Write-Host "backend\tests\test_pqc_provider.py is not present in this repository; skipping private provider test suite."
+          }
 
       - name: Package runtime artifact
         shell: powershell
