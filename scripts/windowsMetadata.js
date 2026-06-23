@@ -12,12 +12,12 @@ const RCEDIT_PATH = path.join(
 
 const BRANDING = Object.freeze({
   companyName: "RookDuel",
-  productName: "RookDuel Avikal Beta",
-  fileDescription: "RookDuel Avikal Beta - Quantum-Resistant File Encryption",
+  productName: "RookDuel Avikal",
+  fileDescription: "RookDuel Avikal - Quantum-Resistant File Encryption",
   homepage: "https://avikal.rookduel.tech",
   copyright: "Copyright (c) 2026 RookDuel",
-  originalFilename: "RookDuel Avikal-beta.exe",
-  internalName: "RookDuel Avikal Beta",
+  originalFilename: "RookDuel Avikal.exe",
+  internalName: "RookDuel Avikal",
   iconPath: path.join(__dirname, "..", "assets", "icon.ico"),
 });
 

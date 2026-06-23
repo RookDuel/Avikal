@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const sourceDevMode = process.env.AVIKAL_USE_SOURCE_BACKEND === '1';
 const devServerUrl = normalizeDevServerUrl(process.env.AVIKAL_DEV_SERVER_URL);
 const frontendDevMode = Boolean(devServerUrl);
+const productionRendererMode = !frontendDevMode;
 const BACKEND_READY_TIMEOUT_MS = sourceDevMode ? 30000 : 45000;
 const BACKEND_HEALTH_POLL_INTERVAL_MS = 250;
 const BACKEND_HEALTH_REQUEST_TIMEOUT_MS = 1500;
@@ -256,10 +257,10 @@ async function checkLatestRelease() {
   const metadataVerified = assertReleaseMetadataMatchesAssets(metadata, assets);
   const guiAsset = metadataVerified
     ? findReleaseAsset(assets, new RegExp(`^${metadata.gui_installer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
-    : findReleaseAsset(assets, /^RookDuel Avikal-beta\.exe$/i);
+    : findReleaseAsset(assets, /^RookDuel Avikal\.exe$/i);
   const cliAsset = metadataVerified
     ? findReleaseAsset(assets, new RegExp(`^${metadata.cli_installer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
-    : findReleaseAsset(assets, /^RookDuel Avikal CLI-beta\.exe$/i);
+    : findReleaseAsset(assets, /^RookDuel Avikal CLI\.exe$/i);
   const recommendedInstallers = [
     buildRecommendedInstaller(guiAsset, metadataVerified ? metadata.gui_installer_sha256 : null, 'windows-gui'),
     buildRecommendedInstaller(cliAsset, metadataVerified ? metadata.cli_installer_sha256 : null, 'windows-cli'),
@@ -892,7 +893,7 @@ function createTray() {
   }
 
   tray = new Tray(getAppIconPath());
-  tray.setToolTip('RookDuel Avikal Beta');
+  tray.setToolTip('RookDuel Avikal');
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
@@ -925,6 +926,43 @@ function createTray() {
     }
 
     focusMainWindow();
+  });
+}
+
+function isDevToolsShortcut(input) {
+  const key = String(input?.key || '').toLowerCase();
+  const code = String(input?.code || '').toLowerCase();
+  const ctrlOrMeta = Boolean(input?.control || input?.meta);
+  const shift = Boolean(input?.shift);
+
+  if (key === 'f12' || code === 'f12') {
+    return true;
+  }
+
+  if (ctrlOrMeta && shift && ['i', 'j', 'c'].includes(key)) {
+    return true;
+  }
+
+  return false;
+}
+
+function hardenProductionWebContents(webContents) {
+  if (!productionRendererMode || !webContents) {
+    return;
+  }
+
+  webContents.on('before-input-event', (event, input) => {
+    if (isDevToolsShortcut(input)) {
+      event.preventDefault();
+    }
+  });
+
+  webContents.on('devtools-opened', () => {
+    webContents.closeDevTools();
+  });
+
+  webContents.on('context-menu', (event) => {
+    event.preventDefault();
   });
 }
 
@@ -1278,11 +1316,13 @@ async function createWindow() {
       sandbox: true,
       webviewTag: false,
       spellcheck: false,
+      devTools: !productionRendererMode,
       preload: path.join(__dirname, 'preload.js')
     },
     frame: false,
     show: false
   });
+  hardenProductionWebContents(mainWindow.webContents);
   
   // Load app immediately
   if (frontendDevMode) {
@@ -1629,6 +1669,9 @@ registerTrustedHandler('safeStorage:isAvailable', async () => {
 
 // App lifecycle
 app.whenReady().then(() => {
+  if (productionRendererMode) {
+    Menu.setApplicationMenu(null);
+  }
   createTray();
   return createWindow();
 });

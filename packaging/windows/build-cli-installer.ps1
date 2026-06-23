@@ -87,7 +87,7 @@ try {
     $distRoot = Join-Path $projectRoot "dist"
     $workRoot = Join-Path $projectRoot ".tmp_build\windows-cli-installer"
     $payloadRoot = Join-Path $workRoot "payload"
-    $installerPath = Join-Path $distRoot "RookDuel Avikal CLI-beta.exe"
+    $installerPath = Join-Path $distRoot "RookDuel Avikal CLI.exe"
     $nsiPath = Join-Path $workRoot "avikal-cli-installer.nsi"
 
     if (Test-Path -LiteralPath $workRoot) {

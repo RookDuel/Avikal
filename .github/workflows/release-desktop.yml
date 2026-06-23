@@ -119,7 +119,7 @@ jobs:
       - name: Smoke-test Windows CLI installer
         shell: powershell
         run: |
-          $cliInstallerExe = (Resolve-Path "dist\RookDuel Avikal CLI-beta.exe").Path
+          $cliInstallerExe = (Resolve-Path "dist\RookDuel Avikal CLI.exe").Path
           $cliInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel Avikal CLI"
           $installerProcess = Start-Process -FilePath $cliInstallerExe -ArgumentList "/S" -Wait -PassThru
           $installerExitCode = $installerProcess.ExitCode
@@ -155,7 +155,7 @@ jobs:
             throw "Packaged OpenSSL runtime mismatch. Expected $env:AVIKAL_OPENSSL_VERSION but got $packagedVersion"
           }
 
-          $installerExe = Join-Path (Resolve-Path dist) "RookDuel Avikal-beta.exe"
+          $installerExe = Join-Path (Resolve-Path dist) "RookDuel Avikal.exe"
           if (-not (Test-Path -LiteralPath $installerExe)) {
             throw "Installer executable was not produced in dist."
           }
@@ -163,7 +163,7 @@ jobs:
             throw "GUI installer is too small to be a bundled local installer. Refusing to release: $((Get-Item -LiteralPath $installerExe).Length) bytes."
           }
 
-          $cliInstallerExe = Join-Path (Resolve-Path dist) "RookDuel Avikal CLI-beta.exe"
+          $cliInstallerExe = Join-Path (Resolve-Path dist) "RookDuel Avikal CLI.exe"
           if (-not (Test-Path -LiteralPath $cliInstallerExe)) {
             throw "CLI installer executable was not produced in dist."
           }
@@ -200,10 +200,10 @@ jobs:
         with:
           name: avikal-windows-installers
           path: |
-            dist/RookDuel Avikal-beta.exe
-            dist/RookDuel Avikal-beta.exe.sha256
-            dist/RookDuel Avikal CLI-beta.exe
-            dist/RookDuel Avikal CLI-beta.exe.sha256
+            dist/RookDuel Avikal.exe
+            dist/RookDuel Avikal.exe.sha256
+            dist/RookDuel Avikal CLI.exe
+            dist/RookDuel Avikal CLI.exe.sha256
             dist/avikal-release-metadata.json
             dist/avikal-cli-release-metadata.json
 
@@ -212,9 +212,9 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            dist/RookDuel Avikal-beta.exe
-            dist/RookDuel Avikal-beta.exe.sha256
-            dist/RookDuel Avikal CLI-beta.exe
-            dist/RookDuel Avikal CLI-beta.exe.sha256
+            dist/RookDuel Avikal.exe
+            dist/RookDuel Avikal.exe.sha256
+            dist/RookDuel Avikal CLI.exe
+            dist/RookDuel Avikal CLI.exe.sha256
             dist/avikal-release-metadata.json
             dist/avikal-cli-release-metadata.json
