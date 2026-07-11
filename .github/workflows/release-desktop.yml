@@ -82,26 +82,61 @@ jobs:
           backend\venv\Scripts\python.exe -m pip install --upgrade pip==26.0.1
           backend\venv\Scripts\python.exe -m pip install --require-hashes -r backend\requirements-lock-windows.txt
 
-      - name: Install OpenSSL PQC runtime build tools
-        timeout-minutes: 10
-        shell: powershell
+      - name: Restore OpenSSL PQC runtime artifact
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $runtimeManifest = Join-Path $PWD "runtime\pqc\avikal-openssl-runtime.json"
           if (Test-Path -LiteralPath $runtimeManifest) {
-            Write-Host "Using committed OpenSSL PQC runtime; skipping source-build tool installation."
+            Write-Host "Using checked-out OpenSSL PQC runtime."
             return
           }
-          choco install strawberryperl --version=5.42.2.1 -y --no-progress
-          choco install nasm --version=3.2.0 -y --no-progress
-          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          $artifactName = "avikal-openssl-pqc-runtime-win-x64-openssl-$env:OPENSSL_VERSION"
+          $artifactResponse = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts?per_page=100" | ConvertFrom-Json
+          $artifact = $artifactResponse.artifacts |
+            Where-Object { $_.name -eq $artifactName -and -not $_.expired } |
+            Sort-Object -Property created_at -Descending |
+            Select-Object -First 1
+          if (-not $artifact) {
+            throw "Missing OpenSSL PQC runtime artifact '$artifactName'. Run the Build OpenSSL PQC Runtime workflow first."
+          }
+
+          $downloadRoot = Join-Path $PWD ".tmp_build\openssl-runtime-artifact"
+          $outerZip = Join-Path $downloadRoot "artifact.zip"
+          $outerExtract = Join-Path $downloadRoot "artifact"
+          $runtimeRoot = Join-Path $PWD "runtime\pqc"
+          Remove-Item -LiteralPath $downloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $runtimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
+          New-Item -ItemType Directory -Path $outerExtract -Force | Out-Null
+          New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          Invoke-WebRequest -Uri $artifact.archive_download_url -Headers $headers -OutFile $outerZip
+          Expand-Archive -LiteralPath $outerZip -DestinationPath $outerExtract -Force
+          $runtimeZip = Get-ChildItem -LiteralPath $outerExtract -Filter "*.zip" -File -Recurse | Select-Object -First 1
+          if (-not $runtimeZip) {
+            throw "OpenSSL PQC runtime artifact '$artifactName' did not contain a runtime zip."
+          }
+          Expand-Archive -LiteralPath $runtimeZip.FullName -DestinationPath $runtimeRoot -Force
+          if (-not (Test-Path -LiteralPath $runtimeManifest)) {
+            throw "Downloaded OpenSSL PQC runtime is missing avikal-openssl-runtime.json."
+          }
+          Write-Host "Restored OpenSSL PQC runtime from artifact '$artifactName'."
 
       - name: Ensure PQC runtime is available
         shell: powershell
         run: |
           $runtimeManifest = Join-Path $PWD "runtime\pqc\avikal-openssl-runtime.json"
           if (-not (Test-Path -LiteralPath $runtimeManifest)) {
-            powershell -ExecutionPolicy Bypass -File scripts\build_openssl_runtime.ps1 -Version $env:OPENSSL_VERSION
+            throw "OpenSSL PQC runtime is missing. The release workflow requires a prebuilt runtime artifact."
           }
 
       - name: Install drand helper dependencies
