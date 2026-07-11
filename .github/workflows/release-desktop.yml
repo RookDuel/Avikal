@@ -176,6 +176,25 @@ jobs:
       - name: Build self-contained Windows CLI installer
         run: npm run package:windows:cli
 
+      - name: Validate CLI payload install scripts
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $payloadRoot = Resolve-Path ".tmp_build\windows-cli-installer\payload"
+          $validationLocalAppData = Join-Path $env:RUNNER_TEMP "avikal-cli-payload-validation"
+          Remove-Item -LiteralPath $validationLocalAppData -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $validationLocalAppData -Force | Out-Null
+          $originalLocalAppData = $env:LOCALAPPDATA
+          try {
+            $env:LOCALAPPDATA = $validationLocalAppData
+            powershell -NoProfile -ExecutionPolicy Bypass -File "packaging\windows\install-shared-core.ps1" -SourceRoot $payloadRoot -Version $packageVersion
+            powershell -NoProfile -ExecutionPolicy Bypass -File "packaging\windows\install-cli-launcher.ps1" -Version $packageVersion
+          }
+          finally {
+            $env:LOCALAPPDATA = $originalLocalAppData
+          }
+
       - name: Build unsigned Microsoft Store MSIX
         if: ${{ vars.AVIKAL_STORE_IDENTITY_NAME != '' && vars.AVIKAL_STORE_PUBLISHER != '' && vars.AVIKAL_STORE_PUBLISHER_DISPLAY_NAME != '' }}
         shell: pwsh
