@@ -144,7 +144,7 @@
       "installerHeaderIcon": "assets/icon.ico",
       "displayLanguageSelector": false,
       "differentialPackage": false,
-      "runAfterFinish": true
+      "runAfterFinish": false
     },
     "mac": {
       "target": [
