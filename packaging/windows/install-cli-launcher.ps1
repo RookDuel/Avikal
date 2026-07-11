@@ -22,7 +22,7 @@ if (-not (Test-Path $backendExe)) {
     throw "Missing shared Avikal core executable: $backendExe"
 }
 
-$launcherRoot = Join-Path $env:LOCALAPPDATA "Programs\RookDuel Avikal CLI"
+$launcherRoot = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal CLI"
 New-Item -ItemType Directory -Path $launcherRoot -Force | Out-Null
 $launcherPath = Join-Path $launcherRoot "avikal.cmd"
 @"

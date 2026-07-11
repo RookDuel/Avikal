@@ -147,13 +147,30 @@ jobs:
         run: packaging\windows\build-store-msix.ps1
 
       - name: Smoke-test Windows GUI installer
+        timeout-minutes: 10
         shell: pwsh
         run: |
+          function Invoke-ProcessWithTimeout {
+            param(
+              [Parameter(Mandatory = $true)][string]$FilePath,
+              [string[]]$ArgumentList = @(),
+              [int]$TimeoutSeconds = 300,
+              [string]$Label = "process"
+            )
+            $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              throw "$Label timed out after $TimeoutSeconds seconds."
+            }
+            return $process.ExitCode
+          }
+
           $guiInstallerExe = (Resolve-Path "dist\RookDuel-Avikal.exe").Path
           $guiInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal"
-          $installerProcess = Start-Process -FilePath $guiInstallerExe -ArgumentList "/S" -Wait -PassThru
-          if ($installerProcess.ExitCode -ne 0) {
-            throw "GUI installer failed during smoke test with exit code $($installerProcess.ExitCode)."
+          Remove-Item -LiteralPath $guiInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+          $installerExitCode = Invoke-ProcessWithTimeout -FilePath $guiInstallerExe -ArgumentList @("/S") -TimeoutSeconds 300 -Label "GUI installer"
+          if ($installerExitCode -ne 0) {
+            throw "GUI installer failed during smoke test with exit code $installerExitCode."
           }
           $guiExecutable = Join-Path $guiInstallDir "RookDuel-Avikal.exe"
           if (-not (Test-Path -LiteralPath $guiExecutable)) {
@@ -161,22 +178,38 @@ jobs:
           }
           $env:AVIKAL_VERIFY_INSTALLATION = '1'
           try {
-            $verifyProcess = Start-Process -FilePath $guiExecutable -Wait -PassThru
+            $verifyExitCode = Invoke-ProcessWithTimeout -FilePath $guiExecutable -TimeoutSeconds 120 -Label "GUI runtime verification"
           }
           finally {
             Remove-Item Env:\AVIKAL_VERIFY_INSTALLATION -ErrorAction SilentlyContinue
           }
-          if ($verifyProcess.ExitCode -ne 0) {
-            throw "Installed GUI runtime verification failed with exit code $($verifyProcess.ExitCode)."
+          if ($verifyExitCode -ne 0) {
+            throw "Installed GUI runtime verification failed with exit code $verifyExitCode."
           }
 
       - name: Smoke-test Windows CLI installer
+        timeout-minutes: 10
         shell: pwsh
         run: |
+          function Invoke-ProcessWithTimeout {
+            param(
+              [Parameter(Mandatory = $true)][string]$FilePath,
+              [string[]]$ArgumentList = @(),
+              [int]$TimeoutSeconds = 300,
+              [string]$Label = "process"
+            )
+            $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              throw "$Label timed out after $TimeoutSeconds seconds."
+            }
+            return $process.ExitCode
+          }
+
           $cliInstallerExe = (Resolve-Path "dist\RookDuel-Avikal-CLI.exe").Path
-          $cliInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel Avikal CLI"
-          $installerProcess = Start-Process -FilePath $cliInstallerExe -ArgumentList "/S" -Wait -PassThru
-          $installerExitCode = $installerProcess.ExitCode
+          $cliInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal CLI"
+          Remove-Item -LiteralPath $cliInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+          $installerExitCode = Invoke-ProcessWithTimeout -FilePath $cliInstallerExe -ArgumentList @("/S") -TimeoutSeconds 300 -Label "CLI installer"
           Write-Host "CLI installer exit code: $installerExitCode"
           if (Test-Path -LiteralPath $cliInstallDir) {
             Get-ChildItem -LiteralPath $cliInstallDir -Force -Recurse -ErrorAction SilentlyContinue | Select-Object -First 80 FullName,Length | Format-Table -AutoSize
@@ -190,14 +223,14 @@ jobs:
             throw "CLI launcher was not installed: $cliLauncher"
           }
 
-          & $cliLauncher --verify-runtime
-          if ($LASTEXITCODE -ne 0) {
-            throw "Installed CLI runtime verification failed."
+          $verifyExitCode = Invoke-ProcessWithTimeout -FilePath $cliLauncher -ArgumentList @("--verify-runtime") -TimeoutSeconds 120 -Label "CLI runtime verification"
+          if ($verifyExitCode -ne 0) {
+            throw "Installed CLI runtime verification failed with exit code $verifyExitCode."
           }
 
-          & $cliLauncher --help
-          if ($LASTEXITCODE -ne 0) {
-            throw "Installed CLI help smoke test failed."
+          $helpExitCode = Invoke-ProcessWithTimeout -FilePath $cliLauncher -ArgumentList @("--help") -TimeoutSeconds 120 -Label "CLI help smoke test"
+          if ($helpExitCode -ne 0) {
+            throw "Installed CLI help smoke test failed with exit code $helpExitCode."
           }
 
       - name: Verify packaged runtimes and prepare release assets
