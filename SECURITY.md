@@ -47,11 +47,15 @@ Passwords and keyphrases are not intentionally persisted. They still exist tempo
 
 ## PQC Mode
 
-Optional PQC protection uses OpenSSL-backed primitives, including:
+Optional PQC protection records the exact selected suite. Supported OpenSSL-backed primitives include:
 
+- ML-KEM-768
 - ML-KEM-1024
 - X25519
+- ML-DSA-65
 - ML-DSA-87
+- SLH-DSA-SHA2-128s
+- SLH-DSA-SHA2-192s
 - SLH-DSA-SHA2-256s
 
 External `.avkkey` files can optionally be protected by an additional keyfile password. Embedded PQC behavior remains separate.
@@ -99,6 +103,16 @@ Avikal does not claim protection against:
 - Treat decrypted preview files as temporary plaintext.
 - Use the activity export only after confirming it contains no sensitive operational detail for your environment.
 - Use `avikal doctor` to verify CLI runtime readiness.
+
+## Release Integrity
+
+- Production builds must be created from the exact Git tag being released.
+- GitHub release metadata is signed with Avikal's offline Ed25519 release key. Installed clients reject unsigned or invalid metadata and do not display its hashes as verified.
+- Production packages contain an Ed25519-signed manifest for the backend executable, native crypto module, OpenSSL executable, and OpenSSL crypto library.
+- GitHub Actions publishes SHA-256 files, a CycloneDX SBOM, and GitHub artifact provenance attestations.
+- GitHub NSIS installers are self-contained but are not Authenticode-trusted unless a future certificate is explicitly added. Users should verify the publisher metadata, SHA-256 value, and GitHub attestation.
+- Microsoft Store builds use the separate MSIX workflow and rely on Microsoft Store package signing rather than a repository-owned paid certificate.
+- Release signing private keys must never be committed. The workflow reads the key only from the protected `AVIKAL_RELEASE_SIGNING_PRIVATE_KEY_B64` Actions secret.
 
 ## Reporting a Vulnerability
 

@@ -34,6 +34,11 @@ function Get-PqcRuntimePath {
     return (Join-Path $CoreRoot "backend-runtime\pqc\bin\openssl.exe")
 }
 
+function Get-PqcLibraryPath {
+    param([string]$CoreRoot)
+    return (Join-Path $CoreRoot "backend-runtime\pqc\bin\libcrypto-3-x64.dll")
+}
+
 function Get-Sha256OrThrow {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
@@ -60,13 +65,17 @@ function Test-SharedCore {
         }
         $nativePath = Get-NativeModulePath -CoreRoot $CoreRoot
         $pqcPath = Get-PqcRuntimePath -CoreRoot $CoreRoot
-        if (-not $nativePath -or -not (Test-Path $pqcPath)) {
+        $pqcLibraryPath = Get-PqcLibraryPath -CoreRoot $CoreRoot
+        if (-not $nativePath -or -not (Test-Path $pqcPath) -or -not (Test-Path $pqcLibraryPath)) {
             return $false
         }
         if ([string]$manifest.nativeModuleHash -ne (Get-Sha256OrThrow -Path $nativePath)) {
             return $false
         }
         if ([string]$manifest.pqcRuntimeHash -ne (Get-Sha256OrThrow -Path $pqcPath)) {
+            return $false
+        }
+        if ([string]$manifest.pqcLibraryHash -ne (Get-Sha256OrThrow -Path $pqcLibraryPath)) {
             return $false
         }
         & $backendExe --verify-runtime | Out-Null
@@ -109,6 +118,7 @@ Copy-Item -LiteralPath $sourceRuntime -Destination (Join-Path $tempRoot "backend
 
 $nativePath = Get-NativeModulePath -CoreRoot $tempRoot
 $opensslPath = Get-PqcRuntimePath -CoreRoot $tempRoot
+$libcryptoPath = Get-PqcLibraryPath -CoreRoot $tempRoot
 $manifest = [ordered]@{
     version = $Version
     appVersion = $Version
@@ -117,6 +127,7 @@ $manifest = [ordered]@{
     executablePath = (Join-Path $coreRoot "backend\avikal-backend.exe")
     nativeModuleHash = Get-Sha256OrThrow -Path $nativePath
     pqcRuntimeHash = Get-Sha256OrThrow -Path $opensslPath
+    pqcLibraryHash = Get-Sha256OrThrow -Path $libcryptoPath
     archiveCompatibility = "avk-v1"
     installedAt = (Get-Date).ToUniversalTime().ToString("o")
 }

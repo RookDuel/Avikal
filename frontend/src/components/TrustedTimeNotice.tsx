@@ -1,4 +1,4 @@
-import { AlertTriangle, WifiOff } from 'lucide-react'
+﻿import { AlertTriangle, WifiOff } from 'lucide-react'
 import { useNTPTime } from '../hooks/useNTPTime'
 
 interface TrustedTimeNoticeProps {
@@ -14,7 +14,7 @@ export default function TrustedTimeNotice({ enabled, context = 'timecapsule' }: 
   if (clockSkewWarning) {
     return (
       <div className="mx-auto mb-4 w-full max-w-[94rem] px-4 sm:px-6">
-        <div className="trusted-time-notice trusted-time-notice-danger flex items-start gap-3 rounded-2xl border px-4 py-3 shadow-[0_14px_34px_rgba(239,68,68,0.12)] backdrop-blur-xl">
+        <div className="trusted-time-notice trusted-time-notice-danger flex items-start gap-3 rounded-2xl border px-4 py-3 shadow-[0_14px_34px_rgba(239,68,68,0.12)]">
           <AlertTriangle className="trusted-time-notice-icon mt-0.5 h-5 w-5 shrink-0" strokeWidth={1.8} />
           <div className="min-w-0">
             <p className="trusted-time-notice-title text-sm font-bold tracking-tight">System clock is out of sync with trusted network time.</p>
@@ -32,7 +32,7 @@ export default function TrustedTimeNotice({ enabled, context = 'timecapsule' }: 
     const action = context === 'decode' ? 'unlock drand Time-Capsule archives' : 'create drand Time-Capsules'
     return (
       <div className="mx-auto mb-4 w-full max-w-[94rem] px-4 sm:px-6">
-        <div className="trusted-time-notice trusted-time-notice-warning flex items-start gap-3 rounded-2xl border px-4 py-3 shadow-[0_14px_34px_rgba(245,158,11,0.12)] backdrop-blur-xl">
+        <div className="trusted-time-notice trusted-time-notice-warning flex items-start gap-3 rounded-2xl border px-4 py-3 shadow-[0_14px_34px_rgba(245,158,11,0.12)]">
           <WifiOff className="trusted-time-notice-icon mt-0.5 h-5 w-5 shrink-0" strokeWidth={1.8} />
           <div className="min-w-0">
             <p className="trusted-time-notice-title text-sm font-bold tracking-tight">Trusted network time is unavailable.</p>

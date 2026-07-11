@@ -45,12 +45,20 @@ export interface ElectronExportFilesToDirectoryOptions {
   files: Array<{
     sourcePath: string
     relativePath: string
+    type?: 'file' | 'directory'
   }>
+}
+
+export interface ElectronAssuranceReportExportOptions {
+  report: Record<string, unknown>
+  format: 'json' | 'pdf'
+  defaultPath?: string
 }
 
 export interface ElectronExportDirectoryResult {
   destinationPath: string
   copiedCount: number
+  createdDirectoryCount?: number
 }
 
 export type BackendRuntimeState = 'idle' | 'starting' | 'ready' | 'error' | 'stopped'
@@ -69,6 +77,15 @@ export interface AppInfo {
   arch: string
   packaged: boolean
   updateFeed: string
+}
+
+export type VisualMode = 'effects' | 'normal'
+export type VisualModeEngine = 'native' | 'css' | 'none'
+
+export interface VisualModeResult {
+  mode: VisualMode
+  engine?: VisualModeEngine
+  automaticMode?: VisualMode
 }
 
 export interface UpdateAsset {
@@ -110,6 +127,7 @@ declare global {
     saveTextFile?: (options: ElectronSaveTextOptions) => Promise<string | null>
     exportFileCopy?: (options: ElectronExportCopyOptions) => Promise<string | null>
     exportFilesToDirectory?: (options: ElectronExportFilesToDirectoryOptions) => Promise<ElectronExportDirectoryResult | null>
+    exportAssuranceReport?: (options: ElectronAssuranceReportExportOptions) => Promise<string | null>
     openPath?: (path: string) => Promise<void>
     openExternal?: (url: string) => Promise<void>
     onBackendLog?: (callback: (message: string) => void) => () => void
@@ -123,6 +141,9 @@ declare global {
     maximizeWindow: () => Promise<void>
     closeWindow: () => Promise<void>
     updateTheme?: (isDark: boolean) => void
+    getVisualMode?: () => Promise<VisualModeResult>
+    setVisualMode?: (mode: VisualMode) => Promise<VisualModeResult>
+    onVisualModeChanged?: (callback: (status: VisualModeResult) => void) => () => void
     platform: string
     isWindows: boolean
     isMac: boolean
@@ -131,6 +152,14 @@ declare global {
       encrypt: (data: string) => Promise<string>
       decrypt: (encryptedData: string) => Promise<string>
       isAvailable: () => Promise<boolean>
+    }
+    creatorIdentity?: {
+      create: (label: string) => Promise<Record<string, unknown>>
+      list: () => Promise<{ identities: Record<string, unknown>[]; trusted: Record<string, unknown>[]; secureStorageAvailable: boolean }>
+      delete: (identityId: string) => Promise<boolean>
+      exportPublic: (identityId: string) => Promise<string | null>
+      importTrusted: () => Promise<Record<string, unknown> | null>
+      setTrust: (identityId: string, status: 'trusted' | 'revoked') => Promise<Record<string, unknown>>
     }
     getPendingLaunchAction?: () => Promise<ExternalLaunchAction | null>
     onLaunchAction?: (callback: (action: ExternalLaunchAction) => void) => () => void

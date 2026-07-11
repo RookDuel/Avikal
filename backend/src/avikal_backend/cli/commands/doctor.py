@@ -66,6 +66,8 @@ def doctor_backend(args: argparse.Namespace) -> dict[str, Any]:
     checks["native_crypto"] = {
         "available": native_status.available,
         "import_error": native_status.import_error,
+        "memory_lock_available": bool(getattr(native_status, "memory_lock_available", False)),
+        "process_hardening_available": bool(getattr(native_status, "process_hardening_available", False)),
     }
 
     import_results: dict[str, bool] = {}

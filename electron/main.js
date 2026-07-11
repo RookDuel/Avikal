@@ -11,18 +11,21 @@ const os = require('os');
 const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
-const sourceDevMode = process.env.AVIKAL_USE_SOURCE_BACKEND === '1';
-const devServerUrl = normalizeDevServerUrl(process.env.AVIKAL_DEV_SERVER_URL);
+const packagedApp = app.isPackaged;
+const verifyInstallationMode = packagedApp && process.env.AVIKAL_VERIFY_INSTALLATION === '1';
+delete process.env.AVIKAL_VERIFY_INSTALLATION;
+const sourceDevMode = !packagedApp && process.env.AVIKAL_USE_SOURCE_BACKEND === '1';
+const devServerUrl = packagedApp ? null : normalizeDevServerUrl(process.env.AVIKAL_DEV_SERVER_URL);
 const frontendDevMode = Boolean(devServerUrl);
 const productionRendererMode = !frontendDevMode;
 const BACKEND_READY_TIMEOUT_MS = sourceDevMode ? 30000 : 45000;
 const BACKEND_HEALTH_POLL_INTERVAL_MS = 250;
 const BACKEND_HEALTH_REQUEST_TIMEOUT_MS = 1500;
 const CORE_TRANSPORT_URL = 'stdio://avikal-core';
-const UPDATE_REPO_OWNER = process.env.AVIKAL_UPDATE_REPO_OWNER || 'RookDuel';
-const UPDATE_REPO_NAME = process.env.AVIKAL_UPDATE_REPO_NAME || 'Avikal';
-const UPDATE_RELEASES_API_URL = process.env.AVIKAL_UPDATE_RELEASES_API_URL || `https://api.github.com/repos/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
-const UPDATE_RELEASES_PAGE_URL = process.env.AVIKAL_UPDATE_RELEASES_PAGE_URL || `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
+const UPDATE_REPO_OWNER = 'RookDuel';
+const UPDATE_REPO_NAME = 'Avikal';
+const UPDATE_RELEASES_API_URL = `https://api.github.com/repos/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
+const UPDATE_RELEASES_PAGE_URL = `https://github.com/${UPDATE_REPO_OWNER}/${UPDATE_REPO_NAME}/releases/latest`;
 const OFFICIAL_RELEASE_HOSTS = new Set([
   'api.github.com',
   'github.com',
@@ -36,6 +39,13 @@ const ALLOWED_EXTERNAL_HOSTS = new Set([
 const MAX_DIRECTORY_SCAN_DEPTH = 12;
 const MAX_DIRECTORY_SCAN_ENTRIES = 20000;
 const MAX_SAVED_TEXT_BYTES = 5 * 1024 * 1024;
+const MAX_ASSURANCE_REPORT_BYTES = 2 * 1024 * 1024;
+const FORBIDDEN_REPORT_FIELDS = new Set([
+  'password', 'keyphrase', 'private_bundle', 'private_key', 'master_key',
+  'payload_key', 'derived_key', 'pqc_shared_secret', 'absolute_path',
+]);
+const CREATOR_IDENTITY_STORE_VERSION = 1;
+const RELEASE_SIGNING_PUBLIC_KEY_PATH = path.join(__dirname, 'release-signing-public.pem');
 const SHARED_CORE_VENDOR_DIR = path.join('RookDuel', 'Avikal', 'Core');
 const PRODUCTION_RENDERER_CSP = [
   "default-src 'self'",
@@ -54,7 +64,14 @@ const CORE_METHOD_POLICIES = Object.freeze({
   'archive.encrypt': { timeoutMs: 0 },
   'archive.decrypt': { timeoutMs: 0 },
   'archive.inspect': { timeoutMs: 30000 },
-  'archive.rekey': { timeoutMs: 120000 },
+  'archive.splitVolumes': { timeoutMs: 0 },
+  'archive.joinVolumes': { timeoutMs: 0 },
+  'archive.openSession': { timeoutMs: 0 },
+  'archive.extractSelection': { timeoutMs: 0 },
+  'archive.extractAll': { timeoutMs: 0 },
+  'archive.verifyAll': { timeoutMs: 0 },
+  'archive.closeSession': { timeoutMs: 10000 },
+  'archive.rekey': { timeoutMs: 0 },
   'pqc.keyfileInspect': { timeoutMs: 10000 },
   'preview.cleanupSession': { timeoutMs: 10000 },
   'preview.cleanupAll': { timeoutMs: 10000 },
@@ -74,6 +91,83 @@ const CORE_METHOD_POLICIES = Object.freeze({
   'security.activityLogClear': { timeoutMs: 30000 },
 });
 
+function creatorIdentityStorePath() {
+  return path.join(app.getPath('userData'), 'creator-identities.json');
+}
+
+async function readCreatorIdentityStore() {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(creatorIdentityStorePath(), 'utf8'));
+    if (parsed?.version !== CREATOR_IDENTITY_STORE_VERSION || !Array.isArray(parsed.identities) || !Array.isArray(parsed.trusted)) {
+      throw new Error('Creator identity store format is invalid');
+    }
+    return parsed;
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { version: CREATOR_IDENTITY_STORE_VERSION, identities: [], trusted: [] };
+    }
+    throw error;
+  }
+}
+
+function hardenWindowsPrivatePath(target) {
+  if (process.platform !== 'win32') return;
+  const identity = spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 10000,
+  });
+  const match = String(identity.stdout || '').match(/"[^"]+","(S-1-[^"]+)"/);
+  if (identity.status !== 0 || !match) {
+    throw new Error('Unable to determine the Windows user identity for private storage');
+  }
+  const acl = spawnSync('icacls.exe', [target, '/inheritance:r', '/grant:r', `*${match[1]}:F`, '/Q'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 15000,
+  });
+  if (acl.status !== 0) {
+    throw new Error('Unable to apply a private Windows ACL to creator identity storage');
+  }
+}
+
+async function writeCreatorIdentityStore(store) {
+  const target = creatorIdentityStorePath();
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  const temporary = `${target}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+  const payload = JSON.stringify(store, null, 2);
+  await fs.promises.writeFile(temporary, payload, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await fs.promises.rename(temporary, target);
+  hardenWindowsPrivatePath(target);
+}
+
+function publicIdentityView(record) {
+  return {
+    identity_id: record.identity_id,
+    label: record.label,
+    created_at: record.created_at,
+    public_bundle: record.public_bundle,
+    persistent: true,
+  };
+}
+
+async function loadCreatorSigningIdentity(identityId) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('OS secure storage is unavailable; creator identity cannot be unlocked');
+  }
+  const store = await readCreatorIdentityStore();
+  const record = store.identities.find((item) => item.identity_id === identityId);
+  if (!record) throw new Error('Selected creator identity was not found');
+  const privateJson = safeStorage.decryptString(Buffer.from(record.encrypted_private_bundle, 'base64'));
+  let privateBundle;
+  try {
+    privateBundle = JSON.parse(privateJson);
+  } catch {
+    throw new Error('Stored creator identity is corrupted');
+  }
+  return { public_bundle: record.public_bundle, private_bundle: privateBundle };
+}
+
 let mainWindow;
 let pythonProcess;
 let coreRpcClient = null;
@@ -84,9 +178,54 @@ let backendStartupState = createBackendStartupState();
 let backendRuntimeStatus = createBackendRuntimeStatus('idle');
 const allowedFilePaths = new Set();
 const allowedFileRoots = new Set();
+let activeVisualMode = detectDefaultVisualMode();
+let activeVisualEngine = 'none';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function detectDefaultVisualMode() {
+  if (process.platform !== 'win32') return 'normal';
+  const totalMemoryGb = os.totalmem() / (1024 ** 3);
+  const logicalCores = os.cpus()?.length || 1;
+  if (totalMemoryGb < 7.5 || logicalCores < 4) return 'normal';
+  return 'effects';
+}
+
+function normalizeVisualMode(mode) {
+  return mode === 'effects' ? 'effects' : 'normal';
+}
+
+function applyWindowVisualMode(mode) {
+  activeVisualMode = normalizeVisualMode(mode);
+  activeVisualEngine = activeVisualMode === 'effects' ? 'css' : 'none';
+  if (!mainWindow || mainWindow.isDestroyed()) return activeVisualMode;
+
+  try {
+    if (process.platform === 'win32' && typeof mainWindow.setBackgroundMaterial === 'function') {
+      const buildNumber = Number(os.release().split('.')[2] || 0);
+      const supportsNativeMaterial = Number.isFinite(buildNumber) && buildNumber >= 22000;
+      mainWindow.setBackgroundMaterial(activeVisualMode === 'effects' && supportsNativeMaterial ? 'acrylic' : 'none');
+      activeVisualEngine = activeVisualMode === 'effects' && supportsNativeMaterial ? 'native' : activeVisualEngine;
+    }
+  } catch (error) {
+    console.warn('Failed to apply native background material:', error);
+    activeVisualEngine = activeVisualMode === 'effects' ? 'css' : 'none';
+  }
+
+  try {
+    mainWindow.setBackgroundColor('#050505');
+  } catch (error) {
+    console.warn('Failed to apply window background color:', error);
+  }
+
+  try {
+    mainWindow.webContents.send('visual-mode:changed', { mode: activeVisualMode, engine: activeVisualEngine });
+  } catch {
+    // Window may not be ready yet.
+  }
+  return activeVisualMode;
 }
 
 function normalizeVersion(value) {
@@ -174,15 +313,29 @@ function findReleaseAsset(assets, pattern) {
   return assets.find((asset) => pattern.test(asset.name));
 }
 
-async function readReleaseMetadataAsset(assets) {
+async function readVerifiedReleaseMetadataAsset(assets) {
   const metadataAsset = findReleaseAsset(assets, /^avikal-release-metadata\.json$/i);
-  if (!metadataAsset) {
+  const signatureAsset = findReleaseAsset(assets, /^avikal-release-metadata\.json\.sig$/i);
+  if (!metadataAsset || !signatureAsset) {
     return null;
   }
   try {
-    return await httpsJson(metadataAsset.url);
+    const [metadataText, signatureText] = await Promise.all([
+      httpsText(metadataAsset.url),
+      httpsText(signatureAsset.url),
+    ]);
+    const signature = Buffer.from(signatureText.trim(), 'base64');
+    if (signature.length !== 64) {
+      throw new Error('Release metadata signature has an invalid length');
+    }
+    const publicKey = fs.readFileSync(RELEASE_SIGNING_PUBLIC_KEY_PATH, 'utf8');
+    const verified = crypto.verify(null, Buffer.from(metadataText, 'utf8'), publicKey, signature);
+    if (!verified) {
+      throw new Error('Release metadata signature verification failed');
+    }
+    return JSON.parse(metadataText);
   } catch (error) {
-    console.warn('Failed to read release metadata asset:', error);
+    console.warn('Failed to verify release metadata asset:', error);
     return null;
   }
 }
@@ -214,7 +367,7 @@ function validateReleaseUrl(url) {
   }
 }
 
-function assertReleaseMetadataMatchesAssets(metadata, assets) {
+function assertReleaseMetadataMatchesAssets(metadata, assets, expectedVersion) {
   if (!metadata || typeof metadata !== 'object') return false;
   const guiName = String(metadata.gui_installer_name || '');
   const cliName = String(metadata.cli_installer_name || '');
@@ -222,6 +375,9 @@ function assertReleaseMetadataMatchesAssets(metadata, assets) {
   if (!normalizeSha256(metadata.gui_installer_sha256) || !normalizeSha256(metadata.cli_installer_sha256)) return false;
   if (!assets.some((asset) => asset.name === guiName)) return false;
   if (!assets.some((asset) => asset.name === cliName)) return false;
+  const metadataVersion = String(metadata.product_version || '').replace(/^v/i, '');
+  if (!normalizeVersion(metadataVersion) || compareVersions(metadataVersion, expectedVersion) !== 0) return false;
+  if (!/^[a-f0-9]{40,64}$/i.test(String(metadata.source_commit || ''))) return false;
   return true;
 }
 
@@ -253,14 +409,14 @@ async function checkLatestRelease() {
           }
         })
     : [];
-  const metadata = await readReleaseMetadataAsset(assets);
-  const metadataVerified = assertReleaseMetadataMatchesAssets(metadata, assets);
+  const metadata = await readVerifiedReleaseMetadataAsset(assets);
+  const metadataVerified = assertReleaseMetadataMatchesAssets(metadata, assets, latestVersion);
   const guiAsset = metadataVerified
     ? findReleaseAsset(assets, new RegExp(`^${metadata.gui_installer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
-    : findReleaseAsset(assets, /^RookDuel Avikal\.exe$/i);
+    : findReleaseAsset(assets, /^RookDuel-Avikal\.exe$/i);
   const cliAsset = metadataVerified
     ? findReleaseAsset(assets, new RegExp(`^${metadata.cli_installer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))
-    : findReleaseAsset(assets, /^RookDuel Avikal CLI\.exe$/i);
+    : findReleaseAsset(assets, /^RookDuel-Avikal-CLI\.exe$/i);
   const recommendedInstallers = [
     buildRecommendedInstaller(guiAsset, metadataVerified ? metadata.gui_installer_sha256 : null, 'windows-gui'),
     buildRecommendedInstaller(cliAsset, metadataVerified ? metadata.cli_installer_sha256 : null, 'windows-cli'),
@@ -1033,6 +1189,28 @@ function getPqcRuntimeExecutable(coreRoot) {
     : path.join(coreRoot, 'backend-runtime', 'pqc', 'bin', 'openssl');
 }
 
+function getPqcRuntimeLibrary(coreRoot) {
+  let candidates;
+  if (process.platform === 'win32') {
+    candidates = [
+      path.join(coreRoot, 'backend-runtime', 'pqc', 'bin', 'libcrypto-3-x64.dll'),
+      path.join(coreRoot, 'backend-runtime', 'pqc', 'bin', 'libcrypto-3.dll'),
+    ];
+  } else if (process.platform === 'darwin') {
+    candidates = [
+      path.join(coreRoot, 'backend-runtime', 'pqc', 'lib', 'libcrypto.3.dylib'),
+      path.join(coreRoot, 'backend-runtime', 'pqc', 'bin', 'libcrypto.3.dylib'),
+    ];
+  } else {
+    candidates = [
+      path.join(coreRoot, 'backend-runtime', 'pqc', 'lib', 'libcrypto.so.3'),
+      path.join(coreRoot, 'backend-runtime', 'pqc', 'lib64', 'libcrypto.so.3'),
+      path.join(coreRoot, 'backend-runtime', 'pqc', 'bin', 'libcrypto.so.3'),
+    ];
+  }
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+}
+
 function getNativeModulePath(coreRoot) {
   const candidates = [
     path.join(coreRoot, 'backend', '_internal', 'avikal_backend', '_native.pyd'),
@@ -1049,9 +1227,40 @@ function readSharedCoreManifest(coreRoot) {
   }
 }
 
+function verifySignedRuntimeManifest(coreRoot) {
+  try {
+    const manifestPath = path.join(coreRoot, 'backend-runtime', 'avikal-runtime-integrity.json');
+    const signaturePath = `${manifestPath}.sig`;
+    const manifestBytes = fs.readFileSync(manifestPath);
+    const signature = Buffer.from(fs.readFileSync(signaturePath, 'ascii').trim(), 'base64');
+    const publicKey = fs.readFileSync(RELEASE_SIGNING_PUBLIC_KEY_PATH, 'utf8');
+    if (signature.length !== 64 || !crypto.verify(null, manifestBytes, publicKey, signature)) {
+      return false;
+    }
+    const manifest = JSON.parse(manifestBytes.toString('utf8'));
+    if (manifest?.format !== 'avikal-runtime-integrity' || manifest.version !== 1 || manifest.product_version !== app.getVersion()) {
+      return false;
+    }
+    if (!Array.isArray(manifest.files) || manifest.files.length < 4 || manifest.files.length > 32) {
+      return false;
+    }
+    for (const entry of manifest.files) {
+      if (!entry || typeof entry.path !== 'string' || !/^[a-zA-Z0-9_./-]+$/.test(entry.path)) return false;
+      const target = path.resolve(coreRoot, entry.path);
+      const relative = path.relative(path.resolve(coreRoot), target);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || !fs.existsSync(target)) return false;
+      const stat = fs.statSync(target);
+      if (!stat.isFile() || stat.size !== entry.size || hashFileIfPresent(target) !== entry.sha256) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function verifySharedCoreManifest(coreRoot, executablePath) {
   const manifest = readSharedCoreManifest(coreRoot);
-  if (!manifest || manifest.version !== app.getVersion() || manifest.platform !== process.platform) {
+  if (!manifest || manifest.version !== app.getVersion() || manifest.platform !== process.platform || !verifySignedRuntimeManifest(coreRoot)) {
     return false;
   }
   if (manifest.executablePath && path.normalize(manifest.executablePath) !== path.normalize(executablePath)) {
@@ -1060,11 +1269,13 @@ function verifySharedCoreManifest(coreRoot, executablePath) {
 
   const nativeModulePath = getNativeModulePath(coreRoot);
   const pqcExecutable = getPqcRuntimeExecutable(coreRoot);
-  if (!nativeModulePath || !fs.existsSync(pqcExecutable)) {
+  const pqcLibrary = getPqcRuntimeLibrary(coreRoot);
+  if (!nativeModulePath || !fs.existsSync(pqcExecutable) || !fs.existsSync(pqcLibrary)) {
     return false;
   }
   return manifest.nativeModuleHash === hashFileIfPresent(nativeModulePath)
-    && manifest.pqcRuntimeHash === hashFileIfPresent(pqcExecutable);
+    && manifest.pqcRuntimeHash === hashFileIfPresent(pqcExecutable)
+    && manifest.pqcLibraryHash === hashFileIfPresent(pqcLibrary);
 }
 
 function runCoreRuntimeVerification(executablePath) {
@@ -1099,11 +1310,15 @@ function verifyCoreExecutable(executablePath, coreRoot) {
 function writeSharedCoreManifest(coreRoot, executablePath) {
   const nativeModulePath = getNativeModulePath(coreRoot);
   const pqcExecutable = getPqcRuntimeExecutable(coreRoot);
+  const pqcLibrary = getPqcRuntimeLibrary(coreRoot);
   if (!nativeModulePath) {
     throw new Error('Bundled Avikal core is missing the native crypto module');
   }
   if (!fs.existsSync(pqcExecutable)) {
     throw new Error('Bundled Avikal core is missing the PQC runtime');
+  }
+  if (!fs.existsSync(pqcLibrary)) {
+    throw new Error('Bundled Avikal core is missing the PQC libcrypto runtime');
   }
   const manifest = {
     version: app.getVersion(),
@@ -1113,6 +1328,7 @@ function writeSharedCoreManifest(coreRoot, executablePath) {
     executablePath,
     nativeModuleHash: hashFileIfPresent(nativeModulePath),
     pqcRuntimeHash: hashFileIfPresent(pqcExecutable),
+    pqcLibraryHash: hashFileIfPresent(pqcLibrary),
     archiveCompatibility: 'avk-v1',
     installedAt: new Date().toISOString(),
   };
@@ -1134,6 +1350,9 @@ function ensureSharedCoreInstalled(bundledBackendRoot) {
   const bundledExecutable = getPackagedBackendExecutable(bundledBackendRoot);
   if (!bundledExecutable || !fs.existsSync(bundledExecutable) || !fs.existsSync(bundledRuntimeRoot)) {
     return null;
+  }
+  if (!verifySignedRuntimeManifest(process.resourcesPath)) {
+    throw new Error('Bundled Avikal core failed publisher manifest verification');
   }
 
   const parent = path.dirname(coreRoot);
@@ -1220,6 +1439,28 @@ function startPythonBackend() {
     AVIKAL_ELECTRON_EXEC: process.execPath,
     AVIKAL_PQC_TEMP_DIR: path.join(app.getPath('userData'), 'pqc-work'),
   };
+
+  if (packagedApp) {
+    for (const key of [
+      'AVIKAL_USE_SOURCE_BACKEND',
+      'AVIKAL_DEV_SERVER_URL',
+      'AVIKAL_OPENSSL_EXEC',
+      'AVIKAL_PQC_RUNTIME_DIR',
+      'AVIKAL_UPDATE_REPO_OWNER',
+      'AVIKAL_UPDATE_REPO_NAME',
+      'AVIKAL_UPDATE_RELEASES_API_URL',
+      'AVIKAL_UPDATE_RELEASES_PAGE_URL',
+      'PYTHONINSPECT',
+      'PYTHONSTARTUP',
+      'PYTHONUSERBASE',
+      'OPENSSL_CONF',
+      'OPENSSL_MODULES',
+    ]) {
+      delete pythonEnv[key];
+    }
+    pythonEnv.AVIKAL_PACKAGED_RUNTIME = '1';
+    pythonEnv.AVIKAL_SECURITY_POLICY_FILE = path.join(process.resourcesPath, 'security-policy.json');
+  }
 
   if (!sourceDevMode && !usePackagedBackend) {
     pythonEnv.AVIKAL_USER_DATA_DIR = app.getPath('userData');
@@ -1308,7 +1549,8 @@ async function createWindow() {
     height: 800,
     minWidth: 760,
     minHeight: 620,
-    backgroundColor: '#0A0E27',
+    backgroundColor: '#050505',
+    backgroundMaterial: 'none',
     icon: getAppIconPath(),
     webPreferences: {
       nodeIntegration: false,
@@ -1322,6 +1564,7 @@ async function createWindow() {
     frame: false,
     show: false
   });
+  applyWindowVisualMode(activeVisualMode);
   hardenProductionWebContents(mainWindow.webContents);
   
   // Load app immediately
@@ -1499,6 +1742,82 @@ registerTrustedHandler('file:saveText', async (_event, options = {}) => {
   return destination;
 });
 
+function validateAssuranceReport(report) {
+  if (!report || typeof report !== 'object' || Array.isArray(report) || report.format !== 'avikal-assurance-report') {
+    throw new Error('Only canonical Avikal assurance reports can be exported');
+  }
+  const inspect = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(inspect);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const [key, nested] of Object.entries(value)) {
+      if (FORBIDDEN_REPORT_FIELDS.has(String(key).trim().toLowerCase())) {
+        throw new Error('Assurance report contains a forbidden secret field');
+      }
+      inspect(nested);
+    }
+  };
+  inspect(report);
+  const json = JSON.stringify(report, null, 2);
+  if (Buffer.byteLength(json, 'utf8') > MAX_ASSURANCE_REPORT_BYTES) {
+    throw new Error('Assurance report is too large to export safely');
+  }
+  return json;
+}
+
+function escapeReportHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function reportPdfHtml(report) {
+  const sections = ['archive', 'compatibility', 'verification_ledger', 'assurance', 'protection', 'payload', 'chess', 'timings', 'operation', 'runtime_attestation', 'redaction_declaration', 'limitations'];
+  const blocks = sections
+    .filter((name) => report[name] && typeof report[name] === 'object')
+    .map((name) => `<section><h2>${escapeReportHtml(name.replaceAll('_', ' '))}</h2><pre>${escapeReportHtml(JSON.stringify(report[name], null, 2))}</pre></section>`)
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    @page{size:A4;margin:17mm}*{box-sizing:border-box}body{font-family:Segoe UI,Arial,sans-serif;color:#172033;font-size:10px;line-height:1.5}
+    header{border-bottom:2px solid #172033;padding-bottom:12px;margin-bottom:18px}h1{font-size:22px;margin:0 0 4px}header p{margin:0;color:#526078}
+    section{break-inside:avoid;margin:0 0 16px}h2{text-transform:capitalize;font-size:13px;letter-spacing:.05em;margin:0 0 6px;color:#263b63}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f9;border:1px solid #dce2eb;border-radius:8px;padding:10px;font:9px/1.5 Consolas,monospace}
+    footer{margin-top:18px;border-top:1px solid #dce2eb;padding-top:8px;color:#667085}
+  </style></head><body><header><h1>Avikal Assurance Report</h1><p>${escapeReportHtml(report.report_type)} · ${escapeReportHtml(report.generated_at_utc)}</p></header>${blocks}<footer>Report digest: ${escapeReportHtml(report.report_digest_sha256)}<br>PDF is a human-readable rendering. Verify the exported JSON with <strong>avikal verify-report</strong>.</footer></body></html>`;
+}
+
+registerTrustedHandler('report:export', async (_event, options = {}) => {
+  const report = options.report;
+  const format = options.format === 'pdf' ? 'pdf' : 'json';
+  const json = validateAssuranceReport(report);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: options.defaultPath || `avikal-assurance-report.${format}`,
+    filters: [{ name: format === 'pdf' ? 'PDF Document' : 'Avikal Assurance Report', extensions: [format] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  const destination = resolveAbsolutePath(result.filePath, 'Report destination');
+  await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+  if (format === 'json') {
+    await fs.promises.writeFile(destination, `${json}\n`, { encoding: 'utf8' });
+  } else {
+    const reportWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+    try {
+      await reportWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(reportPdfHtml(report))}`);
+      const pdf = await reportWindow.webContents.printToPDF({ printBackground: true, pageSize: 'A4' });
+      await fs.promises.writeFile(destination, pdf);
+    } finally {
+      reportWindow.destroy();
+    }
+  }
+  registerSaveDestination(destination);
+  return destination;
+});
+
 registerTrustedHandler('file:exportCopy', async (_event, options = {}) => {
   const source = resolveAbsolutePath(options.sourcePath, 'Source path');
   assertPathCapability(source, 'File export');
@@ -1538,6 +1857,7 @@ registerTrustedHandler('file:exportFilesToDirectory', async (_event, options = {
 
   const destinationRoot = resolveAbsolutePath(result.filePaths[0], 'Destination directory');
   let copiedCount = 0;
+  let createdDirectoryCount = 0;
 
   for (const entry of fileEntries) {
     const source = resolveAbsolutePath(entry?.sourcePath, 'Source path');
@@ -1545,6 +1865,11 @@ registerTrustedHandler('file:exportFilesToDirectory', async (_event, options = {
     const relativePath = normalizeRelativePath(entry?.relativePath);
     const destination = path.join(destinationRoot, relativePath);
 
+    if (entry?.type === 'directory') {
+      await fs.promises.mkdir(destination, { recursive: true });
+      createdDirectoryCount += 1;
+      continue;
+    }
     await fs.promises.mkdir(path.dirname(destination), { recursive: true });
     await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
     registerSaveDestination(destination);
@@ -1554,6 +1879,7 @@ registerTrustedHandler('file:exportFilesToDirectory', async (_event, options = {
   return {
     destinationPath: destinationRoot,
     copiedCount,
+    createdDirectoryCount,
   };
 });
 
@@ -1577,6 +1903,17 @@ registerTrustedHandler('shell:openExternal', async (_event, url) => {
 registerTrustedListener('theme:update', (_event, { isDark }) => {
   // Native titleBarOverlay is removed; theme context is handled purely via React/CSS.
 });
+
+registerTrustedHandler('visualMode:get', async () => ({
+  mode: activeVisualMode,
+  engine: activeVisualEngine,
+  automaticMode: detectDefaultVisualMode(),
+}));
+
+registerTrustedHandler('visualMode:set', async (_event, mode) => ({
+  mode: applyWindowVisualMode(mode),
+  engine: activeVisualEngine,
+}));
 
 registerTrustedHandler('window:minimize', async () => {
   mainWindow.minimize();
@@ -1636,9 +1973,120 @@ registerTrustedHandler('core:invoke', async (_event, method, params = {}, timeou
     throw new Error('Avikal core is not ready');
   }
   const safeTimeoutMs = normalizeCoreTimeout(method, timeoutMs);
-  const result = await coreRpcClient.request(method, params && typeof params === 'object' ? params : {}, safeTimeoutMs);
-  registerCoreResultCapabilities(result);
-  return result;
+  const forwardedParams = params && typeof params === 'object' ? { ...params } : {};
+  delete forwardedParams.creator_signing_identity;
+  delete forwardedParams.creator_trust_policy;
+  let signingIdentity = null;
+  try {
+    if ((method === 'archive.encrypt' || method === 'archive.rekey') && typeof forwardedParams.creator_identity_id === 'string') {
+      signingIdentity = await loadCreatorSigningIdentity(forwardedParams.creator_identity_id);
+      forwardedParams.creator_signing_identity = signingIdentity;
+    }
+    if (method === 'archive.openSession' || method === 'archive.decrypt') {
+      const identityStore = await readCreatorIdentityStore();
+      forwardedParams.creator_trust_policy = Object.fromEntries(
+        identityStore.trusted.map((item) => [item.identity_id, item.status])
+      );
+    }
+    const result = await coreRpcClient.request(method, forwardedParams, safeTimeoutMs);
+    registerCoreResultCapabilities(result);
+    return result;
+  } finally {
+    if (signingIdentity?.private_bundle?.keys) {
+      for (const key of Object.keys(signingIdentity.private_bundle.keys)) {
+        signingIdentity.private_bundle.keys[key] = '';
+      }
+    }
+    delete forwardedParams.creator_signing_identity;
+    delete forwardedParams.creator_trust_policy;
+  }
+});
+
+registerTrustedHandler('identity:create', async (_event, label) => {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('OS secure storage is unavailable');
+  if (!coreRpcClient) throw new Error('Avikal core is not ready');
+  const normalizedLabel = String(label || '').trim();
+  if (!normalizedLabel || Buffer.byteLength(normalizedLabel, 'utf8') > 128) throw new Error('Identity label is invalid');
+  const generated = await coreRpcClient.request('identity.generate', { label: normalizedLabel }, 0);
+  const encryptedPrivate = safeStorage.encryptString(JSON.stringify(generated.private_bundle)).toString('base64');
+  const store = await readCreatorIdentityStore();
+  if (store.identities.some((item) => item.identity_id === generated.identity_id)) {
+    throw new Error('Creator identity already exists');
+  }
+  const record = {
+    identity_id: generated.identity_id,
+    label: normalizedLabel,
+    created_at: new Date().toISOString(),
+    public_bundle: generated.public_bundle,
+    encrypted_private_bundle: encryptedPrivate,
+  };
+  store.identities.push(record);
+  await writeCreatorIdentityStore(store);
+  return publicIdentityView(record);
+});
+
+registerTrustedHandler('identity:list', async () => {
+  const store = await readCreatorIdentityStore();
+  return {
+    identities: store.identities.map(publicIdentityView),
+    trusted: store.trusted.map((item) => ({ ...item })),
+    secureStorageAvailable: safeStorage.isEncryptionAvailable(),
+  };
+});
+
+registerTrustedHandler('identity:delete', async (_event, identityId) => {
+  const store = await readCreatorIdentityStore();
+  const before = store.identities.length;
+  store.identities = store.identities.filter((item) => item.identity_id !== identityId);
+  if (store.identities.length === before) return false;
+  await writeCreatorIdentityStore(store);
+  return true;
+});
+
+registerTrustedHandler('identity:exportPublic', async (_event, identityId) => {
+  const store = await readCreatorIdentityStore();
+  const record = store.identities.find((item) => item.identity_id === identityId);
+  if (!record) throw new Error('Creator identity was not found');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: `${record.label.replace(/[^a-z0-9_-]+/gi, '-') || 'avikal-identity'}.avikal-id.json`,
+    filters: [{ name: 'Avikal Public Identity', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  await fs.promises.writeFile(result.filePath, JSON.stringify(publicIdentityView(record), null, 2), { encoding: 'utf8', flag: 'w' });
+  return result.filePath;
+});
+
+registerTrustedHandler('identity:importTrusted', async () => {
+  if (!coreRpcClient) throw new Error('Avikal core is not ready');
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile'], filters: [{ name: 'Avikal Public Identity', extensions: ['json'] }] });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const raw = await fs.promises.readFile(result.filePaths[0], 'utf8');
+  if (Buffer.byteLength(raw, 'utf8') > 128 * 1024) throw new Error('Public identity file is too large');
+  const document = JSON.parse(raw);
+  const validated = await coreRpcClient.request('identity.validate', { identity: { public_bundle: document.public_bundle }, require_private: false }, 30000);
+  const store = await readCreatorIdentityStore();
+  const trustedRecord = {
+    identity_id: validated.identity_id,
+    label: String(document.label || 'Trusted creator').slice(0, 128),
+    public_bundle: validated.public_bundle,
+    status: 'trusted',
+    trusted_at: new Date().toISOString(),
+  };
+  store.trusted = store.trusted.filter((item) => item.identity_id !== trustedRecord.identity_id);
+  store.trusted.push(trustedRecord);
+  await writeCreatorIdentityStore(store);
+  return trustedRecord;
+});
+
+registerTrustedHandler('identity:setTrust', async (_event, identityId, status) => {
+  if (!['trusted', 'revoked'].includes(status)) throw new Error('Identity trust status is invalid');
+  const store = await readCreatorIdentityStore();
+  const record = store.trusted.find((item) => item.identity_id === identityId);
+  if (!record) throw new Error('Trusted identity was not found');
+  record.status = status;
+  record.updated_at = new Date().toISOString();
+  await writeCreatorIdentityStore(store);
+  return { ...record };
 });
 
 // Secure token storage
@@ -1668,7 +2116,23 @@ registerTrustedHandler('safeStorage:isAvailable', async () => {
 })
 
 // App lifecycle
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (verifyInstallationMode) {
+    try {
+      const bundledBackendRoot = getBackendRoot();
+      const backendRoot = ensureSharedCoreInstalled(bundledBackendRoot) || bundledBackendRoot;
+      const executable = getPackagedBackendExecutable(backendRoot);
+      if (!executable || !verifyCoreExecutable(executable, path.dirname(backendRoot))) {
+        throw new Error('Installed Avikal core verification failed');
+      }
+      console.log('Avikal installation verification passed');
+      app.exit(0);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      app.exit(1);
+    }
+    return;
+  }
   if (productionRendererMode) {
     Menu.setApplicationMenu(null);
   }

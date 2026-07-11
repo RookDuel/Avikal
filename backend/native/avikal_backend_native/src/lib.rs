@@ -18,9 +18,13 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest as Sha2Digest, Sha256};
 use sha3::Sha3_256;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
+
+#[cfg(windows)]
+use std::ffi::c_void;
 
 mod chess_codec;
+mod openssl_native;
 
 const AES256_KEY_BYTES: usize = 32;
 const AESGCM_NONCE_BYTES: usize = 12;
@@ -31,6 +35,95 @@ const AVP_CHUNK_HEADER_BYTES: usize = 16;
 const AVP_MAX_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 type EncoderFinalizeResult = (Py<PyBytes>, Option<Py<PyBytes>>, Py<PyBytes>, u64, u64);
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn VirtualLock(lp_address: *mut c_void, dw_size: usize) -> i32;
+    fn VirtualUnlock(lp_address: *mut c_void, dw_size: usize) -> i32;
+    fn SetErrorMode(u_mode: u32) -> u32;
+    fn SetDefaultDllDirectories(directory_flags: u32) -> i32;
+}
+
+#[cfg(windows)]
+const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+#[cfg(windows)]
+const SEM_NOGPFAULTERRORBOX: u32 = 0x0002;
+#[cfg(windows)]
+const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+#[cfg(windows)]
+const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+#[cfg(windows)]
+const LOAD_LIBRARY_SEARCH_USER_DIRS: u32 = 0x0000_0400;
+
+#[cfg(windows)]
+fn lock_memory_best_effort(bytes: &mut [u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    unsafe { VirtualLock(bytes.as_mut_ptr().cast::<c_void>(), bytes.len()) != 0 }
+}
+
+#[cfg(windows)]
+fn unlock_memory_best_effort(bytes: &mut [u8]) {
+    if !bytes.is_empty() {
+        unsafe {
+            let _ = VirtualUnlock(bytes.as_mut_ptr().cast::<c_void>(), bytes.len());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn lock_memory_best_effort(_bytes: &mut [u8]) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn unlock_memory_best_effort(_bytes: &mut [u8]) {}
+
+/// Small native secret buffer that is zeroized and best-effort pinned against paging.
+///
+/// Locking is intentionally non-fatal: Windows may deny VirtualLock because of
+/// quota or policy, but zeroization still happens before the allocation is freed.
+struct LockedSecret {
+    data: Vec<u8>,
+    locked: bool,
+}
+
+impl LockedSecret {
+    fn new(bytes: &[u8]) -> Self {
+        let mut data = bytes.to_vec();
+        let locked = lock_memory_best_effort(&mut data);
+        Self { data, locked }
+    }
+
+    fn zeroed(length: usize) -> Self {
+        let mut data = vec![0u8; length];
+        let locked = lock_memory_best_effort(&mut data);
+        Self { data, locked }
+    }
+
+    fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+impl Drop for LockedSecret {
+    fn drop(&mut self) {
+        self.data.zeroize();
+        if self.locked {
+            unlock_memory_best_effort(&mut self.data);
+        }
+    }
+}
 
 fn value_error(message: impl Into<String>) -> PyErr {
     PyValueError::new_err(message.into())
@@ -76,11 +169,12 @@ fn hkdf_sha256_impl(ikm: &[u8], salt: &[u8], info: &[u8], length: usize) -> PyRe
         ));
     }
 
-    let hkdf = Hkdf::<Sha256>::new(Some(salt), ikm);
-    let mut output = Zeroizing::new(vec![0u8; length]);
-    hkdf.expand(info, &mut output)
+    let ikm = LockedSecret::new(ikm);
+    let hkdf = Hkdf::<Sha256>::new(Some(salt), ikm.as_slice());
+    let mut output = LockedSecret::zeroed(length);
+    hkdf.expand(info, output.as_mut_slice())
         .map_err(|_| value_error("Requested HKDF output length is invalid"))?;
-    Ok(output.to_vec())
+    Ok(output.as_slice().to_vec())
 }
 
 fn hkdf_sha3_256_impl(
@@ -96,11 +190,12 @@ fn hkdf_sha3_256_impl(
         ));
     }
 
-    let hkdf = Hkdf::<Sha3_256>::new(salt, ikm);
-    let mut output = Zeroizing::new(vec![0u8; length]);
-    hkdf.expand(info, &mut output)
+    let ikm = LockedSecret::new(ikm);
+    let hkdf = Hkdf::<Sha3_256>::new(salt, ikm.as_slice());
+    let mut output = LockedSecret::zeroed(length);
+    hkdf.expand(info, output.as_mut_slice())
         .map_err(|_| value_error("Requested HKDF output length is invalid"))?;
-    Ok(output.to_vec())
+    Ok(output.as_slice().to_vec())
 }
 
 fn aes256gcm_encrypt_impl(
@@ -112,7 +207,9 @@ fn aes256gcm_encrypt_impl(
     validate_len("key", key, AES256_KEY_BYTES)?;
     validate_len("nonce", nonce, AESGCM_NONCE_BYTES)?;
 
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| value_error("key must be 32 bytes"))?;
+    let key = LockedSecret::new(key);
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
+        .map_err(|_| value_error("key must be 32 bytes"))?;
     let nonce = Nonce::from_slice(nonce);
     let mut buffer = plaintext.to_vec();
     cipher
@@ -132,7 +229,9 @@ fn aes256gcm_decrypt_impl(
     validate_len("key", key, AES256_KEY_BYTES)?;
     validate_len("nonce", nonce, AESGCM_NONCE_BYTES)?;
 
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| value_error("key must be 32 bytes"))?;
+    let key = LockedSecret::new(key);
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
+        .map_err(|_| value_error("key must be 32 bytes"))?;
     let nonce = Nonce::from_slice(nonce);
     let mut buffer = ciphertext.to_vec();
     cipher
@@ -616,12 +715,12 @@ fn derive_argon2id_key(
     let params = Params::new(memory_cost_kib, iterations, lanes, Some(length))
         .map_err(|exc| value_error(format!("Invalid Argon2id parameters: {exc}")))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let secret = Zeroizing::new(secret.to_vec());
-    let mut output = Zeroizing::new(vec![0u8; length]);
+    let secret = LockedSecret::new(secret);
+    let mut output = LockedSecret::zeroed(length);
     argon2
-        .hash_password_into(&secret, salt, &mut output)
+        .hash_password_into(secret.as_slice(), salt, output.as_mut_slice())
         .map_err(|exc| runtime_error(format!("Argon2id derivation failed: {exc}")))?;
-    Ok(PyBytes::new(py, &output).into())
+    Ok(PyBytes::new(py, output.as_slice()).into())
 }
 
 #[pyfunction]
@@ -658,7 +757,12 @@ fn aes256gcm_encrypt(
     plaintext: &[u8],
     aad: &[u8],
 ) -> PyResult<Py<PyBytes>> {
-    let ciphertext = aes256gcm_encrypt_impl(key, nonce, plaintext, aad)?;
+    let key = LockedSecret::new(key);
+    let nonce = nonce.to_vec();
+    let plaintext = plaintext.to_vec();
+    let aad = aad.to_vec();
+    let ciphertext =
+        py.detach(move || aes256gcm_encrypt_impl(key.as_slice(), &nonce, &plaintext, &aad))?;
     Ok(PyBytes::new(py, &ciphertext).into())
 }
 
@@ -670,8 +774,45 @@ fn aes256gcm_decrypt(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> PyResult<Py<PyBytes>> {
-    let plaintext = aes256gcm_decrypt_impl(key, nonce, ciphertext, aad)?;
+    let key = LockedSecret::new(key);
+    let nonce = nonce.to_vec();
+    let ciphertext = ciphertext.to_vec();
+    let aad = aad.to_vec();
+    let plaintext =
+        py.detach(move || aes256gcm_decrypt_impl(key.as_slice(), &nonce, &ciphertext, &aad))?;
     Ok(PyBytes::new(py, &plaintext).into())
+}
+
+#[pyfunction]
+fn native_memory_lock_self_test() -> bool {
+    let mut probe = LockedSecret::zeroed(AES256_KEY_BYTES);
+    probe.as_mut_slice()[0] = 0xA5;
+    probe.is_locked()
+}
+
+#[pyfunction]
+fn native_harden_windows_process() -> PyResult<bool> {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let _ = SetErrorMode(
+                SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX,
+            );
+            if SetDefaultDllDirectories(
+                LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS,
+            ) == 0
+            {
+                return Err(runtime_error(
+                    "Windows DLL search path hardening could not be enabled",
+                ));
+            }
+        }
+        Ok(true)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
 }
 
 #[pyfunction]
@@ -780,8 +921,38 @@ fn avikal_backend_native(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyRes
     module.add_function(wrap_pyfunction!(hkdf_sha3_256, module)?)?;
     module.add_function(wrap_pyfunction!(aes256gcm_encrypt, module)?)?;
     module.add_function(wrap_pyfunction!(aes256gcm_decrypt, module)?)?;
+    module.add_function(wrap_pyfunction!(native_memory_lock_self_test, module)?)?;
+    module.add_function(wrap_pyfunction!(native_harden_windows_process, module)?)?;
     module.add_function(wrap_pyfunction!(avp_encode_chunk, module)?)?;
     module.add_function(wrap_pyfunction!(avp_decode_chunk, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        openssl_native::openssl_runtime_version,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        openssl_native::openssl_generate_keypair,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        openssl_native::openssl_kem_encapsulate,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        openssl_native::openssl_kem_decapsulate,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        openssl_native::openssl_derive_secret,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        openssl_native::openssl_sign_message,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        openssl_native::openssl_verify_signature,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(sha256_digest, module)?)?;
     module.add_function(wrap_pyfunction!(
         chess_codec::encode_chess_pgn_integer,

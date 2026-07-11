@@ -5,7 +5,7 @@
 Support currently focuses on:
 
 - the active default branch
-- the latest Windows desktop beta release
+- the latest Windows desktop production release
 - the documented backend CLI entry points
 - the shared archive core used by desktop and CLI
 

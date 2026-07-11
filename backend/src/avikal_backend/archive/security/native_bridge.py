@@ -30,6 +30,77 @@ def native_available() -> bool:
     return native_module is not None
 
 
+def native_memory_lock_self_test() -> bool:
+    """Return whether the native runtime could pin a small secret buffer.
+
+    This is best-effort and may be false on systems that deny process memory
+    locking. A false value is not fatal; native zeroization still remains active.
+    """
+
+    require_native_available()
+    return bool(native_module.native_memory_lock_self_test())
+
+
+def native_harden_windows_process() -> bool:
+    """Enable native Windows process hardening for the current backend process."""
+
+    require_native_available()
+    return bool(native_module.native_harden_windows_process())
+
+
+def openssl_runtime_version(library_path: str) -> str:
+    require_native_available()
+    return str(native_module.openssl_runtime_version(str(library_path)))
+
+
+def openssl_generate_keypair(library_path: str, algorithm: str) -> tuple[str, str]:
+    require_native_available()
+    private_pem, public_pem = native_module.openssl_generate_keypair(str(library_path), algorithm)
+    return str(private_pem), str(public_pem)
+
+
+def openssl_kem_encapsulate(library_path: str, public_pem: str) -> tuple[bytes, bytes]:
+    require_native_available()
+    ciphertext, secret = native_module.openssl_kem_encapsulate(str(library_path), public_pem.encode("utf-8"))
+    return bytes(ciphertext), bytes(secret)
+
+
+def openssl_kem_decapsulate(library_path: str, private_pem: str, ciphertext: bytes) -> bytes:
+    require_native_available()
+    return bytes(native_module.openssl_kem_decapsulate(
+        str(library_path), private_pem.encode("utf-8"), _require_bytes("ciphertext", ciphertext)
+    ))
+
+
+def openssl_derive_secret(library_path: str, private_pem: str, peer_public_pem: str) -> bytes:
+    require_native_available()
+    return bytes(native_module.openssl_derive_secret(
+        str(library_path), private_pem.encode("utf-8"), peer_public_pem.encode("utf-8")
+    ))
+
+
+def openssl_sign_message(library_path: str, private_pem: str, message: bytes) -> bytes:
+    require_native_available()
+    return bytes(native_module.openssl_sign_message(
+        str(library_path), private_pem.encode("utf-8"), _require_bytes("message", message)
+    ))
+
+
+def openssl_verify_signature(
+    library_path: str,
+    public_pem: str,
+    message: bytes,
+    signature: bytes,
+) -> bool:
+    require_native_available()
+    return bool(native_module.openssl_verify_signature(
+        str(library_path),
+        public_pem.encode("utf-8"),
+        _require_bytes("message", message),
+        _require_bytes("signature", signature),
+    ))
+
+
 def require_native_available() -> None:
     if native_module is None:
         raise RuntimeError(

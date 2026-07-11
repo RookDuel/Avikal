@@ -1,6 +1,6 @@
 # Setup
 
-This guide covers source development on Windows. Windows is the primary supported packaging and QA target for the current beta line.
+This guide covers source development on Windows. Windows is the primary supported packaging and QA target for the current release line.
 
 ## Prerequisites
 

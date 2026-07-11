@@ -45,6 +45,9 @@ class ProgressTracker:
         self.start_time = time.perf_counter()
         self.last_emit_percent = -1.0
         self.last_emit_time = 0.0
+        self.last_byte_sample_time = self.start_time
+        self.last_processed_bytes = 0
+        self.throughput_bytes_per_second: float | None = None
         self.stage_offsets: dict[str, float] = {}
         offset = 0.0
         for name, weight in stages:
@@ -72,6 +75,8 @@ class ProgressTracker:
         *,
         file_size: int | None = None,
         compression_ratio: float | None = None,
+        processed_bytes: int | None = None,
+        total_bytes: int | None = None,
         force: bool = False,
     ) -> None:
         check_cancelled()
@@ -83,7 +88,23 @@ class ProgressTracker:
             return
         elapsed = time.perf_counter() - self.start_time
         eta_seconds = None
-        if fraction > 0.01:
+        if processed_bytes is not None and total_bytes is not None and total_bytes > 0:
+            safe_processed = max(0, min(int(processed_bytes), int(total_bytes)))
+            now = time.perf_counter()
+            delta_bytes = safe_processed - self.last_processed_bytes
+            delta_time = now - self.last_byte_sample_time
+            if delta_bytes >= 0 and delta_time >= 0.2:
+                instantaneous = delta_bytes / delta_time
+                self.throughput_bytes_per_second = (
+                    instantaneous
+                    if self.throughput_bytes_per_second is None
+                    else (0.25 * instantaneous) + (0.75 * self.throughput_bytes_per_second)
+                )
+                self.last_processed_bytes = safe_processed
+                self.last_byte_sample_time = now
+            if self.throughput_bytes_per_second and safe_processed < total_bytes:
+                eta_seconds = max(0, round((total_bytes - safe_processed) / self.throughput_bytes_per_second))
+        elif fraction > 0.01:
             eta_seconds = max(0, round((elapsed / fraction) - elapsed))
         payload = {
             "type": "progress",
@@ -95,6 +116,13 @@ class ProgressTracker:
             "etaSeconds": eta_seconds,
             "fileSize": file_size if file_size is not None else self.file_size,
             "compressionRatio": compression_ratio,
+            "processedBytes": processed_bytes,
+            "totalBytes": total_bytes,
+            "throughputBytesPerSecond": (
+                round(self.throughput_bytes_per_second, 2)
+                if self.throughput_bytes_per_second is not None
+                else None
+            ),
         }
         self._emit(payload, force=force)
 
@@ -109,6 +137,9 @@ class ProgressTracker:
             "etaSeconds": 0,
             "fileSize": self.file_size,
             "compressionRatio": None,
+            "processedBytes": self.file_size,
+            "totalBytes": self.file_size,
+            "throughputBytesPerSecond": self.throughput_bytes_per_second,
         }
         self._emit(payload, force=True)
 
@@ -123,6 +154,9 @@ class ProgressTracker:
             "etaSeconds": None,
             "fileSize": self.file_size,
             "compressionRatio": None,
+            "processedBytes": None,
+            "totalBytes": self.file_size,
+            "throughputBytesPerSecond": self.throughput_bytes_per_second,
         }
         self._emit(payload, force=True)
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from 'react'
+﻿import { useState, useEffect, type ReactNode } from 'react'
 import {
   Settings,
   X,
@@ -21,6 +21,7 @@ import {
   RefreshCw,
   BadgeInfo,
   Copy,
+  UserRoundCheck,
   type LucideIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -38,6 +39,7 @@ import {
   type ActivityRetentionDays,
   type TimecapsuleProvider,
   type UserPreferences,
+  type VisualEffectsMode,
 } from '../lib/preferences'
 
 interface SecuritySettingsProps {
@@ -64,6 +66,7 @@ interface SettingsPayload {
     native_crypto?: {
       available?: boolean
       import_error?: string | null
+      memory_lock_available?: boolean
     }
     pqc_provider?: {
       available?: boolean
@@ -74,7 +77,7 @@ interface SettingsPayload {
   }
 }
 
-type TabType = 'appearance' | 'aavrit' | 'privacy' | 'defaults' | 'runtime' | 'updates' | 'help' | 'diagnostics'
+type TabType = 'appearance' | 'aavrit' | 'identities' | 'privacy' | 'defaults' | 'runtime' | 'updates' | 'help' | 'diagnostics'
 type ThemeOption = 'light' | 'dark' | 'system'
 
 interface AppInfoPayload {
@@ -110,6 +113,7 @@ const CUSTOM_AAVRIT_REQUEST_URL =
   import.meta.env.VITE_CUSTOM_AAVRIT_REQUEST_URL ||
   'https://avikal.rookduel.tech/aavrit'
 const DOCS_URL = import.meta.env.VITE_AVIKAL_DOCS_URL || 'https://avikal.rookduel.tech/docs'
+let preferenceSaveSequence = 0
 const SUPPORT_URL = import.meta.env.VITE_AVIKAL_SUPPORT_URL || 'https://avikal.rookduel.tech/support'
 const SECURITY_URL = import.meta.env.VITE_AVIKAL_SECURITY_URL || 'https://avikal.rookduel.tech/security'
 const RELEASES_URL = import.meta.env.VITE_AVIKAL_RELEASES_URL || 'https://github.com/RookDuel/Avikal/releases'
@@ -121,9 +125,16 @@ const THEME_OPTIONS: Array<{ id: ThemeOption; label: string; icon: LucideIcon; d
   { id: 'system', label: 'System', icon: Monitor, desc: 'Auto-detect' },
 ]
 
+const VISUAL_MODE_OPTIONS: Array<{ id: VisualEffectsMode; label: string; desc: string }> = [
+  { id: 'auto', label: 'Auto', desc: 'Choose the safest design for this system at startup.' },
+  { id: 'effects', label: 'Effects', desc: 'Use native Windows acrylic for supported systems.' },
+  { id: 'normal', label: 'Normal', desc: 'Opaque matte interface optimized for lowest-end systems.' },
+]
+
 const TABS: Array<{ id: TabType; label: string; icon: LucideIcon }> = [
   { id: 'appearance', label: 'Appearance', icon: Sun },
   { id: 'aavrit', label: 'Aavrit', icon: Server },
+  { id: 'identities', label: 'Signing Identities', icon: UserRoundCheck },
   { id: 'privacy', label: 'Privacy', icon: ShieldCheck },
   { id: 'defaults', label: 'Archive Defaults', icon: SlidersHorizontal },
   { id: 'runtime', label: 'Runtime', icon: Server },
@@ -138,11 +149,20 @@ interface AavritDiagnosticsPayload {
   status?: string
   health?: string
   latency_ms?: number
-  public_key?: {
-    key_id?: string
-    sig_alg?: string
-    fingerprint_sha256?: string
+  protocol?: string
+  authority?: {
+    authority_id?: string
+    encryption_suite?: string
+    signature_suite?: string
+    key_ids?: Record<string, string>
   }
+}
+
+interface CreatorIdentityView {
+  identity_id: string
+  label: string
+  created_at?: string
+  status?: 'trusted' | 'revoked'
 }
 
 async function readSettingsError(response: Response, fallback: string): Promise<string> {
@@ -176,6 +196,11 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckPayload | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [activeTab, setActiveTab] = useState<TabType>('appearance')
+  const [creatorIdentities, setCreatorIdentities] = useState<CreatorIdentityView[]>([])
+  const [trustedIdentities, setTrustedIdentities] = useState<CreatorIdentityView[]>([])
+  const [identitySecureStorage, setIdentitySecureStorage] = useState(false)
+  const [identityBusy, setIdentityBusy] = useState(false)
+  const [identityLabel, setIdentityLabel] = useState('')
 
   useEffect(() => {
     if (isOpen) {
@@ -187,10 +212,110 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
       void refreshAavritDiagnostics(auth.aavritServerUrl ?? undefined, { silent: true })
       void window.electron?.safeStorage?.isAvailable?.().then(setAavritSecureStorage).catch(() => setAavritSecureStorage(false))
       void window.electron?.getAppInfo?.().then(setAppInfo).catch(() => setAppInfo(null))
+      void refreshCreatorIdentities()
     }
   }, [isOpen, initialTab])
 
+  const refreshCreatorIdentities = async () => {
+    try {
+      const bridge = window.electron?.creatorIdentity
+      if (!bridge) throw new Error('Signing identity service is unavailable')
+      const result = await bridge.list()
+      setCreatorIdentities((result?.identities || []) as unknown as CreatorIdentityView[])
+      setTrustedIdentities((result?.trusted || []) as unknown as CreatorIdentityView[])
+      setIdentitySecureStorage(Boolean(result?.secureStorageAvailable))
+    } catch {
+      setCreatorIdentities([])
+      setTrustedIdentities([])
+      setIdentitySecureStorage(false)
+    }
+  }
+
+  const createCreatorIdentity = async (label: string) => {
+    const normalizedLabel = label.trim()
+    if (!normalizedLabel) {
+      toast.error('Enter a label for the signing identity')
+      return
+    }
+    try {
+      setIdentityBusy(true)
+      const bridge = window.electron?.creatorIdentity
+      if (!bridge) throw new Error('Signing identity service is unavailable')
+      await bridge.create(normalizedLabel)
+      setIdentityLabel('')
+      await refreshCreatorIdentities()
+      toast.success('Signing identity created')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Identity creation failed')
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
+  const deleteCreatorIdentity = async (identityId: string) => {
+    try {
+      setIdentityBusy(true)
+      const bridge = window.electron?.creatorIdentity
+      if (!bridge) throw new Error('Signing identity service is unavailable')
+      const removed = await bridge.delete(identityId)
+      if (!removed) throw new Error('Signing identity was not found')
+      await refreshCreatorIdentities()
+      toast.success('Signing identity deleted')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Identity deletion failed')
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
+  const importTrustedIdentity = async () => {
+    try {
+      setIdentityBusy(true)
+      const bridge = window.electron?.creatorIdentity
+      if (!bridge) throw new Error('Signing identity service is unavailable')
+      const result = await bridge.importTrusted()
+      if (result) {
+        await refreshCreatorIdentities()
+        toast.success('Creator fingerprint trusted')
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Public identity import failed')
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
+  const exportCreatorIdentity = async (identityId: string) => {
+    try {
+      setIdentityBusy(true)
+      const bridge = window.electron?.creatorIdentity
+      if (!bridge) throw new Error('Signing identity service is unavailable')
+      const outputPath = await bridge.exportPublic(identityId)
+      if (outputPath) toast.success('Public identity card exported')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Public identity export failed')
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
+  const updateCreatorTrust = async (identityId: string, status: 'trusted' | 'revoked') => {
+    try {
+      setIdentityBusy(true)
+      const bridge = window.electron?.creatorIdentity
+      if (!bridge) throw new Error('Signing identity service is unavailable')
+      await bridge.setTrust(identityId, status)
+      await refreshCreatorIdentities()
+      toast.success(status === 'revoked' ? 'Creator fingerprint revoked' : 'Creator fingerprint trusted')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Trust update failed')
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
   const loadSettings = async () => {
+    const saveSequenceAtStart = preferenceSaveSequence
     try {
       setLoading(true)
       const response = await callCoreResponse('security.settings')
@@ -200,8 +325,10 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
         const nextSettings = data.settings as SettingsPayload
         const nextPreferences = sanitizeUserPreferences(nextSettings.preferences ?? loadUserPreferences())
         setSettings(nextSettings)
-        setPreferences(nextPreferences)
-        saveUserPreferences(nextPreferences)
+        if (preferenceSaveSequence === saveSequenceAtStart) {
+          setPreferences(nextPreferences)
+          saveUserPreferences(nextPreferences)
+        }
       }
     } catch {
       toast.error('Failed to load system settings')
@@ -212,6 +339,8 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
   }
 
   const savePreferences = async (nextPreferences: UserPreferences) => {
+    const saveSequence = preferenceSaveSequence + 1
+    preferenceSaveSequence = saveSequence
     const sanitized = sanitizeUserPreferences(nextPreferences)
     setPreferences(sanitized)
     saveUserPreferences(sanitized)
@@ -226,9 +355,11 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
         throw new Error(data.detail || data.message || 'Failed to save preferences')
       }
       const persisted = sanitizeUserPreferences(data.preferences)
-      setPreferences(persisted)
-      saveUserPreferences(persisted)
-      setSettings((current) => current ? { ...current, preferences: persisted } : current)
+      if (preferenceSaveSequence === saveSequence) {
+        setPreferences(persisted)
+        saveUserPreferences(persisted)
+        setSettings((current) => current ? { ...current, preferences: persisted } : current)
+      }
       toast.success('Preferences saved')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to save preferences'
@@ -239,7 +370,11 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
   }
 
   const patchPreferences = (patcher: (current: UserPreferences) => UserPreferences) => {
-    void savePreferences(patcher(preferences))
+    setPreferences((current) => {
+      const next = sanitizeUserPreferences(patcher(current))
+      void savePreferences(next)
+      return next
+    })
   }
 
   const exportActivityLog = async () => {
@@ -461,7 +596,7 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[100] flex items-center justify-center bg-black/35 p-4 backdrop-blur-xl sm:p-6 lg:p-10 dark:bg-black/55"
+        className="av-modal-backdrop fixed inset-0 z-[320] flex items-center justify-center p-4 sm:p-6 lg:p-10"
         onClick={onClose}
       >
         <motion.div
@@ -469,10 +604,10 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.97, opacity: 0, y: 16 }}
           transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-          className="flex h-[86vh] max-h-[780px] min-h-0 w-full max-w-5xl flex-col overflow-hidden rounded-[2rem] border border-white/20 bg-av-surface/95 shadow-[0_28px_90px_rgba(0,0,0,0.26)] ring-1 ring-black/5 backdrop-blur-2xl sm:h-[82vh] lg:h-[76vh] lg:min-h-[560px] lg:flex-row dark:border-white/10 dark:bg-av-surface/96 dark:shadow-[0_32px_110px_rgba(0,0,0,0.55)]"
+          className="av-modal-surface flex h-[86vh] max-h-[780px] min-h-0 w-full max-w-5xl flex-col overflow-hidden rounded-[2rem] ring-1 ring-black/5 sm:h-[82vh] lg:h-[76vh] lg:min-h-[560px] lg:flex-row"
           onClick={(event) => event.stopPropagation()}
         >
-          <aside className="flex min-h-0 shrink-0 flex-col border-b border-av-border/50 bg-gradient-to-br from-av-border/10 via-av-surface/70 to-av-surface/40 p-4 lg:w-64 lg:border-b-0 lg:border-r lg:p-5">
+          <aside className="flex min-h-0 shrink-0 flex-col border-b border-av-border/50 bg-av-border/5 p-4 lg:w-64 lg:border-b-0 lg:border-r lg:p-5">
             <div className="mb-4 flex items-center justify-between gap-4 lg:mb-7">
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-av-main shadow-lg shadow-black/10">
@@ -492,13 +627,13 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
               </button>
             </div>
 
-            <nav className="flex min-h-0 gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-y-auto lg:overflow-x-visible lg:pb-0">
+            <nav className="settings-tab-list flex min-h-0 gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-y-auto lg:overflow-x-visible lg:pb-0">
               {TABS.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
                   className={cn(
-                    'flex shrink-0 items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all',
+                    'settings-tab-button flex shrink-0 items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-semibold transition-all',
                     activeTab === tab.id
                       ? 'border-av-border/70 bg-av-surface text-av-main shadow-sm ring-1 ring-black/5'
                       : 'border-transparent text-av-muted hover:bg-av-border/12 hover:text-av-main',
@@ -517,7 +652,7 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
             <div className="pointer-events-none absolute right-5 top-5 z-20 hidden justify-end lg:flex">
               <button
                 onClick={onClose}
-                className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full border border-av-border/70 bg-av-surface/90 text-av-muted shadow-sm backdrop-blur transition-colors hover:bg-av-border/15 hover:text-av-main"
+                className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full border border-av-border/70 bg-av-surface text-av-muted shadow-sm transition-colors hover:bg-av-border/15 hover:text-av-main"
                 type="button"
               >
                 <X className="h-5 w-5" />
@@ -538,7 +673,18 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
                     className="mx-auto w-full max-w-4xl space-y-7"
                   >
                     {activeTab === 'appearance' && (
-                      <AppearanceTab theme={theme} setTheme={setTheme} />
+                      <AppearanceTab
+                        theme={theme}
+                        setTheme={setTheme}
+                        preferences={preferences}
+                        onVisualModeChange={(visualMode) => patchPreferences((current) => ({
+                          ...current,
+                          appearance: {
+                            ...current.appearance,
+                            visual_effects_mode: visualMode,
+                          },
+                        }))}
+                      />
                     )}
 
                     {activeTab === 'aavrit' && (
@@ -560,6 +706,22 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
                         disconnect={disconnectAavrit}
                         refresh={() => refreshAavritDiagnostics(undefined)}
                         openCustomRequest={openCustomAavritRequest}
+                      />
+                    )}
+
+                    {activeTab === 'identities' && (
+                      <SigningIdentitiesTab
+                        identities={creatorIdentities}
+                        trusted={trustedIdentities}
+                        secureStorageAvailable={identitySecureStorage}
+                        busy={identityBusy}
+                        identityLabel={identityLabel}
+                        setIdentityLabel={setIdentityLabel}
+                        createIdentity={createCreatorIdentity}
+                        deleteIdentity={deleteCreatorIdentity}
+                        exportIdentity={exportCreatorIdentity}
+                        importTrusted={importTrustedIdentity}
+                        setTrust={updateCreatorTrust}
                       />
                     )}
 
@@ -645,7 +807,7 @@ function SectionHeader({ title, description }: { title: string; description: str
 
 function Card({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div className={cn('rounded-[1.4rem] border border-av-border/65 bg-av-surface/88 p-5 shadow-[0_12px_34px_rgba(15,23,42,0.055)] backdrop-blur-xl dark:shadow-[0_16px_42px_rgba(0,0,0,0.22)]', className)}>
+    <div className={cn('rounded-[1.4rem] border border-av-border/65 bg-av-surface/88 p-5 shadow-[0_12px_34px_rgba(15,23,42,0.055)] dark:shadow-[0_16px_42px_rgba(0,0,0,0.22)]', className)}>
       {children}
     </div>
   )
@@ -712,8 +874,8 @@ function ToggleRow({
         className={cn(
           'relative h-8 w-14 shrink-0 rounded-full border p-1 transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-av-accent/15',
           checked
-            ? 'border-av-main bg-av-main shadow-inner'
-            : 'border-av-border/80 bg-av-border/20 hover:bg-av-border/30',
+            ? 'border-emerald-600 bg-emerald-600 shadow-inner dark:border-emerald-500 dark:bg-emerald-500'
+            : 'border-av-border/80 bg-av-border/20 hover:bg-av-border/30 dark:bg-white/10',
         )}
       >
         <span
@@ -727,20 +889,37 @@ function ToggleRow({
   )
 }
 
-function AppearanceTab({ theme, setTheme }: { theme: ThemeOption; setTheme: (theme: ThemeOption) => void }) {
+function AppearanceTab({
+  theme,
+  setTheme,
+  preferences,
+  onVisualModeChange,
+}: {
+  theme: ThemeOption
+  setTheme: (theme: ThemeOption) => void
+  preferences: UserPreferences
+  onVisualModeChange: (mode: VisualEffectsMode) => void
+}) {
+  const visualMode = preferences.appearance.visual_effects_mode
   return (
-    <div className="space-y-7">
-      <SectionHeader title="Appearance" description="Customize Avikal's local interface theme." />
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+    <div className="space-y-6">
+      <SectionHeader title="Appearance" description="Choose a stable visual profile for this device." />
+      <Card className="space-y-4">
+        <div>
+          <h3 className="text-sm font-bold text-av-main">Theme</h3>
+          <p className="mt-1 text-sm leading-6 text-av-muted">Controls color scheme only. It does not change performance mode.</p>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         {THEME_OPTIONS.map((option) => (
           <button
             key={option.id}
             onClick={() => setTheme(option.id)}
+            aria-pressed={theme === option.id}
             className={cn(
-              'flex flex-col items-start gap-3 rounded-2xl border p-6 text-left transition-all',
+              'flex min-h-[118px] flex-col items-start gap-3 rounded-2xl border p-4 text-left transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-av-accent/12 active:scale-[0.99]',
               theme === option.id
-                ? 'border-av-accent bg-av-accent/5 ring-2 ring-av-accent/10'
-                : 'border-av-border bg-av-surface text-av-muted hover:border-av-accent/30 hover:bg-av-border/10',
+                ? 'border-av-accent bg-av-accent/10 text-av-main ring-1 ring-av-accent/15 shadow-sm'
+                : 'border-av-border/75 bg-av-surface text-av-main hover:-translate-y-0.5 hover:border-av-accent/35 hover:bg-av-border/8 hover:shadow-sm',
             )}
             type="button"
           >
@@ -753,14 +932,152 @@ function AppearanceTab({ theme, setTheme }: { theme: ThemeOption; setTheme: (the
             </div>
           </button>
         ))}
-      </div>
-      <Card className="bg-av-border/5">
-        <h3 className="mb-3 text-sm font-bold text-av-main">Theme Preview</h3>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="h-12 rounded-xl border border-av-border bg-gradient-to-br from-[#F5F7FF] to-[#FBFBFF]" />
-          <div className="h-12 rounded-xl border border-av-border bg-[#050505]" />
         </div>
       </Card>
+      <Card className="space-y-4">
+        <div>
+          <h3 className="text-sm font-bold text-av-main">Visual engine</h3>
+          <p className="mt-1 text-sm leading-6 text-av-muted">Effects uses native acrylic where supported. Normal is matte, opaque, and fastest.</p>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {VISUAL_MODE_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => onVisualModeChange(option.id)}
+              aria-pressed={visualMode === option.id}
+              className={cn(
+                'group flex min-h-[112px] flex-col items-start justify-between rounded-2xl border p-4 text-left transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-av-accent/12 active:scale-[0.99]',
+                visualMode === option.id
+                  ? 'border-av-accent bg-av-accent/10 text-av-main ring-1 ring-av-accent/15 shadow-sm'
+                  : 'border-av-border/75 bg-av-surface text-av-main hover:-translate-y-0.5 hover:border-av-accent/35 hover:bg-av-border/8 hover:shadow-sm',
+              )}
+            >
+              <div>
+                <div className="text-sm font-bold">{option.label}</div>
+                <p className="mt-1 text-xs leading-5 text-av-muted">
+                  {option.desc}
+                </p>
+              </div>
+              {visualMode === option.id && (
+                <span className="rounded-full border border-av-accent/25 bg-av-accent/12 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-av-accent">
+                  Active
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function SigningIdentitiesTab({ identities, trusted, secureStorageAvailable, busy, identityLabel, setIdentityLabel, createIdentity, deleteIdentity, exportIdentity, importTrusted, setTrust }: {
+  identities: CreatorIdentityView[]
+  trusted: CreatorIdentityView[]
+  secureStorageAvailable: boolean
+  busy: boolean
+  identityLabel: string
+  setIdentityLabel: (label: string) => void
+  createIdentity: (label: string) => void
+  deleteIdentity: (identityId: string) => void
+  exportIdentity: (identityId: string) => void
+  importTrusted: () => void
+  setTrust: (identityId: string, status: 'trusted' | 'revoked') => void
+}) {
+  return (
+    <div className="space-y-7">
+      <SectionHeader title="Signing Identities" description="Manage creator fingerprints used to prove archive origin." />
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <StatusCard title="Private-key storage" ready={secureStorageAvailable} detail={secureStorageAvailable ? 'Protected by OS secure storage' : 'Identity creation unavailable'} />
+        <Stat label="Your identities" value={identities.length} />
+        <Stat label="Trusted creators" value={trusted.length} />
+      </div>
+
+      <Card className="space-y-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+          <label className="min-w-0 flex-1">
+            <span className="mb-2 block text-sm font-semibold text-av-main">New signing identity</span>
+            <input
+              value={identityLabel}
+              onChange={(event) => setIdentityLabel(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter') createIdentity(identityLabel) }}
+              maxLength={128}
+              placeholder="Example: Atharva primary creator key"
+              disabled={busy || !secureStorageAvailable}
+              className="w-full rounded-xl border border-av-border/80 bg-av-surface px-4 py-3 text-sm text-av-main outline-none transition focus:border-av-accent focus:ring-4 focus:ring-av-accent/10 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+          </label>
+          <button
+            disabled={busy || !secureStorageAvailable || !identityLabel.trim()}
+            onClick={() => createIdentity(identityLabel)}
+            className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-av-main px-5 text-sm font-bold text-av-surface transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            type="button"
+          >
+            <UserRoundCheck className="h-4 w-4" />
+            Create identity
+          </button>
+        </div>
+        <p className="rounded-2xl border border-av-border/55 bg-av-border/5 p-4 text-sm leading-6 text-av-muted">
+          Persistent identities let recipients recognize the same creator across multiple archives. Private key material stays outside the renderer.
+        </p>
+      </Card>
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <Card className="space-y-4">
+          <div>
+            <h3 className="font-bold text-av-main">Your private identities</h3>
+            <p className="mt-1 text-sm leading-6 text-av-muted">Export public cards for recipients. Delete only when you no longer need that creator fingerprint.</p>
+          </div>
+          <div className="space-y-3">
+            {identities.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-av-border p-5 text-sm leading-6 text-av-muted">No persistent creator identity exists. New archives can still use archive-scoped signatures.</p>
+            ) : identities.map((identity) => (
+              <div key={identity.identity_id} className="rounded-2xl border border-av-border/70 bg-av-border/5 p-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="font-bold text-av-main">{identity.label || 'Unnamed identity'}</p>
+                    {identity.created_at && <p className="mt-1 text-xs text-av-muted">Created {new Date(identity.created_at).toLocaleString()}</p>}
+                  </div>
+                  <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">Private</span>
+                </div>
+                <p className="mt-3 break-all rounded-xl border border-av-border/50 bg-av-surface/70 p-3 font-mono text-[11px] leading-5 text-av-muted">{identity.identity_id}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button disabled={busy} onClick={() => exportIdentity(identity.identity_id)} className="rounded-lg border border-av-border px-3 py-1.5 text-xs font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">Export public card</button>
+                  <button disabled={busy} onClick={() => deleteIdentity(identity.identity_id)} className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-xs font-bold text-red-700 transition-colors hover:bg-red-500/10 disabled:opacity-40 dark:text-red-300" type="button">Delete private identity</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h3 className="font-bold text-av-main">Trusted creator cards</h3>
+              <p className="mt-1 text-sm leading-6 text-av-muted">Import public fingerprints only after comparing them through a separate trusted channel.</p>
+            </div>
+            <button disabled={busy} onClick={importTrusted} className="shrink-0 rounded-xl border border-av-border px-4 py-2.5 text-sm font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">Import card</button>
+          </div>
+          <div className="space-y-3">
+            {trusted.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-av-border p-5 text-sm leading-6 text-av-muted">No external creator fingerprints are trusted on this device.</p>
+            ) : trusted.map((identity) => (
+              <div key={identity.identity_id} className="rounded-2xl border border-av-border/70 bg-av-border/5 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-bold text-av-main">{identity.label || 'Trusted creator'}</p>
+                    <p className="mt-1 break-all font-mono text-[11px] leading-5 text-av-muted">{identity.identity_id}</p>
+                  </div>
+                  <span className={cn('shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em]', identity.status === 'revoked' ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300')}>{identity.status || 'trusted'}</span>
+                </div>
+                <button disabled={busy} onClick={() => setTrust(identity.identity_id, identity.status === 'revoked' ? 'trusted' : 'revoked')} className="mt-3 rounded-lg border border-av-border px-3 py-1.5 text-xs font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">{identity.status === 'revoked' ? 'Restore trust' : 'Mark as revoked'}</button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
     </div>
   )
 }
@@ -871,7 +1188,7 @@ function AavritTab({
             </div>
             <div>
               <h3 className="font-semibold text-av-main">Private server login</h3>
-              <p className="mt-1 text-sm text-av-muted">Login is required before private Aavrit capsules can be created or opened.</p>
+              <p className="mt-1 text-sm text-av-muted">Login authorizes escrow creation on this private authority. Archive-bound release capabilities do not expose this session.</p>
             </div>
           </div>
 
@@ -943,7 +1260,7 @@ function AavritTab({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="font-semibold text-av-main">Server verification</h3>
-            <p className="mt-1 text-sm text-av-muted">Shows the Aavrit key identity Avikal will verify against.</p>
+            <p className="mt-1 text-sm text-av-muted">Verifies the authority identity and hybrid-PQC suites used for escrow and release.</p>
           </div>
           <button
             onClick={refresh}
@@ -961,10 +1278,13 @@ function AavritTab({
             <Stat label="Status" value={diagnostics.status || 'reachable'} />
             <Stat label="Health" value={diagnostics.health || 'unknown'} />
             <Stat label="Latency" value={typeof diagnostics.latency_ms === 'number' ? `${diagnostics.latency_ms} ms` : 'unknown'} />
-            <Stat label="Key ID" value={diagnostics.public_key?.key_id || 'unknown'} />
-            <Stat label="Signature" value={diagnostics.public_key?.sig_alg || 'unknown'} />
+            <Stat label="Protocol" value={diagnostics.protocol || 'unknown'} />
+            <Stat label="Authority signatures" value={diagnostics.authority?.signature_suite || 'unknown'} />
             <div className="md:col-span-2">
-              <PathBlock label="Public-key SHA-256 fingerprint" value={diagnostics.public_key?.fingerprint_sha256 || 'Unavailable'} />
+              <PathBlock label="Authority ID" value={diagnostics.authority?.authority_id || 'Unavailable'} />
+            </div>
+            <div className="md:col-span-2">
+              <PathBlock label="Release-key envelope" value={diagnostics.authority?.encryption_suite || 'Unavailable'} />
             </div>
           </div>
         ) : (
@@ -1108,28 +1428,54 @@ function RuntimeTab({
   cleaningPreviews: boolean
 }) {
   const nativeReady = Boolean(settings?.runtime?.native_crypto?.available)
+  const memoryLockReady = Boolean(settings?.runtime?.native_crypto?.memory_lock_available)
   const pqcReady = Boolean(settings?.runtime?.pqc_provider?.available)
   return (
     <div className="space-y-7">
       <SectionHeader title="Runtime" description="Inspect native crypto status and control preview cleanup behavior." />
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <StatusCard title="Native Rust crypto" ready={nativeReady} detail={nativeReady ? 'Available' : settings?.runtime?.native_crypto?.import_error || 'Unavailable'} />
+        <StatusCard title="Memory lock" ready={memoryLockReady} detail={memoryLockReady ? 'Best-effort native key pinning' : 'Unavailable or denied by OS policy'} />
         <StatusCard title="OpenSSL PQC provider" ready={pqcReady} detail={pqcReady ? 'Available' : settings?.runtime?.pqc_provider?.reason || 'Unavailable'} />
       </div>
-      <Card className="space-y-4">
-        <p className="text-sm text-av-muted">
-          Preview files are decrypted temporary files. Use this to remove every active preview session immediately.
-        </p>
-        <button
-          onClick={cleanupPreviews}
-          disabled={cleaningPreviews || saving}
-          className="inline-flex items-center gap-2 rounded-xl bg-av-main px-4 py-2.5 text-sm font-semibold text-av-surface transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-          type="button"
-        >
-          <FolderClock className="h-4 w-4" />
-          {cleaningPreviews ? 'Cleaning...' : 'Clean All Preview Files'}
-        </button>
-      </Card>
+      <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
+        <Card className="space-y-4">
+          <div className="flex items-start gap-3">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-av-border/60 bg-av-border/8 text-av-muted">
+              <Database className="h-5 w-5" />
+            </span>
+            <div>
+              <h3 className="font-bold text-av-main">Runtime paths</h3>
+              <p className="mt-1 text-sm leading-6 text-av-muted">Local directories used by the packaged backend and temporary preview sessions.</p>
+            </div>
+          </div>
+          <PathBlock label="Preview root" value={settings?.runtime?.preview_root || 'Unavailable'} />
+          <PathBlock label="Log directory" value={settings?.runtime?.log_dir || 'Unavailable'} />
+          <PathBlock label="Core version" value={settings?.runtime?.version || 'Unavailable'} />
+        </Card>
+
+        <Card className="space-y-4">
+          <div className="flex items-start gap-3">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300">
+              <FolderClock className="h-5 w-5" />
+            </span>
+            <div>
+              <h3 className="font-bold text-av-main">Preview cleanup</h3>
+              <p className="mt-1 text-sm leading-6 text-av-muted">Remove every active decrypted preview session immediately.</p>
+            </div>
+          </div>
+          <button
+            onClick={cleanupPreviews}
+            disabled={cleaningPreviews || saving}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-av-main px-4 py-3 text-sm font-semibold text-av-surface transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            type="button"
+          >
+            <FolderClock className="h-4 w-4" />
+            {cleaningPreviews ? 'Cleaning previews...' : 'Clean all preview files'}
+          </button>
+          <p className="text-xs leading-5 text-av-muted">This does not affect saved archives or exported files.</p>
+        </Card>
+      </div>
     </div>
   )
 }
@@ -1160,41 +1506,50 @@ function UpdatesTab({
 
   return (
     <div className="space-y-7">
-      <SectionHeader title="Manual Verified Updates" description="Check official releases without silent installation." />
-      <Card className="space-y-5">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <Stat label="Current version" value={appInfo?.version ? `v${appInfo.version}` : 'unknown'} />
-          <Stat label="Platform" value={appInfo ? `${appInfo.platform}-${appInfo.arch}` : 'unknown'} />
-          <Stat label="Install type" value={appInfo?.packaged ? 'Packaged' : 'Development'} />
-        </div>
+      <SectionHeader title="Updates" description="Check official releases without silent installation." />
+      <div className="grid gap-3 md:grid-cols-3">
+        <Stat label="Current version" value={appInfo?.version ? `v${appInfo.version}` : 'unknown'} />
+        <Stat label="Platform" value={appInfo ? `${appInfo.platform}-${appInfo.arch}` : 'unknown'} />
+        <Stat label="Install type" value={appInfo?.packaged ? 'Packaged' : 'Development'} />
+      </div>
 
-        {updateInfo && (
-          <div className={cn('rounded-2xl border p-4', updateInfo.updateAvailable ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-av-border bg-av-border/5')}>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <p className="text-sm font-bold text-av-main">
-                  {updateInfo.updateAvailable ? `Update available: v${updateInfo.latestVersion}` : 'Avikal is up to date'}
-                </p>
-                <p className="mt-1 text-sm text-av-muted">
-                  Latest release: {updateInfo.releaseName || `v${updateInfo.latestVersion}`}
-                  {updateInfo.publishedAt ? ` · ${new Date(updateInfo.publishedAt).toLocaleDateString()}` : ''}
-                </p>
-              </div>
-              <span className={cn(
-                'rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.14em]',
-                updateInfo.metadataVerified
-                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
-                  : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300',
-              )}>
-                {updateInfo.metadataVerified ? 'Metadata verified' : 'Metadata unavailable'}
-              </span>
+      <Card className="space-y-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className={cn(
+              'flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border',
+              updateInfo?.updateAvailable
+                ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                : 'border-av-border/60 bg-av-border/8 text-av-muted',
+            )}>
+              <Download className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <h3 className="font-bold text-av-main">
+                {updateInfo ? (updateInfo.updateAvailable ? `Version ${updateInfo.latestVersion} is available` : 'Avikal is up to date') : 'No update check has been run'}
+              </h3>
+              <p className="mt-1 text-sm leading-6 text-av-muted">
+                {updateInfo
+                  ? `${updateInfo.releaseName || `v${updateInfo.latestVersion}`}${updateInfo.publishedAt ? ` - ${new Date(updateInfo.publishedAt).toLocaleDateString()}` : ''}`
+                  : 'Run a manual check to verify the latest official GitHub release.'}
+              </p>
             </div>
           </div>
-        )}
+          {updateInfo && (
+            <span className={cn(
+              'shrink-0 rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.14em]',
+              updateInfo.metadataVerified
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+                : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300',
+            )}>
+              {updateInfo.metadataVerified ? 'Metadata verified' : 'Signature unavailable'}
+            </span>
+          )}
+        </div>
 
         {recommendedInstallers.length > 0 && (
           <div className="space-y-3">
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-av-muted">Recommended downloads</p>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-av-muted">Verified installers</p>
             {recommendedInstallers.map((asset) => (
               <div key={asset.url} className="rounded-2xl border border-av-border bg-av-border/5 p-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1202,7 +1557,7 @@ function UpdatesTab({
                     <p className="font-bold text-av-main">
                       {asset.kind === 'windows-gui' ? 'Windows App Installer' : 'Windows CLI Installer'}
                     </p>
-                    <p className="mt-1 truncate text-xs text-av-muted">{asset.name} · {formatBytes(asset.size)}</p>
+                    <p className="mt-1 truncate text-xs text-av-muted">{asset.name} - {formatBytes(asset.size)}</p>
                   </div>
                   <button
                     onClick={() => void openExternalUrl(asset.url)}
@@ -1255,85 +1610,7 @@ function UpdatesTab({
         </div>
 
         <p className="text-xs leading-6 text-av-muted">
-          Avikal uses manual verified updates. It checks the official GitHub release feed, shows bundled installer hashes when available, and never installs updates silently.
-        </p>
-      </Card>
-    </div>
-  )
-}
-
-function LegacyUpdatesTab({
-  appInfo,
-  updateInfo,
-  checkingUpdates,
-  checkForUpdates,
-  openExternalUrl,
-}: {
-  appInfo: AppInfoPayload | null
-  updateInfo: UpdateCheckPayload | null
-  checkingUpdates: boolean
-  checkForUpdates: () => void
-  openExternalUrl: (url: string) => Promise<void>
-}) {
-  const releaseUrl = updateInfo?.releaseUrl || appInfo?.updateFeed || RELEASES_URL
-  const installerAssets = updateInfo?.assets?.filter((asset) => /\.(exe|msi|dmg|appimage|deb|rpm|zip)$/i.test(asset.name)) ?? []
-  return (
-    <div className="space-y-7">
-      <SectionHeader title="Updates" description="Check release availability without installing silently." />
-      <Card className="space-y-5">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <Stat label="Current version" value={appInfo?.version ? `v${appInfo.version}` : 'unknown'} />
-          <Stat label="Platform" value={appInfo ? `${appInfo.platform}-${appInfo.arch}` : 'unknown'} />
-          <Stat label="Install type" value={appInfo?.packaged ? 'Packaged' : 'Development'} />
-        </div>
-        {updateInfo && (
-          <div className={cn('rounded-2xl border p-4', updateInfo.updateAvailable ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-av-border bg-av-border/5')}>
-            <p className="text-sm font-bold text-av-main">
-              {updateInfo.updateAvailable ? `Update available: v${updateInfo.latestVersion}` : 'No update available'}
-            </p>
-            <p className="mt-1 text-sm text-av-muted">
-              Latest release: {updateInfo.releaseName || `v${updateInfo.latestVersion}`}
-              {updateInfo.publishedAt ? ` · ${new Date(updateInfo.publishedAt).toLocaleDateString()}` : ''}
-            </p>
-          </div>
-        )}
-        {installerAssets.length > 0 && (
-          <div className="space-y-2">
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-av-muted">Release assets</p>
-            {installerAssets.slice(0, 4).map((asset) => (
-              <button
-                key={asset.url}
-                onClick={() => void openExternalUrl(asset.url)}
-                className="flex w-full items-center justify-between gap-3 rounded-xl border border-av-border bg-av-border/5 px-4 py-3 text-left text-sm transition-colors hover:bg-av-border/12"
-                type="button"
-              >
-                <span className="min-w-0 truncate font-semibold text-av-main">{asset.name}</span>
-                <span className="shrink-0 text-xs text-av-muted">{formatBytes(asset.size)}</span>
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="flex flex-wrap gap-3">
-          <button
-            onClick={checkForUpdates}
-            disabled={checkingUpdates}
-            className="inline-flex items-center gap-2 rounded-xl bg-av-main px-5 py-3 text-sm font-bold text-av-surface shadow-sm transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-            type="button"
-          >
-            <RefreshCw className={cn('h-4 w-4', checkingUpdates && 'animate-spin')} />
-            {checkingUpdates ? 'Checking...' : 'Check for Updates'}
-          </button>
-          <button
-            onClick={() => void openExternalUrl(releaseUrl)}
-            className="inline-flex items-center gap-2 rounded-xl border border-av-border px-5 py-3 text-sm font-bold text-av-main transition-colors hover:bg-av-border/12"
-            type="button"
-          >
-            <ExternalLink className="h-4 w-4" />
-            Open Releases
-          </button>
-        </div>
-        <p className="text-xs leading-6 text-av-muted">
-          Updates are manual-confirmed. Avikal checks the release feed, then opens the signed release page for download and install review.
+          Avikal checks the fixed official GitHub release feed. Updates are never installed silently; download and verify the installer hash before replacing your current version.
         </p>
       </Card>
     </div>

@@ -19,6 +19,7 @@ from .commands import (
     inspect_archive,
     rekey_archive,
     validate_archive,
+    verify_report_file,
 )
 from .formatters import style_heading, style_label, style_muted
 
@@ -78,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
               validate / check  Confirm container structure and optional metadata access
               rekey / rotate    Rotate archive credentials without rewriting payload.enc
               doctor / diag     Verify Python/runtime readiness and optional Aavrit connectivity
+              verify-report     Verify an exported assurance report and its PQC evidence
 
             Quick Start:
               avikal enc document.pdf --password-prompt
@@ -89,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
               avikal check locked.avk
               avikal rekey locked.avk --old-password-prompt --new-password-prompt
               avikal doctor --aavrit-url https://aavrit.example
+              avikal verify-report archive-assurance.json
 
             Python module entrypoints:
               python -m avikal_backend.cli --help
@@ -228,6 +231,8 @@ def build_parser() -> argparse.ArgumentParser:
         keyphrase_help="Optional 21-word keyphrase wrapped in quotes",
     )
     inspect_options = inspect_parser.add_argument_group("Inspection Controls")
+    inspect_options.add_argument("--pqc-keyfile", help="Path to the external .avkkey file")
+    inspect_options.add_argument("--pqc-keyfile-password-prompt", action="store_true", help="Prompt for a protected .avkkey password")
     inspect_options.add_argument("--skip-timelock", action="store_true", help="Attempt metadata inspection even before the unlock time")
     inspect_options.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
     inspect_parser.set_defaults(handler=inspect_archive)
@@ -255,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     contents_options = contents_parser.add_argument_group("Inspection Controls")
     contents_options.add_argument("--pqc-keyfile", help="Path to the external .avkkey file for PQC-protected multi-file archives")
+    contents_options.add_argument("--pqc-keyfile-password-prompt", action="store_true", help="Prompt for a protected .avkkey password")
     contents_options.add_argument("--skip-timelock", action="store_true", help="Attempt listing contents even before the unlock time")
     contents_options.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
     contents_parser.set_defaults(handler=contents_archive)
@@ -281,6 +287,8 @@ def build_parser() -> argparse.ArgumentParser:
         keyphrase_help="Optional 21-word keyphrase wrapped in quotes",
     )
     validate_options = validate_parser.add_argument_group("Validation Controls")
+    validate_options.add_argument("--pqc-keyfile", help="Path to the external .avkkey file")
+    validate_options.add_argument("--pqc-keyfile-password-prompt", action="store_true", help="Prompt for a protected .avkkey password")
     validate_options.add_argument("--skip-timelock", action="store_true", help="Attempt metadata validation even before the unlock time")
     validate_options.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
     validate_parser.set_defaults(handler=validate_archive)
@@ -348,5 +356,16 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_output = doctor_parser.add_argument_group("Automation")
     doctor_output.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
     doctor_parser.set_defaults(handler=doctor_backend)
+
+    report_parser = subparsers.add_parser(
+        "verify-report",
+        aliases=["report-check"],
+        help="Verify an exported assurance report (alias: report-check)",
+        description="Verify the report digest, dual PQC signatures, and signed archive-commitment bindings without opening the archive.",
+        formatter_class=AvikalHelpFormatter,
+    )
+    report_parser.add_argument("input", help="Exported Avikal assurance report JSON file")
+    report_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
+    report_parser.set_defaults(handler=verify_report_file)
 
     return parser

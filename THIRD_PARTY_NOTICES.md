@@ -31,4 +31,6 @@ RookDuel Avikal depends on third-party open-source software. This document summa
 - Avikal source code is licensed under Apache-2.0.
 - Third-party components remain under their own licenses.
 - Packaged releases must include required third-party license files and notices.
-- Before a broad public release, regenerate and review the full notice inventory for npm, Python, Rust, Electron, Chromium, OpenSSL, drand, and tlock dependencies.
+- Production packaging generates `THIRD_PARTY_NOTICES.generated.md` from the locked npm, Python, and Rust dependency graphs.
+- The generated inventory is bundled into the desktop distribution as `THIRD_PARTY_NOTICES.md`.
+- Release builds fail if the inventory cannot be generated.

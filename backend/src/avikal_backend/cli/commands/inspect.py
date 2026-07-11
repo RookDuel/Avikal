@@ -8,12 +8,13 @@ Copyright (c) 2026 Atharva Sen Barai.
 from __future__ import annotations
 
 import argparse
+import getpass
 from pathlib import Path
 from typing import Any
 
-from ...archive.chess_metadata import decode_chess_to_metadata_enhanced
 from ...archive.format.container import read_avk_header_and_keychain
 from ...archive.format.header import parse_header_bytes, validate_metadata_against_header
+from ...archive.pipeline.keychain_security import read_archive_keychain_metadata
 from ...archive.pipeline.multi_file_decoder import inspect_multi_file_avk
 from ..formatters import build_container_summary, human_size, summarize_metadata
 from ..inputs import load_keyphrase, load_password, resolve_single_input
@@ -25,18 +26,18 @@ def decode_archive_metadata(
     password: str | None,
     keyphrase: list[str] | None,
     skip_timelock: bool,
+    pqc_keyfile_path: str | None = None,
+    pqc_keyfile_password: str | None = None,
 ) -> dict[str, Any]:
-    header_bytes, keychain_pgn = read_avk_header_and_keychain(input_path)
-    header_info = parse_header_bytes(header_bytes)
-    metadata = decode_chess_to_metadata_enhanced(
-        keychain_pgn,
+    result = read_archive_keychain_metadata(
+        input_path,
         password=password,
         keyphrase=keyphrase,
         skip_timelock=skip_timelock,
-        aad=header_bytes,
+        pqc_keyfile_path=pqc_keyfile_path,
+        pqc_keyfile_password=pqc_keyfile_password,
     )
-    validate_metadata_against_header(header_info, metadata)
-    return metadata
+    return result.metadata
 
 
 def detect_archive_kind(
@@ -45,12 +46,16 @@ def detect_archive_kind(
     password: str | None,
     keyphrase: list[str] | None,
     skip_timelock: bool = False,
+    pqc_keyfile_path: str | None = None,
+    pqc_keyfile_password: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     metadata = decode_archive_metadata(
         input_path,
         password=password,
         keyphrase=keyphrase,
         skip_timelock=skip_timelock,
+        pqc_keyfile_path=pqc_keyfile_path,
+        pqc_keyfile_password=pqc_keyfile_password,
     )
     archive_kind = "multi_file" if metadata.get("archive_type") == "multi_file" else "single_file"
     return archive_kind, metadata
@@ -74,13 +79,15 @@ def inspect_archive(args: argparse.Namespace) -> dict[str, Any]:
 
     password = load_password(args)
     keyphrase = load_keyphrase(args)
+    pqc_keyfile_password = _load_pqc_keyfile_password(args)
     if password or keyphrase:
-        metadata = decode_chess_to_metadata_enhanced(
-            keychain_pgn,
+        metadata = decode_archive_metadata(
+            input_path,
             password=password,
             keyphrase=keyphrase,
             skip_timelock=args.skip_timelock,
-            aad=header_bytes,
+            pqc_keyfile_path=getattr(args, "pqc_keyfile", None),
+            pqc_keyfile_password=pqc_keyfile_password,
         )
         validate_metadata_against_header(header_info, metadata)
         result["metadata"] = summarize_metadata(metadata)
@@ -102,6 +109,7 @@ def validate_archive(args: argparse.Namespace) -> dict[str, Any]:
 def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
     password = load_password(args)
     keyphrase = load_keyphrase(args)
+    pqc_keyfile_password = _load_pqc_keyfile_password(args)
     input_path = resolve_single_input(
         args.input,
         pick=getattr(args, "pick", False),
@@ -113,6 +121,8 @@ def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
         password=password,
         keyphrase=keyphrase,
         skip_timelock=args.skip_timelock,
+        pqc_keyfile_path=getattr(args, "pqc_keyfile", None),
+        pqc_keyfile_password=pqc_keyfile_password,
     )
 
     if archive_kind == "multi_file":
@@ -121,6 +131,7 @@ def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
             password=password,
             keyphrase=keyphrase,
             pqc_keyfile_path=args.pqc_keyfile,
+            pqc_keyfile_password=pqc_keyfile_password,
         )
         files = [
             {
@@ -158,3 +169,9 @@ def contents_archive(args: argparse.Namespace) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _load_pqc_keyfile_password(args: argparse.Namespace) -> str | None:
+    if not getattr(args, "pqc_keyfile_password_prompt", False):
+        return None
+    return getpass.getpass(".avkkey password: ")

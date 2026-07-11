@@ -20,7 +20,7 @@ keywords = [
   "timelock",
 ]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: Microsoft :: Windows",
@@ -50,7 +50,6 @@ zip-safe = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
-exclude = ["avikal_backend.api*"]
 
 [tool.setuptools.package-data]
 avikal_backend = [

@@ -14,12 +14,34 @@ import { cn } from './lib/utils'
 import { useBackendRuntime } from './hooks/useBackendRuntime'
 import type { ExternalLaunchAction, PendingExternalLaunchAction } from './lib/externalLaunch'
 import { AVIKAL_IS_BETA } from './lib/appMetadata'
+import { loadUserPreferences, USER_PREFERENCES_UPDATED_EVENT, type UserPreferences, type VisualEffectsMode } from './lib/preferences'
 
 type Tab = 'encrypt' | 'decrypt' | 'rekey' | 'timecapsule'
 type SettingsTab = 'appearance' | 'aavrit' | 'privacy' | 'defaults' | 'runtime' | 'diagnostics' | 'updates' | 'help'
+type RuntimeVisualMode = 'effects' | 'normal'
 
 const NO_DRAG_REGION_STYLE: CSSProperties & { WebkitAppRegion: 'no-drag' } = {
   WebkitAppRegion: 'no-drag',
+}
+
+function applyVisualModeClass(mode: RuntimeVisualMode) {
+  const root = window.document.documentElement
+  root.classList.remove('av-visual-effects', 'av-visual-normal')
+  root.classList.add(mode === 'effects' ? 'av-visual-effects' : 'av-visual-normal')
+  window.document.body.classList.toggle('effects-enabled', mode === 'effects')
+}
+
+async function resolveVisualMode(preference: VisualEffectsMode): Promise<RuntimeVisualMode> {
+  if (preference === 'effects' || preference === 'normal') {
+    const result = await window.electron?.setVisualMode?.(preference).catch(() => null)
+    if (result?.mode === 'effects' || result?.mode === 'normal') return result.mode
+    return preference
+  }
+
+  const result = await window.electron?.getVisualMode?.().catch(() => null)
+  const automaticMode = result?.automaticMode === 'effects' ? 'effects' : 'normal'
+  const applied = await window.electron?.setVisualMode?.(automaticMode).catch(() => null)
+  return applied?.mode === 'effects' ? 'effects' : automaticMode
 }
 
 function BetaBadge({ compact = false }: { compact?: boolean }) {
@@ -125,6 +147,31 @@ function AppContent() {
   const { actualTheme } = useTheme()
 
   useEffect(() => {
+    let cancelled = false
+
+    const applyFromPreferences = async (prefs: UserPreferences = loadUserPreferences()) => {
+      const mode = await resolveVisualMode(prefs.appearance.visual_effects_mode)
+      if (!cancelled) applyVisualModeClass(mode)
+    }
+
+    void applyFromPreferences()
+    const handlePreferenceUpdate = (event: Event) => {
+      const next = (event as CustomEvent<UserPreferences>).detail ?? loadUserPreferences()
+      void applyFromPreferences(next)
+    }
+    const removeVisualModeListener = window.electron?.onVisualModeChanged?.((status) => {
+      if (!cancelled) applyVisualModeClass(status.mode === 'effects' ? 'effects' : 'normal')
+    })
+
+    window.addEventListener(USER_PREFERENCES_UPDATED_EVENT, handlePreferenceUpdate)
+    return () => {
+      cancelled = true
+      window.removeEventListener(USER_PREFERENCES_UPDATED_EVENT, handlePreferenceUpdate)
+      removeVisualModeListener?.()
+    }
+  }, [])
+
+  useEffect(() => {
     if (backendRuntime.isReady) {
       const timer = window.setTimeout(() => setShowContent(true), 180)
       return () => window.clearTimeout(timer)
@@ -215,7 +262,7 @@ function AppContent() {
 
   return (
     <div
-      className="min-h-screen w-full overflow-hidden font-sans flex flex-col transition-all duration-500"
+      className="min-h-screen w-full font-sans flex flex-col transition-all duration-500"
       style={{
         background: 'var(--av-bg-gradient)',
         color: 'var(--av-text-main)',
@@ -324,7 +371,7 @@ function AppContent() {
         </div>
       </div>
 
-      <main className="relative flex-1 min-h-0 overflow-y-auto pt-16">
+      <main className="relative flex-1 min-h-0 pt-16">
         <AnimatePresence initial={false}>
           {mountedTabs.map((tab) => {
             const isActive = activeTab === tab

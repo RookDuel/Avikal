@@ -16,17 +16,33 @@ import zlib
 from itertools import chain
 from typing import BinaryIO, Iterable
 
+from avikal_backend.core.secure_delete import secure_remove_file
 from avikal_backend.core.temp_janitor import register_temp_artifact, unregister_temp_artifact
 
+from ..compression_policy import (
+    ADAPTIVE_COMPRESSION_MIN_BYTES,
+    ADAPTIVE_COMPRESSION_MIN_SAVINGS_RATIO,
+    ADAPTIVE_COMPRESSION_SAMPLE_BYTES,
+    COMPRESSED_EXTENSIONS as _COMPRESSED_EXTENSIONS,
+    choose_payload_compression as _choose_payload_compression,
+)
 from ..security.native_bridge import (
     PayloadCipherVerifier,
     PayloadStreamDecoder,
-    PayloadStreamEncoder,
     avp_decode_chunk,
     avp_encode_chunk,
 )
 
 log = logging.getLogger("avikal.payload_streaming")
+
+
+def choose_payload_compression(**kwargs) -> dict:
+    """Compatibility facade using this module's configurable policy values."""
+    return _choose_payload_compression(
+        **kwargs,
+        minimum_input_bytes=ADAPTIVE_COMPRESSION_MIN_BYTES,
+        minimum_savings_ratio=ADAPTIVE_COMPRESSION_MIN_SAVINGS_RATIO,
+    )
 
 
 PAYLOAD_MAGIC_LEGACY = b"AVP2"
@@ -43,52 +59,7 @@ MAX_AVP_CHUNK_BYTES = 64 * 1024 * 1024
 GCM_NONCE_BYTES = 12
 GCM_TAG_BYTES = 16
 DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024 * 1024
-ADAPTIVE_COMPRESSION_SAMPLE_BYTES = 4 * 1024 * 1024
-ADAPTIVE_COMPRESSION_MIN_BYTES = 64 * 1024 * 1024
-ADAPTIVE_COMPRESSION_MIN_SAVINGS_RATIO = 0.03
 _CHUNKED_HEADER_RESERVED = b"\x00" * GCM_TAG_BYTES
-_COMPRESSED_EXTENSIONS = {
-    ".7z",
-    ".apk",
-    ".avif",
-    ".br",
-    ".bz2",
-    ".cab",
-    ".deb",
-    ".docx",
-    ".dll",
-    ".dmg",
-    ".exe",
-    ".gz",
-    ".heic",
-    ".heif",
-    ".img",
-    ".iso",
-    ".jpeg",
-    ".jpg",
-    ".m4a",
-    ".m4v",
-    ".mov",
-    ".mp3",
-    ".mp4",
-    ".msi",
-    ".msix",
-    ".msixbundle",
-    ".ogg",
-    ".pdf",
-    ".pkg",
-    ".png",
-    ".rar",
-    ".rpm",
-    ".vhd",
-    ".vhdx",
-    ".webm",
-    ".webp",
-    ".xlsx",
-    ".xz",
-    ".zip",
-    ".zst",
-}
 
 
 class LegacyPayloadStreamingRequired(ValueError):
@@ -101,147 +72,9 @@ def _validate_key(key: bytes | None) -> bytes:
     return bytes(key)
 
 
-def _write_initial_header(handle: BinaryIO, *, flags: int, nonce: bytes) -> None:
-    handle.write(
-        PAYLOAD_HEADER_STRUCT.pack(
-            PAYLOAD_MAGIC_LEGACY,
-            PAYLOAD_VERSION,
-            flags,
-            0,
-            nonce,
-            b"\x00" * GCM_TAG_BYTES,
-        )
-    )
-
-
-def _rewrite_tag(handle: BinaryIO, *, flags: int, nonce: bytes, tag: bytes) -> None:
-    handle.seek(0)
-    handle.write(
-        PAYLOAD_HEADER_STRUCT.pack(
-            PAYLOAD_MAGIC_LEGACY,
-            PAYLOAD_VERSION,
-            flags,
-            0,
-            nonce,
-            tag,
-        )
-    )
-    handle.flush()
-
-
 def _should_compress_payload(input_path: str) -> bool:
     extension = os.path.splitext(input_path)[1].lower()
     return extension not in _COMPRESSED_EXTENSIONS
-
-
-def choose_payload_compression(
-    *,
-    input_path: str | None = None,
-    total_input_size: int | None = None,
-    sample_bytes: bytes | None = None,
-    force_compress: bool | None = None,
-) -> dict:
-    """Choose whether the primary AVP stream should zlib-compress plaintext chunks."""
-    if total_input_size is not None and total_input_size < 0:
-        raise ValueError("Payload input size must be non-negative")
-    if force_compress is not None:
-        return {
-            "enabled": bool(force_compress),
-            "reason": "forced",
-            "sample_ratio": None,
-        }
-
-    extension = os.path.splitext(input_path or "")[1].lower()
-    if extension in _COMPRESSED_EXTENSIONS:
-        return {
-            "enabled": False,
-            "reason": "extension",
-            "sample_ratio": None,
-        }
-
-    if total_input_size is not None and total_input_size < ADAPTIVE_COMPRESSION_MIN_BYTES:
-        return {
-            "enabled": True,
-            "reason": "small_input",
-            "sample_ratio": None,
-        }
-
-    if sample_bytes:
-        compressed = zlib.compress(sample_bytes, level=1)
-        ratio = len(compressed) / len(sample_bytes)
-        return {
-            "enabled": (1.0 - ratio) >= ADAPTIVE_COMPRESSION_MIN_SAVINGS_RATIO,
-            "reason": "sample",
-            "sample_ratio": ratio,
-        }
-
-    return {
-        "enabled": True,
-        "reason": "default",
-        "sample_ratio": None,
-    }
-
-
-def _stream_file_to_payload_v2(
-    *,
-    input_path: str,
-    payload_path: str,
-    aad: bytes,
-    encrypt_key: bytes | None,
-    chunk_size: int,
-    progress_callback=None,
-) -> dict:
-    """Write the legacy AVP2 payload format. New archives use the primary AVP format."""
-    flags = FLAG_COMPRESSED_ZLIB
-    nonce = b"\x00" * GCM_NONCE_BYTES
-
-    if encrypt_key is not None:
-        flags |= FLAG_ENCRYPTED_AESGCM
-        nonce = os.urandom(GCM_NONCE_BYTES)
-    encoder = PayloadStreamEncoder(
-        _validate_key(encrypt_key) if encrypt_key is not None else None,
-        nonce if encrypt_key is not None else None,
-        bytes(aad),
-        compression_level=6,
-    )
-    payload_bytes_written = 0
-
-    with open(input_path, "rb") as source, open(payload_path, "w+b") as target:
-        _write_initial_header(target, flags=flags, nonce=nonce)
-        processed_input_bytes = 0
-
-        while True:
-            chunk = source.read(chunk_size)
-            if not chunk:
-                break
-            processed_input_bytes += len(chunk)
-            output_chunk = encoder.update(chunk)
-            if output_chunk:
-                target.write(output_chunk)
-                payload_bytes_written += len(output_chunk)
-            if progress_callback:
-                progress_callback(processed_input_bytes, None)
-
-        final_output, tag, checksum, original_size, compressed_size = encoder.finalize()
-        if final_output:
-            target.write(final_output)
-            payload_bytes_written += len(final_output)
-        if progress_callback:
-            progress_callback(processed_input_bytes, None)
-
-        if tag is not None:
-            _rewrite_tag(target, flags=flags, nonce=nonce, tag=tag)
-        else:
-            target.flush()
-
-    return {
-        "format": "AVP2",
-        "flags": flags,
-        "original_size": original_size,
-        "compressed_size": compressed_size,
-        "payload_size": PAYLOAD_HEADER_SIZE + payload_bytes_written,
-        "checksum": checksum,
-    }
 
 
 def _write_chunked_payload_to_writer(
@@ -448,15 +281,10 @@ def stream_file_to_payload_writer(
     encrypt_key: bytes | None,
     chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE,
     progress_callback=None,
-    payload_format: str = "AVP",
 ) -> dict:
     """Write the primary AVP chunked payload into an already-open binary writer."""
     if chunk_size <= 0:
         raise ValueError("Payload chunk size must be positive")
-    normalized_format = (payload_format or "AVP").upper()
-    if normalized_format != "AVP":
-        raise ValueError("Unsupported payload format")
-
     source_size = os.path.getsize(input_path)
     compression_decision = choose_payload_compression(
         input_path=input_path,
@@ -495,19 +323,8 @@ def stream_file_to_payload(
     encrypt_key: bytes | None,
     chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE,
     progress_callback=None,
-    payload_format: str = "AVP",
 ) -> dict:
-    """Write the primary AVP chunked payload by default, with AVP2 available for legacy tests."""
-    normalized_format = (payload_format or "AVP").upper()
-    if normalized_format == "AVP2":
-        return _stream_file_to_payload_v2(
-            input_path=input_path,
-            payload_path=payload_path,
-            aad=aad,
-            encrypt_key=encrypt_key,
-            chunk_size=chunk_size,
-            progress_callback=progress_callback,
-        )
+    """Write the current AVP chunked payload."""
     with open(payload_path, "w+b") as target:
         return stream_file_to_payload_writer(
             input_path=input_path,
@@ -516,7 +333,6 @@ def stream_file_to_payload(
             encrypt_key=encrypt_key,
             chunk_size=chunk_size,
             progress_callback=progress_callback,
-            payload_format=normalized_format,
         )
 
 
@@ -620,7 +436,7 @@ def _decompress_stream_to_output_v2(
                 log.debug("Failed to close payload temp file handle for %s: %s", output_path, exc)
         if temp_path and os.path.exists(temp_path):
             try:
-                os.remove(temp_path)
+                secure_remove_file(temp_path)
                 unregister_temp_artifact(temp_path)
             except OSError as exc:
                 log.debug("Failed to remove payload temp file %s: %s", temp_path, exc)
@@ -639,10 +455,13 @@ def _stream_payload_chunked_to_file(
     max_output_size: int,
     chunk_size: int,
     progress_callback,
+    expected_ciphertext_sha256: bytes | None,
 ) -> dict:
     temp_handle = None
     temp_path = None
     checksum = hashlib.sha256()
+    ciphertext_checksum = hashlib.sha256()
+    ciphertext_checksum.update(header_bytes)
     output_size = 0
     processed_bytes = PAYLOAD_HEADER_SIZE
     total_payload_size = getattr(payload_stream, "avikal_file_size", None)
@@ -662,6 +481,7 @@ def _stream_payload_chunked_to_file(
             if len(chunk_header) != PAYLOAD_CHUNK_STRUCT.size:
                 raise ValueError("Payload chunk header is truncated")
             processed_bytes += len(chunk_header)
+            ciphertext_checksum.update(chunk_header)
             chunk_index, original_len, data_len = PAYLOAD_CHUNK_STRUCT.unpack(chunk_header)
             if chunk_index != expected_index:
                 raise ValueError("Payload chunk sequence is invalid")
@@ -673,6 +493,7 @@ def _stream_payload_chunked_to_file(
             if len(data) != data_len:
                 raise ValueError("Payload chunk data is truncated")
             processed_bytes += len(data)
+            ciphertext_checksum.update(data)
 
             try:
                 plaintext = avp_decode_chunk(
@@ -713,6 +534,8 @@ def _stream_payload_chunked_to_file(
             raise ValueError("Payload size verification failed. The archive may be corrupted.")
         if checksum.digest() != expected_checksum:
             raise ValueError("Payload checksum verification failed. The archive may be corrupted.")
+        if expected_ciphertext_sha256 is not None and ciphertext_checksum.digest() != expected_ciphertext_sha256:
+            raise ValueError("Archive signature payload binding failed. The archive may be corrupted.")
 
         os.replace(temp_path, output_path)
         unregister_temp_artifact(temp_path)
@@ -726,7 +549,7 @@ def _stream_payload_chunked_to_file(
                 log.debug("Failed to close AVP temp file handle for %s: %s", output_path, exc)
         if temp_path and os.path.exists(temp_path):
             try:
-                os.remove(temp_path)
+                secure_remove_file(temp_path)
                 unregister_temp_artifact(temp_path)
             except OSError as exc:
                 log.debug("Failed to remove AVP temp file %s: %s", temp_path, exc)
@@ -741,6 +564,7 @@ def iter_payload_plaintext_chunks(
     expected_output_size: int | None = None,
     max_output_size: int = DEFAULT_MAX_OUTPUT_BYTES,
     progress_callback=None,
+    expected_ciphertext_sha256: bytes | None = None,
 ) -> Iterable[bytes]:
     """Yield authenticated plaintext chunks from the primary AVP payload format."""
     if expected_output_size is not None and expected_output_size < 0:
@@ -756,6 +580,8 @@ def iter_payload_plaintext_chunks(
         decrypt_key = None
 
     checksum = hashlib.sha256()
+    ciphertext_checksum = hashlib.sha256()
+    ciphertext_checksum.update(header_bytes)
     output_size = 0
     processed_bytes = PAYLOAD_HEADER_SIZE
     total_payload_size = getattr(payload_stream, "avikal_file_size", None)
@@ -769,6 +595,7 @@ def iter_payload_plaintext_chunks(
         if len(chunk_header) != PAYLOAD_CHUNK_STRUCT.size:
             raise ValueError("Payload chunk header is truncated")
         processed_bytes += len(chunk_header)
+        ciphertext_checksum.update(chunk_header)
         chunk_index, original_len, data_len = PAYLOAD_CHUNK_STRUCT.unpack(chunk_header)
         if chunk_index != expected_index:
             raise ValueError("Payload chunk sequence is invalid")
@@ -780,6 +607,7 @@ def iter_payload_plaintext_chunks(
         if len(data) != data_len:
             raise ValueError("Payload chunk data is truncated")
         processed_bytes += len(data)
+        ciphertext_checksum.update(data)
 
         try:
             plaintext = avp_decode_chunk(
@@ -816,6 +644,8 @@ def iter_payload_plaintext_chunks(
         raise ValueError("Payload size verification failed. The archive may be corrupted.")
     if checksum.digest() != expected_checksum:
         raise ValueError("Payload checksum verification failed. The archive may be corrupted.")
+    if expected_ciphertext_sha256 is not None and ciphertext_checksum.digest() != expected_ciphertext_sha256:
+        raise ValueError("Archive signature payload binding failed. The archive may be corrupted.")
 
 
 def _stream_payload_v2_to_file(
@@ -895,7 +725,7 @@ def _stream_payload_v2_to_file(
                     log.debug("Failed to close encrypted payload buffer for %s: %s", output_path, exc)
             if os.path.exists(ciphertext_path):
                 try:
-                    os.remove(ciphertext_path)
+                    secure_remove_file(ciphertext_path)
                     unregister_temp_artifact(ciphertext_path)
                 except OSError as exc:
                     log.debug("Failed to remove encrypted payload buffer %s: %s", ciphertext_path, exc)
@@ -931,6 +761,7 @@ def stream_payload_to_file(
     max_output_size: int = DEFAULT_MAX_OUTPUT_BYTES,
     chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE,
     progress_callback=None,
+    expected_ciphertext_sha256: bytes | None = None,
 ) -> dict:
     """Decrypt/decompress a payload into a temp file and atomically commit it."""
     if expected_output_size is not None and expected_output_size < 0:
@@ -963,7 +794,11 @@ def stream_payload_to_file(
             max_output_size=max_output_size,
             chunk_size=chunk_size,
             progress_callback=progress_callback,
+            expected_ciphertext_sha256=expected_ciphertext_sha256,
         )
+
+    if expected_ciphertext_sha256 is not None:
+        raise ValueError("Signed archives require the current AVP payload format")
 
     return _stream_payload_v2_to_file(
         payload_stream=payload_stream,

@@ -13,6 +13,10 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    from avikal_backend.runtime_requirements import harden_process_runtime
+
+    harden_process_runtime("Avikal core")
+
     from avikal_backend.core.temp_janitor import cleanup_startup_temp_artifacts
 
     cleanup_startup_temp_artifacts()
@@ -24,11 +28,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if "--verify-runtime" in args or "--verify-native-runtime" in args:
         from avikal_backend.archive.security.pqc_provider import provider_status
-        from avikal_backend.runtime_requirements import ensure_native_crypto_runtime
+        from avikal_backend.runtime_requirements import ensure_native_crypto_runtime, verify_publisher_runtime_manifest
 
         try:
             ensure_native_crypto_runtime("Avikal core")
-            status = provider_status()
+            if "--verify-runtime" in args:
+                verify_publisher_runtime_manifest()
+            status = provider_status(verify_runtime_integrity="--verify-runtime" in args)
             if not status.get("available"):
                 raise RuntimeError(status.get("error") or "PQC runtime unavailable")
         except Exception as exc:

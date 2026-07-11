@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-import shutil
 import tempfile
 import threading
 import uuid
 
 from avikal_backend.core.private_workspace import ensure_private_dir
+from avikal_backend.core.secure_delete import secure_remove_file, secure_remove_tree
 
 
 class PreviewSessionStore:
@@ -56,12 +56,10 @@ class PreviewSessionStore:
                     continue
                 for entry in root.iterdir():
                     if entry.is_dir():
-                        shutil.rmtree(entry, ignore_errors=True)
+                        secure_remove_tree(entry)
                     else:
-                        try:
-                            entry.unlink()
-                        except OSError as exc:
-                            self.log.debug("Failed to remove stale preview file %s: %s", entry, exc)
+                        if not secure_remove_file(entry):
+                            self.log.debug("Failed to remove stale preview file %s", entry)
             except OSError as exc:
                 self.log.warning("Failed to cleanup stale preview sessions in %s: %s", root, exc)
 
@@ -106,7 +104,7 @@ class PreviewSessionStore:
             session_root = self._session_roots.get(session_id, self.root)
         session_dir = self._resolve_session_dir(session_id, session_root)
         existed = session_dir.exists()
-        shutil.rmtree(session_dir, ignore_errors=True)
+        secure_remove_tree(session_dir)
         with self._lock:
             self._active_sessions.discard(session_id)
             self._session_roots.pop(session_id, None)
@@ -128,12 +126,10 @@ class PreviewSessionStore:
                     if entry.exists():
                         cleaned += 1
                         if entry.is_dir():
-                            shutil.rmtree(entry, ignore_errors=True)
+                            secure_remove_tree(entry)
                         else:
-                            try:
-                                entry.unlink()
-                            except OSError as exc:
-                                self.log.debug("Failed to remove preview session file %s: %s", entry, exc)
+                            if not secure_remove_file(entry):
+                                self.log.debug("Failed to remove preview session file %s", entry)
             except OSError as exc:
                 self.log.warning("Failed to cleanup preview sessions in %s: %s", resolved, exc)
         with self._lock:

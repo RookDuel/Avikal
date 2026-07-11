@@ -5,6 +5,7 @@ Copyright (c) 2026 Atharva Sen Barai.
 """
 
 import hashlib
+import hmac
 import os
 import shutil
 import tempfile
@@ -13,6 +14,7 @@ import uuid
 import zipfile
 from typing import Dict
 
+from avikal_backend.core.secure_delete import secure_remove_file, secure_remove_tree
 from avikal_backend.core.temp_janitor import register_temp_artifact, unregister_temp_artifact
 
 from ..format.header import parse_header_bytes, validate_metadata_against_header
@@ -24,16 +26,21 @@ from ..format.multifile_stream import (
     read_multifile_stream_manifest,
 )
 from ..format.container import open_avk_payload_stream
+from ..format.indexed_payload import (
+    extract_indexed_selection,
+    is_indexed_payload,
+    read_indexed_payload_index,
+)
 from ..security.crypto import (
     compute_checksum,
     derive_time_only_payload_key,
     derive_pqc_hybrid_payload_key,
     secure_zero,
 )
-from ..chess_metadata import decode_chess_to_metadata_enhanced
 from ..path_safety import normalize_multi_archive_relative_path, resolve_safe_relative_output_path
 from .payload_streaming import LegacyPayloadStreamingRequired, iter_payload_plaintext_chunks, stream_payload_to_file
 from .progress import get_progress_tracker
+from .keychain_security import unlock_archive_keychain
 from ..security.pqc_keyfile import (
     PQC_STORAGE_MODE_EMBEDDED,
     PQC_STORAGE_MODE_EXTERNAL,
@@ -43,6 +50,107 @@ from ..security.pqc_keyfile import (
 from ..security.pqc_provider import decapsulate_pqc_archive_material
 from ..security.key_wrap import unwrap_payload_key
 from ..runtime_logging import runtime_debug_print as print
+
+
+def open_indexed_archive_metadata(
+    avk_filepath: str,
+    *,
+    password: str | None = None,
+    keyphrase: list | None = None,
+    time_key: bytes | None = None,
+    pqc_keyfile_path: str | None = None,
+    pqc_keyfile_password: str | None = None,
+) -> dict:
+    """Unlock an indexed archive and return authenticated index state without extraction."""
+    operation_started = time.perf_counter()
+    keychain_ms = 0.0
+    index_ms = 0.0
+    master_key = None
+    payload_key = None
+    payload_decryption_key = None
+    try:
+        with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, payload_stream, embedded_pqc_blob):
+            keychain_started = time.perf_counter()
+            result = unlock_archive_keychain(
+                keychain_pgn=keychain_pgn,
+                header_bytes=header_bytes,
+                password=password,
+                keyphrase=keyphrase,
+                embedded_pqc_blob=embedded_pqc_blob,
+                pqc_keyfile_path=pqc_keyfile_path,
+                pqc_keyfile_password=pqc_keyfile_password,
+                skip_timelock=False,
+                time_key=time_key,
+            )
+            keychain_ms = (time.perf_counter() - keychain_started) * 1000
+            metadata = result.metadata
+            validate_metadata_against_header(parse_header_bytes(header_bytes), metadata)
+            salt = metadata["salt"]
+            method = metadata["encryption_method"]
+            if method == "plaintext_archive":
+                payload_key = None
+            elif method == "aes256gcm_stream_timekey":
+                if not time_key:
+                    raise ValueError("This archive requires its verified TimeCapsule release key")
+                payload_key = derive_time_only_payload_key(time_key, salt)
+            else:
+                from ..security.crypto import combine_split_keys, derive_hierarchical_keys
+
+                master_key, payload_key, _chess_key, _derived_salt = derive_hierarchical_keys(password, keyphrase, salt)
+                if time_key:
+                    payload_key = combine_split_keys(payload_key, time_key, salt)[:32]
+            if metadata.get("pqc_required"):
+                if not result.pqc_resolved or not result.pqc_shared_secret:
+                    raise ValueError("PQC archive keychain did not resolve its shared secret")
+                if isinstance(result.pqc_private_bundle, dict):
+                    metadata["_report_pqc_suite"] = {
+                        "suite_id": result.pqc_private_bundle.get("suite_id"),
+                        "suite_version": result.pqc_private_bundle.get("suite_version"),
+                        "suite_profile": result.pqc_private_bundle.get("suite_profile"),
+                        "provider": result.pqc_private_bundle.get("provider"),
+                        "openssl_version": result.pqc_private_bundle.get("openssl_version"),
+                        "algorithms": dict(result.pqc_private_bundle.get("algorithms") or {}),
+                    }
+                payload_key = derive_pqc_hybrid_payload_key(payload_key, result.pqc_shared_secret, salt)
+            wrapped = metadata.get("wrapped_payload_key")
+            payload_decryption_key = unwrap_payload_key(wrapped, payload_key, header_bytes) if wrapped else payload_key
+            if not is_indexed_payload(payload_stream):
+                raise LegacyPayloadStreamingRequired("Archive does not use the indexed payload format")
+            index_started = time.perf_counter()
+            index, index_meta = read_indexed_payload_index(
+                payload_stream,
+                payload_key=payload_decryption_key,
+                header_aad=header_bytes,
+                expected_index_hash=metadata.get("content_index_hash"),
+                expected_merkle_root=metadata.get("payload_merkle_root"),
+            )
+            index_ms = (time.perf_counter() - index_started) * 1000
+            if index_meta["manifest_hash"] != metadata.get("manifest_hash"):
+                raise ValueError("Authenticated content index does not match keychain metadata")
+            if index["file_count"] != metadata.get("entry_count") or index["total_original_size"] != metadata.get("total_original_size"):
+                raise ValueError("Authenticated content index summary does not match keychain metadata")
+            if result.signed_payload_size is not None and index_meta["payload_size"] != result.signed_payload_size:
+                raise ValueError("Archive signature payload size binding failed")
+            return {
+                "header_bytes": bytes(header_bytes),
+                "index": index,
+                "index_meta": index_meta,
+                "metadata": metadata,
+                "payload_key": bytes(payload_decryption_key) if payload_decryption_key else None,
+                "telemetry": {
+                    "keychain_decode_ms": round(keychain_ms, 2),
+                    "index_authentication_ms": round(index_ms, 2),
+                    "session_open_ms": round((time.perf_counter() - operation_started) * 1000, 2),
+                    "chess": dict(metadata.get("_report_chess") or {}),
+                },
+            }
+    finally:
+        if master_key:
+            secure_zero(master_key)
+        if payload_key and payload_key is not payload_decryption_key:
+            secure_zero(payload_key)
+        if password:
+            secure_zero(password.encode("utf-8"))
 
 
 def _payload_container_output_limit(metadata: dict) -> int:
@@ -70,6 +178,7 @@ def inspect_multi_file_avk(
     payload_decryption_key = None
     pqc_private_bundle = None
     payload_salt = None
+    keychain_result = None
     try:
         tracker = get_progress_tracker()
         print(f"Opening multi-file {avk_filepath}...")
@@ -82,14 +191,19 @@ def inspect_multi_file_avk(
                 print("Decoding chess PGN...")
                 try:
                     start_chess = time.time()
-                    metadata = decode_chess_to_metadata_enhanced(
-                        keychain_pgn,
-                        password,
-                        keyphrase,
+                    keychain_result = unlock_archive_keychain(
+                        keychain_pgn=keychain_pgn,
+                        header_bytes=header_bytes,
+                        password=password,
+                        keyphrase=keyphrase,
+                        embedded_pqc_blob=embedded_pqc_blob,
+                        pqc_keyfile_path=pqc_keyfile_path,
+                        pqc_keyfile_password=pqc_keyfile_password,
                         skip_timelock=False,
-                        aad=header_bytes,
                         progress_tracker=tracker,
+                        time_key=time_key,
                     )
+                    metadata = keychain_result.metadata
                     validate_metadata_against_header(header_info, metadata)
                     chess_decoding_time = time.time() - start_chess
                     if tracker:
@@ -169,7 +283,10 @@ def inspect_multi_file_avk(
                         keyphrase = normalize_mnemonic_words(keyphrase)
 
                     if pqc_required:
-                        if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+                        if keychain_result is not None and keychain_result.pqc_resolved:
+                            pqc_shared_secret = keychain_result.pqc_shared_secret
+                            pqc_private_bundle = keychain_result.pqc_private_bundle
+                        elif pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
                             if tracker:
                                 tracker.update("payload", "Unlocking embedded PQC", 0.05)
                             print("[Multi] Unlocking embedded PQC bundle...")
@@ -195,15 +312,16 @@ def inspect_multi_file_avk(
                                 expected_algorithm=pqc_algorithm,
                                 pqc_keyfile_password=pqc_keyfile_password,
                             )
-                        pqc_private_bundle = pqc_key_bundle["private_bundle"]
-                        if tracker:
-                            tracker.update("payload", "Verifying PQC bundle signatures", 0.10)
-                        pqc_shared_secret = decapsulate_pqc_archive_material(
-                            private_bundle=pqc_private_bundle,
-                            public_bundle=pqc_key_bundle["public_bundle"],
-                            pqc_ciphertext=pqc_ciphertext,
-                            expected_key_id=pqc_key_id,
-                        )
+                        if not (keychain_result is not None and keychain_result.pqc_resolved):
+                            pqc_private_bundle = pqc_key_bundle["private_bundle"]
+                            if tracker:
+                                tracker.update("payload", "Verifying PQC bundle signatures", 0.10)
+                            pqc_shared_secret = decapsulate_pqc_archive_material(
+                                private_bundle=pqc_private_bundle,
+                                public_bundle=pqc_key_bundle["public_bundle"],
+                                pqc_ciphertext=pqc_ciphertext,
+                                expected_key_id=pqc_key_id,
+                            )
                         if tracker:
                             tracker.update("payload", "Mixing PQC shared secret into payload key", 0.16)
                         payload_key = derive_pqc_hybrid_payload_key(payload_key, pqc_shared_secret, payload_salt)
@@ -238,6 +356,14 @@ def inspect_multi_file_avk(
                     if tracker:
                         tracker.update("payload", "Preparing multi-file payload stream", 0.24)
                     start_decrypt = time.time()
+                    expected_payload_sha256 = (
+                        keychain_result.expected_payload_sha256
+                        if keychain_result is not None and keychain_result.archive_signature_verified
+                        else None
+                    )
+                    if keychain_result is not None and keychain_result.signed_payload_size is not None:
+                        if getattr(payload_stream, "avikal_file_size", None) != keychain_result.signed_payload_size:
+                            raise ValueError("Archive signature payload size binding failed")
                     stream_payload_to_file(
                         payload_stream=payload_stream,
                         output_path=temp_container_path,
@@ -253,6 +379,7 @@ def inspect_multi_file_avk(
                             ))
                             if tracker else None
                         ),
+                        expected_ciphertext_sha256=expected_payload_sha256,
                     )
                     decrypt_time = time.time() - start_decrypt
                     print(f"Streaming payload decode completed in {decrypt_time:.2f}s")
@@ -296,7 +423,7 @@ def inspect_multi_file_avk(
         raise ValueError("Encrypted multi-file payload is not a valid container ZIP") from exc
     finally:
         if temp_container_path and os.path.exists(temp_container_path):
-            os.remove(temp_container_path)
+            secure_remove_file(temp_container_path)
             unregister_temp_artifact(temp_container_path)
         if master_key:
             secure_zero(master_key)
@@ -332,6 +459,7 @@ def extract_multi_file_avk(
     payload_decryption_key = None
     pqc_private_bundle = None
     payload_salt = None
+    keychain_result = None
     used_streaming_payload = False
     print(f"Opening multi-file {avk_filepath}...")
     chess_decoding_time = 0.0
@@ -344,7 +472,21 @@ def extract_multi_file_avk(
                     tracker.update("metadata", "Reading archive metadata", 0.05, force=True)
 
                 if metadata_override is not None:
-                    metadata = metadata_override
+                    keychain_result = unlock_archive_keychain(
+                        keychain_pgn=keychain_pgn,
+                        header_bytes=header_bytes,
+                        password=password,
+                        keyphrase=keyphrase,
+                        embedded_pqc_blob=embedded_pqc_blob,
+                        pqc_keyfile_path=pqc_keyfile_path,
+                        pqc_keyfile_password=pqc_keyfile_password,
+                        skip_timelock=True,
+                        progress_tracker=tracker,
+                        time_key=time_key,
+                    )
+                    metadata = keychain_result.metadata
+                    if metadata != metadata_override:
+                        raise ValueError("Verified keychain metadata changed during the unlock flow")
                     validate_metadata_against_header(header_info, metadata)
                     if tracker:
                         tracker.update("metadata", "Validated secure metadata", 1.0)
@@ -352,14 +494,19 @@ def extract_multi_file_avk(
                     print("Decoding chess PGN...")
                     try:
                         start_chess = time.time()
-                        metadata = decode_chess_to_metadata_enhanced(
-                            keychain_pgn,
-                            password,
-                            keyphrase,
+                        keychain_result = unlock_archive_keychain(
+                            keychain_pgn=keychain_pgn,
+                            header_bytes=header_bytes,
+                            password=password,
+                            keyphrase=keyphrase,
+                            embedded_pqc_blob=embedded_pqc_blob,
+                            pqc_keyfile_path=pqc_keyfile_path,
+                            pqc_keyfile_password=pqc_keyfile_password,
                             skip_timelock=False,
-                            aad=header_bytes,
                             progress_tracker=tracker,
+                            time_key=time_key,
                         )
+                        metadata = keychain_result.metadata
                         validate_metadata_against_header(header_info, metadata)
                         chess_decoding_time = time.time() - start_chess
                         if tracker:
@@ -439,7 +586,10 @@ def extract_multi_file_avk(
                         keyphrase = normalize_mnemonic_words(keyphrase)
 
                     if pqc_required:
-                        if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+                        if keychain_result is not None and keychain_result.pqc_resolved:
+                            pqc_shared_secret = keychain_result.pqc_shared_secret
+                            pqc_private_bundle = keychain_result.pqc_private_bundle
+                        elif pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
                             if tracker:
                                 tracker.update("payload", "Unlocking embedded PQC", 0.05)
                             print("[Multi] Unlocking embedded PQC bundle...")
@@ -465,15 +615,16 @@ def extract_multi_file_avk(
                                 expected_algorithm=pqc_algorithm,
                                 pqc_keyfile_password=pqc_keyfile_password,
                             )
-                        pqc_private_bundle = pqc_key_bundle["private_bundle"]
-                        if tracker:
-                            tracker.update("payload", "Verifying PQC bundle signatures", 0.10)
-                        pqc_shared_secret = decapsulate_pqc_archive_material(
-                            private_bundle=pqc_private_bundle,
-                            public_bundle=pqc_key_bundle["public_bundle"],
-                            pqc_ciphertext=pqc_ciphertext,
-                            expected_key_id=pqc_key_id,
-                        )
+                        if not (keychain_result is not None and keychain_result.pqc_resolved):
+                            pqc_private_bundle = pqc_key_bundle["private_bundle"]
+                            if tracker:
+                                tracker.update("payload", "Verifying PQC bundle signatures", 0.10)
+                            pqc_shared_secret = decapsulate_pqc_archive_material(
+                                private_bundle=pqc_private_bundle,
+                                public_bundle=pqc_key_bundle["public_bundle"],
+                                pqc_ciphertext=pqc_ciphertext,
+                                expected_key_id=pqc_key_id,
+                            )
                         if tracker:
                             tracker.update("payload", "Mixing PQC shared secret into payload key", 0.16)
                         payload_key = derive_pqc_hybrid_payload_key(payload_key, pqc_shared_secret, payload_salt)
@@ -503,39 +654,98 @@ def extract_multi_file_avk(
                     expected_total_size = metadata.get("total_original_size")
                     if metadata.get("archive_type") != "multi_file":
                         raise ValueError("Archive metadata is missing multi-file manifest protection")
+                    expected_payload_sha256 = (
+                        keychain_result.expected_payload_sha256
+                        if keychain_result is not None and keychain_result.archive_signature_verified
+                        else None
+                    )
+                    if keychain_result is not None and keychain_result.signed_payload_size is not None:
+                        if getattr(payload_stream, "avikal_file_size", None) != keychain_result.signed_payload_size:
+                            raise ValueError("Archive signature payload size binding failed")
                     try:
                         print("Streaming current multi-file payload directly into preview storage...")
                         temp_extract_root = os.path.join(tempfile.gettempdir(), f"avikal_extract_{uuid.uuid4().hex}")
                         os.makedirs(temp_extract_root, exist_ok=False)
                         register_temp_artifact(temp_extract_root, kind="dir")
-                        plaintext_chunks = iter_payload_plaintext_chunks(
-                            payload_stream=payload_stream,
-                            aad=header_bytes,
-                            decrypt_key=payload_decryption_key,
-                            expected_checksum=expected_checksum,
-                            max_output_size=_payload_container_output_limit(metadata),
-                            progress_callback=(
-                                (lambda processed, total: tracker.update(
-                                    "payload",
-                                    "Decrypting multi-file payload",
-                                    (processed / total) if total else 0.0,
-                                ))
-                                if tracker else None
-                            ),
-                        )
-                        extracted_files = extract_multifile_stream_from_plaintext_chunks(
-                            plaintext_chunks,
-                            temp_extract_root,
-                            expected_manifest_hash=expected_manifest_hash,
-                            expected_entry_count=expected_entry_count,
-                            expected_total_size=expected_total_size,
-                        )
+                        if is_indexed_payload(payload_stream):
+                            index, index_meta = read_indexed_payload_index(
+                                payload_stream,
+                                payload_key=payload_decryption_key,
+                                header_aad=header_bytes,
+                                expected_index_hash=metadata.get("content_index_hash"),
+                                expected_merkle_root=metadata.get("payload_merkle_root"),
+                            )
+                            if index_meta["manifest_hash"] != expected_manifest_hash:
+                                raise ValueError("Authenticated content index does not match keychain metadata")
+                            if index["file_count"] != expected_entry_count or index["total_original_size"] != expected_total_size:
+                                raise ValueError("Authenticated content index summary does not match keychain metadata")
+                            nonempty_directories = {
+                                file_entry["path"].rsplit("/", 1)[0]
+                                for file_entry in index["files"]
+                                if "/" in file_entry["path"]
+                            }
+                            selected_ids = [entry["id"] for entry in index["files"]]
+                            selected_ids.extend(
+                                entry["id"] for entry in index["directories"]
+                                if entry["path"] not in nonempty_directories
+                                and not any(path.startswith(entry["path"] + "/") for path in nonempty_directories)
+                            )
+                            extracted_files = extract_indexed_selection(
+                                payload_stream,
+                                index=index,
+                                selected_entry_ids=selected_ids,
+                                output_root=temp_extract_root,
+                                payload_key=payload_decryption_key,
+                                header_aad=header_bytes,
+                                progress_callback=(
+                                    (lambda processed, total: tracker.update(
+                                        "payload", "Decrypting indexed files", (processed / total) if total else 1.0
+                                    )) if tracker else None
+                                ),
+                            )
+                            if expected_payload_sha256 is None:
+                                raise ValueError("Signed payload commitment is missing")
+                            payload_stream.seek(0)
+                            payload_digest = hashlib.sha256()
+                            while True:
+                                payload_chunk = payload_stream.read(4 * 1024 * 1024)
+                                if not payload_chunk:
+                                    break
+                                payload_digest.update(payload_chunk)
+                            if not hmac.compare_digest(payload_digest.digest(), expected_payload_sha256):
+                                raise ValueError("Whole-payload signature verification failed")
+                            metadata["archive_integrity"]["whole_payload_verified"] = True
+                            metadata["archive_integrity"]["index_verified"] = True
+                        else:
+                            plaintext_chunks = iter_payload_plaintext_chunks(
+                                payload_stream=payload_stream,
+                                aad=header_bytes,
+                                decrypt_key=payload_decryption_key,
+                                expected_checksum=expected_checksum,
+                                max_output_size=_payload_container_output_limit(metadata),
+                                progress_callback=(
+                                    (lambda processed, total: tracker.update(
+                                        "payload",
+                                        "Decrypting multi-file payload",
+                                        (processed / total) if total else 0.0,
+                                    ))
+                                    if tracker else None
+                                ),
+                                expected_ciphertext_sha256=expected_payload_sha256,
+                            )
+                            extracted_files = extract_multifile_stream_from_plaintext_chunks(
+                                plaintext_chunks,
+                                temp_extract_root,
+                                expected_manifest_hash=expected_manifest_hash,
+                                expected_entry_count=expected_entry_count,
+                                expected_total_size=expected_total_size,
+                            )
                         if tracker:
                             tracker.update("payload", "Multi-file payload decrypted", 1.0, force=True)
                         used_streaming_payload = True
                     except LegacyPayloadStreamingRequired:
                         if temp_extract_root:
-                            shutil.rmtree(temp_extract_root, ignore_errors=True)
+                            secure_remove_tree(temp_extract_root)
                             unregister_temp_artifact(temp_extract_root)
                             temp_extract_root = None
                         temp_container = tempfile.NamedTemporaryFile(
@@ -562,10 +772,11 @@ def extract_multi_file_avk(
                                 ))
                                 if tracker else None
                             ),
+                            expected_ciphertext_sha256=expected_payload_sha256,
                         )
                     except Exception:
                         if temp_extract_root:
-                            shutil.rmtree(temp_extract_root, ignore_errors=True)
+                            secure_remove_tree(temp_extract_root)
                             unregister_temp_artifact(temp_extract_root)
                             temp_extract_root = None
                         raise
@@ -666,14 +877,14 @@ def extract_multi_file_avk(
                             if tracker:
                                 tracker.update("finalize", "Preparing preview files", 1.0)
             except Exception:
-                shutil.rmtree(temp_extract_root, ignore_errors=True)
+                secure_remove_tree(temp_extract_root)
                 unregister_temp_artifact(temp_extract_root)
                 raise
     except zipfile.BadZipFile as exc:
         raise ValueError("Encrypted multi-file payload is not a valid container ZIP") from exc
     finally:
         if temp_container_path and os.path.exists(temp_container_path):
-            os.remove(temp_container_path)
+            secure_remove_file(temp_container_path)
             unregister_temp_artifact(temp_container_path)
         if master_key:
             secure_zero(master_key)
@@ -705,19 +916,21 @@ def extract_multi_file_avk(
         for file_info in committed_files:
             try:
                 if os.path.exists(file_info["path"]):
-                    os.remove(file_info["path"])
+                    secure_remove_file(file_info["path"])
             except OSError as exc:
                 print(f"Cleanup warning: failed to remove partial extracted file {file_info['path']}: {exc}")
         raise
     finally:
         if temp_extract_root:
-            shutil.rmtree(temp_extract_root, ignore_errors=True)
+            secure_remove_tree(temp_extract_root)
             unregister_temp_artifact(temp_extract_root)
 
     total_time = chess_decoding_time + decrypt_time
-    total_size = sum(file_info["size"] for file_info in extracted_files)
+    extracted_file_entries = [item for item in extracted_files if item.get("type") != "directory"]
+    extracted_directory_entries = [item for item in extracted_files if item.get("type") == "directory"]
+    total_size = sum(file_info["size"] for file_info in extracted_file_entries)
 
-    print(f"\nSuccess! Extracted {len(extracted_files)} files")
+    print(f"\nSuccess! Extracted {len(extracted_file_entries)} files")
     print(f"  Total size: {total_size:,} bytes")
     print("  Checksum: Verified")
     print(
@@ -748,14 +961,23 @@ def extract_multi_file_avk(
 
     print(f"  Security: {', '.join(security_features)}")
     print("\nExtracted Files:")
-    for file_info in extracted_files:
+    for file_info in extracted_file_entries:
         print(f"  - {file_info['filename']} ({file_info['size']:,} bytes)")
     if tracker:
         tracker.complete("Preview ready")
 
+    metadata.setdefault("archive_integrity", {})["whole_payload_verified"] = True
+    metadata["archive_integrity"]["selected_content_verified"] = True
     return {
         "files": extracted_files,
-        "file_count": len(extracted_files),
+        "file_count": len(extracted_file_entries),
+        "folder_count": len(extracted_directory_entries),
         "total_size": total_size,
         "output_directory": output_directory,
+        "archive_integrity": metadata.get("archive_integrity"),
+        "sender_message": metadata.get("sender_message"),
+        "created_with_version": metadata.get("created_with_version"),
+        "minimum_reader_version": metadata.get("minimum_reader_version"),
+        "update_recommended": bool(metadata.get("update_recommended")),
+        "metadata": metadata,
     }

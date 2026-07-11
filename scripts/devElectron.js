@@ -20,8 +20,9 @@ if (mode === 'source') {
   env.AVIKAL_DEV_SERVER_URL = 'http://localhost:5173';
   launch(electronBinary, ['.'], env);
 } else if (mode === 'packaged') {
-  env.AVIKAL_DEV_SERVER_URL = 'http://localhost:5173';
-  launch(path.join(rootDir, 'dist', 'win-unpacked', 'RookDuel Avikal.exe'), [], env);
+  delete env.AVIKAL_USE_SOURCE_BACKEND;
+  delete env.AVIKAL_DEV_SERVER_URL;
+  launch(path.join(rootDir, 'dist', 'win-unpacked', 'RookDuel-Avikal.exe'), [], env);
 } else {
   console.error(`Unknown dev Electron mode: ${mode}`);
   process.exit(1);

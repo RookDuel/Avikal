@@ -10,7 +10,11 @@ from __future__ import annotations
 import struct
 
 from ..security.pqc_keyfile import PQC_STORAGE_MODE_EXTERNAL
-from .metadata_pack import METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED
+from .metadata_pack import (
+    METADATA_FORMAT_VERSION,
+    METADATA_FORMAT_VERSION_ASSURED,
+    METADATA_FORMAT_VERSION_EMBEDDED,
+)
 from .metadata_validation import validate_cascade_metadata_dict
 
 
@@ -29,7 +33,7 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
 
     reader = _MetadataReader(packed)
     version = reader.read_u8("metadata version")
-    if version not in {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED}:
+    if version not in {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED, METADATA_FORMAT_VERSION_ASSURED}:
         raise ValueError(f"Unsupported metadata version: {version}")
 
     flags = reader.read_u8("metadata flags")
@@ -59,7 +63,7 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
     pqc_algorithm = reader.read_short_text("PQC algorithm") or None
     pqc_key_id = reader.read_short_text("PQC key ID") or None
     pqc_storage_mode = None
-    if version == METADATA_FORMAT_VERSION_EMBEDDED:
+    if version in {METADATA_FORMAT_VERSION_EMBEDDED, METADATA_FORMAT_VERSION_ASSURED}:
         pqc_storage_mode = reader.read_short_text("PQC storage mode") or None
     elif pqc_required:
         pqc_storage_mode = PQC_STORAGE_MODE_EXTERNAL
@@ -80,6 +84,22 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
     payload_key_wrap_algorithm = reader.read_short_text("payload key wrap algorithm") or None
     wrapped_payload_key_length = reader.read_u8("wrapped payload key length")
     wrapped_payload_key = reader.read_bytes(wrapped_payload_key_length, "wrapped payload key") if wrapped_payload_key_length else None
+
+    created_with_version = None
+    minimum_reader_version = None
+    required_features = 0
+    folder_count = 0
+    content_index_hash = None
+    payload_merkle_root = None
+    sender_message = None
+    if version == METADATA_FORMAT_VERSION_ASSURED:
+        created_with_version = reader.read_short_text("creator version")
+        minimum_reader_version = reader.read_short_text("minimum reader version")
+        required_features = reader.read_u64("required feature flags")
+        folder_count = reader.read_u32("folder count")
+        content_index_hash = reader.read_bytes(32, "content index hash")
+        payload_merkle_root = reader.read_bytes(32, "payload Merkle root")
+        sender_message = reader.read_long_text("sender message") or None
 
     reader.ensure_finished()
 
@@ -120,6 +140,13 @@ def unpack_cascade_metadata(packed: bytes) -> dict:
         "aavrit_commit_signature": aavrit_commit_signature,
         "payload_key_wrap_algorithm": payload_key_wrap_algorithm,
         "wrapped_payload_key": wrapped_payload_key,
+        "created_with_version": created_with_version,
+        "minimum_reader_version": minimum_reader_version,
+        "required_features": required_features,
+        "sender_message": sender_message,
+        "folder_count": folder_count,
+        "content_index_hash": content_index_hash,
+        "payload_merkle_root": payload_merkle_root,
     }
     return validate_cascade_metadata_dict(metadata)
 

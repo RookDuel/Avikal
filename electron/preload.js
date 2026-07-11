@@ -15,6 +15,7 @@ const electronBridge = Object.freeze({
   saveTextFile: (options) => ipcRenderer.invoke('file:saveText', options),
   exportFileCopy: (options) => ipcRenderer.invoke('file:exportCopy', options),
   exportFilesToDirectory: (options) => ipcRenderer.invoke('file:exportFilesToDirectory', options),
+  exportAssuranceReport: (options) => ipcRenderer.invoke('report:export', options),
   openPath: (path) => ipcRenderer.invoke('shell:openPath', path),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   
@@ -23,6 +24,13 @@ const electronBridge = Object.freeze({
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   updateTheme: (isDark) => ipcRenderer.send('theme:update', { isDark }),
+  getVisualMode: () => ipcRenderer.invoke('visualMode:get'),
+  setVisualMode: (mode) => ipcRenderer.invoke('visualMode:set', mode),
+  onVisualModeChanged: (callback) => {
+    const listener = (event, data) => callback(data);
+    ipcRenderer.on('visual-mode:changed', listener);
+    return () => ipcRenderer.removeListener('visual-mode:changed', listener);
+  },
   
   // Platform info
   platform: process.platform,
@@ -35,6 +43,14 @@ const electronBridge = Object.freeze({
     encrypt: (data) => ipcRenderer.invoke('safeStorage:encrypt', data),
     decrypt: (encryptedData) => ipcRenderer.invoke('safeStorage:decrypt', encryptedData),
     isAvailable: () => ipcRenderer.invoke('safeStorage:isAvailable'),
+  }),
+  creatorIdentity: Object.freeze({
+    create: (label) => ipcRenderer.invoke('identity:create', label),
+    list: () => ipcRenderer.invoke('identity:list'),
+    delete: (identityId) => ipcRenderer.invoke('identity:delete', identityId),
+    exportPublic: (identityId) => ipcRenderer.invoke('identity:exportPublic', identityId),
+    importTrusted: () => ipcRenderer.invoke('identity:importTrusted'),
+    setTrust: (identityId, status) => ipcRenderer.invoke('identity:setTrust', identityId, status),
   }),
   getPendingLaunchAction: () => ipcRenderer.invoke('launchAction:getPending'),
   onLaunchAction: (callback) => {

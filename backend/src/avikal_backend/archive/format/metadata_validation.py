@@ -5,13 +5,20 @@ from __future__ import annotations
 from ..path_safety import normalize_single_archive_filename
 from ..security.key_wrap import PAYLOAD_KEY_WRAP_ALGORITHM
 from ..security.pqc_keyfile import PQC_STORAGE_MODE_EMBEDDED, PQC_STORAGE_MODE_EXTERNAL, PQC_STORAGE_MODES
-from ..security.pqc_provider import PQC_SUITE_ID
-from .metadata_pack import METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED
+from ..security.pqc_provider import is_supported_pqc_suite_id
+from .metadata_pack import (
+    METADATA_FORMAT_VERSION,
+    METADATA_FORMAT_VERSION_ASSURED,
+    METADATA_FORMAT_VERSION_EMBEDDED,
+    MAX_SENDER_MESSAGE_BYTES,
+    MAX_SENDER_MESSAGE_WORDS,
+    normalize_sender_message,
+)
 
 
 def validate_cascade_metadata_dict(metadata: dict) -> dict:
     """Validate parsed metadata for the public v1 archive format."""
-    if metadata.get("version") not in {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED}:
+    if metadata.get("version") not in {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED, METADATA_FORMAT_VERSION_ASSURED}:
         raise ValueError("Metadata corrupted: unsupported metadata version")
 
     salt = metadata.get("salt")
@@ -40,7 +47,37 @@ def validate_cascade_metadata_dict(metadata: dict) -> dict:
     _validate_keyphrase_fields(metadata)
     _validate_archive_binding(metadata)
     _validate_wrapped_payload_key(metadata)
+    _validate_assurance_fields(metadata)
     return metadata
+
+
+def _validate_assurance_fields(metadata: dict) -> None:
+    if metadata.get("version") != METADATA_FORMAT_VERSION_ASSURED:
+        metadata.setdefault("required_features", 0)
+        metadata.setdefault("folder_count", 0)
+        metadata.setdefault("sender_message", None)
+        metadata.setdefault("created_with_version", None)
+        metadata.setdefault("minimum_reader_version", None)
+        metadata.setdefault("content_index_hash", None)
+        metadata.setdefault("payload_merkle_root", None)
+        return
+    for field_name in ("created_with_version", "minimum_reader_version"):
+        value = metadata.get(field_name)
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 32:
+            raise ValueError(f"Metadata corrupted: invalid {field_name}")
+    if not isinstance(metadata.get("required_features"), int) or metadata["required_features"] < 0:
+        raise ValueError("Metadata corrupted: invalid required feature flags")
+    if not isinstance(metadata.get("folder_count"), int) or metadata["folder_count"] < 0:
+        raise ValueError("Metadata corrupted: invalid folder count")
+    for field_name in ("content_index_hash", "payload_merkle_root"):
+        value = metadata.get(field_name)
+        if not isinstance(value, (bytes, bytearray)) or len(value) != 32:
+            raise ValueError(f"Metadata corrupted: invalid {field_name}")
+    message = metadata.get("sender_message")
+    if message is not None:
+        normalized = normalize_sender_message(message)
+        if normalized != message or len(message.split()) > MAX_SENDER_MESSAGE_WORDS or len(message.encode("utf-8")) > MAX_SENDER_MESSAGE_BYTES:
+            raise ValueError("Metadata corrupted: invalid sender message")
 
 
 def _validate_provider_fields(metadata: dict) -> None:
@@ -104,7 +141,7 @@ def _validate_pqc_fields(metadata: dict) -> None:
     version = metadata.get("version")
 
     if pqc_required:
-        if pqc_algorithm != PQC_SUITE_ID:
+        if not is_supported_pqc_suite_id(pqc_algorithm):
             raise ValueError("Metadata corrupted: unsupported PQC algorithm")
         if not isinstance(pqc_key_id, str) or len(pqc_key_id) != 64:
             raise ValueError("Metadata corrupted: invalid PQC key identifier")

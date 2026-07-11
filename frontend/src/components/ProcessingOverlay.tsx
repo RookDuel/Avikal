@@ -18,9 +18,11 @@ interface ProcessingOverlayProps {
 
 function formatSourceSize(fileSize: number | null | undefined): string {
   if (fileSize == null) return 'Queued'
+  if (fileSize < 1024) return `${fileSize} B`
+  if (fileSize < 1024 * 1024) return `${(fileSize / 1024).toFixed(fileSize < 10 * 1024 ? 1 : 0)} KB`
   const mib = fileSize / (1024 * 1024)
   if (mib >= 1024) return `${(mib / 1024).toFixed(1)} GB`
-  return `${Math.max(1, Math.round(mib))} MB`
+  return `${mib.toFixed(mib < 10 ? 1 : 0)} MB`
 }
 
 function formatElapsed(seconds: number): string {
@@ -50,47 +52,32 @@ export default function ProcessingOverlay({
   const sourceValue = sourceLabel ?? formatSourceSize(fileSize)
 
   return (
-    <div className="av-decode-processing-overlay absolute inset-0 z-20 flex flex-col items-center justify-center p-5 sm:p-8">
+    <div className="av-decode-processing-overlay absolute inset-0 z-20 flex flex-col items-center justify-center p-4 sm:p-6">
       <motion.div
-        initial={{ opacity: 0, scale: 0.98, y: 8 }}
+        initial={{ opacity: 0, scale: 0.99, y: 6 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.98, y: 8 }}
-        className="av-decode-processing-card w-full max-w-[420px] rounded-[1.65rem] p-6"
+        exit={{ opacity: 0, scale: 0.99, y: 6 }}
+        transition={{ duration: 0.18, ease: 'easeOut' }}
+        className="av-decode-processing-card w-full max-w-[380px] rounded-[1.35rem] p-5"
       >
-        <div className="mb-5 flex items-start gap-4">
+        <div className="mb-4 flex items-start gap-3">
           <div className="av-decode-pulse-shell">
-            <motion.div
-              className="av-decode-pulse-ring"
-              animate={{ scale: [0.94, 1.08, 0.94], opacity: [0.28, 0.72, 0.28] }}
-              transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
-            />
             <div className="av-decode-pulse-core">{icon}</div>
           </div>
           <div className="min-w-0 flex-1">
-            <div className="mb-1.5 flex min-w-0 items-center gap-2">
-              <h3 className="truncate text-lg font-semibold tracking-tight text-av-main">{title}</h3>
-              <span className="shrink-0 rounded-full border border-av-accent/25 bg-av-accent/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-av-accent">
+            <div className="mb-1 flex min-w-0 items-center justify-between gap-3">
+              <h3 className="truncate text-base font-semibold tracking-tight text-av-main">{title}</h3>
+              <span className="shrink-0 text-[9px] font-bold uppercase tracking-[0.18em] text-av-muted">
                 {statusLabel}
               </span>
             </div>
-            <p className="line-clamp-2 min-h-[20px] text-sm leading-5 text-av-muted">{description}</p>
+            <p className="line-clamp-2 min-h-[18px] text-xs leading-5 text-av-muted">{description}</p>
           </div>
         </div>
 
-        <div className="mb-4 grid grid-cols-2 gap-2.5">
-          <div className="av-decode-processing-stat">
-            <p>Elapsed</p>
-            <strong>{formatElapsed(elapsedSeconds)}</strong>
-          </div>
-          <div className="av-decode-processing-stat">
-            <p>Input</p>
-            <strong>{sourceValue}</strong>
-          </div>
-        </div>
-
-        <div className="mb-2.5 flex items-center justify-between gap-4 text-xs text-av-muted">
-          <span className="truncate font-medium text-av-main">{progressLabel}</span>
-          <span className="shrink-0">{etaLabel}</span>
+        <div className="mb-2.5 flex items-center justify-between gap-4 text-xs">
+          <span className="truncate font-semibold text-av-main">{progressLabel}</span>
+          <span className="shrink-0 text-av-muted">{etaLabel}</span>
         </div>
         <div className="av-decode-progress-track">
           {progressValue !== null ? (
@@ -108,7 +95,12 @@ export default function ProcessingOverlay({
           )}
         </div>
 
-        {children && <div className="mt-5 border-t border-av-border/35 pt-4">{children}</div>}
+        <div className="mt-3 flex items-center justify-between gap-3 text-[11px] font-medium text-av-muted">
+          <span>Elapsed {formatElapsed(elapsedSeconds)}</span>
+          <span className="truncate">{sourceValue}</span>
+        </div>
+
+        {children && <div className="mt-4 border-t border-av-border/35 pt-4">{children}</div>}
       </motion.div>
     </div>
   )

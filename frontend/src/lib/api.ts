@@ -92,6 +92,12 @@ export interface EncryptRequest {
   pqc_keyfile_output?: string
   pqc_keyfile_protection_mode?: 'archive_secret' | 'dual_password'
   pqc_keyfile_password?: string
+  pqc_suite_id?: string
+  pqc_custom_kem?: string
+  pqc_custom_signature?: string
+  pqc_custom_slh_signature?: string
+  sender_message?: string
+  creator_identity_id?: string
 }
 
 export interface DecryptRequest {
@@ -103,12 +109,28 @@ export interface DecryptRequest {
   pqc_keyfile_password?: string
 }
 
+export interface ArchiveSelectionRequest {
+  session_id: string
+  entry_ids: string[]
+}
+
 export interface PreviewCleanupRequest {
   session_id: string
 }
 
 export interface ArchiveInspectRequest {
   input_file: string
+}
+
+export interface ArchiveSplitVolumesRequest {
+  input_file: string
+  output_dir?: string
+  volume_size_bytes?: number
+}
+
+export interface ArchiveJoinVolumesRequest {
+  volume_set_dir: string
+  output_file: string
 }
 
 export interface PqcKeyfileInspectRequest {
@@ -122,6 +144,7 @@ export interface RekeyRequest {
   old_keyphrase?: string[]
   new_password?: string
   new_keyphrase?: string[]
+  creator_identity_id?: string
   force?: boolean
 }
 
@@ -193,6 +216,48 @@ export const api = {
     }
   },
 
+  async openArchiveSession(data: DecryptRequest, token?: string) {
+    const headers = await createBackendHeaders({ 'Content-Type': 'application/json' })
+    if (token) headers.set('Authorization', `Bearer ${token}`)
+    const response = await callCoreResponse('archive.openSession', {
+      method: 'POST', headers, body: JSON.stringify(data),
+    }, 0)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive unlock failed'))
+    return response.json()
+  },
+
+  async extractArchiveSelection(data: ArchiveSelectionRequest) {
+    const response = await callCoreResponse('archive.extractSelection', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+    }, 0)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Selected extraction failed'))
+    return response.json()
+  },
+
+  async extractArchiveAll(sessionId: string) {
+    const response = await callCoreResponse('archive.extractAll', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }),
+    }, 0)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive extraction failed'))
+    return response.json()
+  },
+
+  async verifyArchiveAll(sessionId: string) {
+    const response = await callCoreResponse('archive.verifyAll', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }),
+    }, 0)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive verification failed'))
+    return response.json()
+  },
+
+  async closeArchiveSession(sessionId: string) {
+    const response = await callCoreResponse('archive.closeSession', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }),
+    }, 10_000)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive session cleanup failed'))
+    return response.json()
+  },
+
   async inspectArchive(data: ArchiveInspectRequest) {
     const response = await fetchWithTimeout('archive.inspect', {
       method: 'POST',
@@ -200,6 +265,26 @@ export const api = {
       body: JSON.stringify(data),
     })
     if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive inspection failed'))
+    return response.json()
+  },
+
+  async splitArchiveVolumes(data: ArchiveSplitVolumesRequest) {
+    const response = await callCoreResponse('archive.splitVolumes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }, 0)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive volume split failed'))
+    return response.json()
+  },
+
+  async joinArchiveVolumes(data: ArchiveJoinVolumesRequest) {
+    const response = await callCoreResponse('archive.joinVolumes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }, 0)
+    if (!response.ok) throw new Error(await readErrorResponse(response, 'Archive volume verification failed'))
     return response.json()
   },
 
@@ -219,7 +304,7 @@ export const api = {
       method: 'POST',
       headers: await createBackendHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(data),
-      }, 120_000)
+      }, 0)
     if (!response.ok) throw new Error(await readErrorResponse(response, 'Rekey failed'))
     return response.json()
   },

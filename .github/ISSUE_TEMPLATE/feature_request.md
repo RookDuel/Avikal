@@ -1,41 +1,23 @@
 ---
 name: Feature request
-about: Suggest a practical Avikal improvement.
-title: "[FEATURE]"
+about: Suggest an improvement for RookDuel Avikal
+title: "[Feature] "
 labels: enhancement
-assignees: AtharvaMoves
-type: Feature
-
+assignees: ""
 ---
 
 ## Problem
 
-What user or developer problem should this solve?
+What problem are you trying to solve?
 
-## Proposed Solution
+## Proposed Change
 
-Describe the feature or behavior you want.
+Describe the feature or workflow improvement you want.
 
-## Area
+## Why It Helps
 
-Choose one:
+Explain the practical benefit for users or contributors.
 
-- Desktop GUI
-- CLI
-- Archive format
-- Cryptography / PQC
-- TimeCapsule
-- Aavrit
-- Packaging / installer
-- Documentation
-- Other
+## Additional Context
 
-## Tradeoffs Or Risks
-
-Mention security, compatibility, performance, or usability concerns if known.
-
-## Checklist
-
-- [ ] This request does not weaken archive security.
-- [ ] This request does not ask for fallback crypto.
-- [ ] I understand Avikal is maintainer-led and this request may be declined or deferred.
+Anything else we should know?

@@ -8,6 +8,7 @@ Copyright (c) 2026 Atharva Sen Barai.
 from __future__ import annotations
 
 import base64
+import json
 import re
 import struct
 
@@ -26,8 +27,12 @@ KEYCHAIN_PQC_STORAGE_MODE_TAG = "AvikalPQCStorageMode"
 KEYCHAIN_UNLOCK_TIMESTAMP_TAG = "AvikalUnlockTimestamp"
 KEYCHAIN_DRAND_ROUND_TAG = "AvikalDrandRound"
 KEYCHAIN_KEYPHRASE_WORDLIST_TAG = "AvikalKeyphraseWordlist"
+KEYCHAIN_AAVRIT_ROUTE_TAG = "AvikalAavritRoute"
+KEYCHAIN_TIME_GATED_TAG = "AvikalTimeGatedKeychain"
 PUBLIC_ROUTE_FORMAT_VERSION_V1 = "1"
 PUBLIC_ROUTE_FORMAT_VERSION_V2 = "2"
+PUBLIC_ROUTE_FORMAT_VERSION_V3 = "3"
+MAX_AAVRIT_ROUTE_BYTES = 32_768
 
 ARCHIVE_MODE_SINGLE = 0x01
 ARCHIVE_MODE_MULTI = 0x02
@@ -182,23 +187,23 @@ def attach_public_route_tags_to_keychain_pgn(
     unlock_timestamp: int | None = None,
     drand_round: int | None = None,
     keyphrase_wordlist_id: str | None = None,
+    aavrit_route: dict | None = None,
+    time_key_gated: bool = False,
 ) -> str:
     """Attach public non-secret routing hints to keychain.pgn."""
     if pqc_storage_mode is not None and pqc_storage_mode not in PQC_STORAGE_MODES:
         raise ValueError("Invalid PQC storage mode route hint")
     if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED and not requires_pqc:
         raise ValueError("Embedded PQC storage mode requires PQC to be enabled")
-    route_version = (
-        PUBLIC_ROUTE_FORMAT_VERSION_V2
-        if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED
-        else PUBLIC_ROUTE_FORMAT_VERSION_V1
+    route_version = PUBLIC_ROUTE_FORMAT_VERSION_V3 if aavrit_route else (
+        PUBLIC_ROUTE_FORMAT_VERSION_V2 if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED else PUBLIC_ROUTE_FORMAT_VERSION_V1
     )
     output = keychain_pgn
     output = _replace_or_insert_tag(output, KEYCHAIN_ROUTE_VERSION_TAG, route_version)
     output = _replace_or_insert_tag(output, KEYCHAIN_REQUIRE_PASSWORD_TAG, _encode_route_bool(requires_password))
     output = _replace_or_insert_tag(output, KEYCHAIN_REQUIRE_KEYPHRASE_TAG, _encode_route_bool(requires_keyphrase))
     output = _replace_or_insert_tag(output, KEYCHAIN_REQUIRE_PQC_TAG, _encode_route_bool(requires_pqc))
-    if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+    if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED or (route_version == PUBLIC_ROUTE_FORMAT_VERSION_V3 and requires_pqc):
         output = _replace_or_insert_tag(output, KEYCHAIN_PQC_STORAGE_MODE_TAG, pqc_storage_mode)
     if unlock_timestamp is not None:
         output = _replace_or_insert_tag(output, KEYCHAIN_UNLOCK_TIMESTAMP_TAG, str(int(unlock_timestamp)))
@@ -206,6 +211,22 @@ def attach_public_route_tags_to_keychain_pgn(
         output = _replace_or_insert_tag(output, KEYCHAIN_DRAND_ROUND_TAG, str(int(drand_round)))
     if keyphrase_wordlist_id:
         output = _replace_or_insert_tag(output, KEYCHAIN_KEYPHRASE_WORDLIST_TAG, keyphrase_wordlist_id)
+    if aavrit_route is not None:
+        required = {"protocol", "server_url", "escrow_id", "capability", "authority"}
+        if not isinstance(aavrit_route, dict) or set(aavrit_route) != required:
+            raise ValueError("Invalid Aavrit public route")
+        encoded_route = json.dumps(aavrit_route, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(encoded_route) > MAX_AAVRIT_ROUTE_BYTES:
+            raise ValueError("Aavrit public route is oversized")
+        output = _replace_or_insert_tag(
+            output,
+            KEYCHAIN_AAVRIT_ROUTE_TAG,
+            base64.urlsafe_b64encode(encoded_route).rstrip(b"=").decode("ascii"),
+        )
+    if time_key_gated:
+        if aavrit_route is None:
+            raise ValueError("Time-gated keychain route requires Aavrit routing material")
+        output = _replace_or_insert_tag(output, KEYCHAIN_TIME_GATED_TAG, "1")
     return output
 
 
@@ -223,20 +244,42 @@ def extract_public_route_tags_from_keychain_pgn(keychain_pgn: str) -> dict:
             "unlock_timestamp": None,
             "drand_round": None,
             "keyphrase_wordlist_id": None,
+            "aavrit_route": None,
+            "time_key_gated": False,
         }
-    if route_version not in {PUBLIC_ROUTE_FORMAT_VERSION_V1, PUBLIC_ROUTE_FORMAT_VERSION_V2}:
+    if route_version not in {PUBLIC_ROUTE_FORMAT_VERSION_V1, PUBLIC_ROUTE_FORMAT_VERSION_V2, PUBLIC_ROUTE_FORMAT_VERSION_V3}:
         raise ValueError("Unsupported Avk public route hint version")
 
     unlock_timestamp_raw = _extract_tag_value(keychain_pgn, KEYCHAIN_UNLOCK_TIMESTAMP_TAG)
     drand_round_raw = _extract_tag_value(keychain_pgn, KEYCHAIN_DRAND_ROUND_TAG)
     requires_pqc = _decode_route_bool(_extract_tag_value(keychain_pgn, KEYCHAIN_REQUIRE_PQC_TAG))
     pqc_storage_mode = None
-    if route_version == PUBLIC_ROUTE_FORMAT_VERSION_V2:
-        pqc_storage_mode = _extract_tag_value(keychain_pgn, KEYCHAIN_PQC_STORAGE_MODE_TAG)
-        if pqc_storage_mode not in PQC_STORAGE_MODES:
-            raise ValueError("Invalid Avk PQC storage mode route hint")
+    if route_version in {PUBLIC_ROUTE_FORMAT_VERSION_V2, PUBLIC_ROUTE_FORMAT_VERSION_V3}:
+        if requires_pqc:
+            pqc_storage_mode = _extract_tag_value(keychain_pgn, KEYCHAIN_PQC_STORAGE_MODE_TAG)
+            if pqc_storage_mode not in PQC_STORAGE_MODES:
+                raise ValueError("Invalid Avk PQC storage mode route hint")
     elif requires_pqc:
         pqc_storage_mode = PQC_STORAGE_MODE_EXTERNAL
+
+    aavrit_route = None
+    if route_version == PUBLIC_ROUTE_FORMAT_VERSION_V3:
+        encoded_route = _extract_tag_value(keychain_pgn, KEYCHAIN_AAVRIT_ROUTE_TAG)
+        if not encoded_route:
+            raise ValueError("Aavrit public route is missing")
+        try:
+            raw_route = base64.urlsafe_b64decode(encoded_route + "=" * (-len(encoded_route) % 4))
+            if len(raw_route) > MAX_AAVRIT_ROUTE_BYTES:
+                raise ValueError("Aavrit public route is oversized")
+            aavrit_route = json.loads(raw_route.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError("Aavrit public route is malformed") from exc
+        required = {"protocol", "server_url", "escrow_id", "capability", "authority"}
+        if not isinstance(aavrit_route, dict) or set(aavrit_route) != required:
+            raise ValueError("Aavrit public route is invalid")
+    time_key_gated = _decode_route_bool(_extract_tag_value(keychain_pgn, KEYCHAIN_TIME_GATED_TAG)) or False
+    if time_key_gated and aavrit_route is None:
+        raise ValueError("Time-gated keychain is missing Aavrit routing material")
 
     return {
         "available": True,
@@ -248,6 +291,8 @@ def extract_public_route_tags_from_keychain_pgn(keychain_pgn: str) -> dict:
         "unlock_timestamp": int(unlock_timestamp_raw) if unlock_timestamp_raw else None,
         "drand_round": int(drand_round_raw) if drand_round_raw else None,
         "keyphrase_wordlist_id": _extract_tag_value(keychain_pgn, KEYCHAIN_KEYPHRASE_WORDLIST_TAG),
+        "aavrit_route": aavrit_route,
+        "time_key_gated": time_key_gated,
     }
 
 

@@ -37,6 +37,7 @@ $coreRoot = Join-Path $env:LOCALAPPDATA "RookDuel\Avikal\Core\$Version"
 $manifestPath = Join-Path $coreRoot "core.json"
 $backendExe = Join-Path $coreRoot "backend\avikal-backend.exe"
 $opensslPath = Join-Path $coreRoot "backend-runtime\pqc\bin\openssl.exe"
+$libcryptoPath = Join-Path $coreRoot "backend-runtime\pqc\bin\libcrypto-3-x64.dll"
 $nativePath = Get-NativeModulePath -CoreRoot $coreRoot
 
 if (-not (Test-Path $manifestPath)) {
@@ -61,6 +62,9 @@ if ([string]$manifest.nativeModuleHash -ne (Get-Sha256OrThrow -Path $nativePath)
 }
 if ([string]$manifest.pqcRuntimeHash -ne (Get-Sha256OrThrow -Path $opensslPath)) {
     throw "Shared Avikal core PQC runtime hash mismatch."
+}
+if ([string]$manifest.pqcLibraryHash -ne (Get-Sha256OrThrow -Path $libcryptoPath)) {
+    throw "Shared Avikal core PQC library hash mismatch."
 }
 
 & $backendExe --verify-runtime

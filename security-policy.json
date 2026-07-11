@@ -1,0 +1,8 @@
+{
+  "format": "avikal-build-security-policy",
+  "version": 1,
+  "rfc3161": {
+    "url": null,
+    "ca_file": null
+  }
+}

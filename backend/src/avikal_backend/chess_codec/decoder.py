@@ -31,6 +31,7 @@ class PGNDecoder:
         self._state_cache = {}
         self._progress_callback = None
         self._progress_ticks = 0
+        self.last_stats: dict[str, int] = {}
     
     def decode_from_pgn(self, pgn_text: str, progress_callback: Callable[[str, float], None] | None = None) -> int:
         """Decode PGN to NUM."""
@@ -45,10 +46,12 @@ class PGNDecoder:
                     progress_callback("Parsing keychain PGN", 0.05)
                     progress_callback("Decoding recursive PGN variations", 0.55)
                     progress_callback("Reconstructing metadata integer", 0.92)
-                value, _stats = native_decode_chess_pgn_integer(pgn_text)
+                value, stats = native_decode_chess_pgn_integer(pgn_text)
+                self.last_stats = dict(stats or {})
                 return value
         
         try:
+            self.last_stats = {}
             self._state_cache = {}
             self._progress_callback = progress_callback
             self._progress_ticks = 0
@@ -61,6 +64,8 @@ class PGNDecoder:
             
             if not game.variations:
                 raise ValueError("Empty game")
+
+            self.last_stats = self._observed_stats(game)
             
             # Read variations_per_round from the header, falling back to 1 if absent or invalid.
             self.variations_per_round = 1
@@ -91,6 +96,42 @@ class PGNDecoder:
         finally:
             self._state_cache = {}
             self._progress_callback = None
+
+    @staticmethod
+    def _observed_stats(game: chess.pgn.Game) -> dict[str, int]:
+        """Measure the observable PGN tree without replaying board positions."""
+        stats = {
+            "mainline_plies": 0,
+            "variation_plies": 0,
+            "total_variations": 0,
+            "total_plies": 0,
+            "max_variations_at_position": 0,
+            "positions_with_variations": 0,
+            "max_nesting_depth": 0,
+            "total_variation_branches": 0,
+        }
+        stack = [(game, True, 0)]
+        while stack:
+            node, on_mainline, depth = stack.pop()
+            explicit_branches = max(0, len(node.variations) - 1)
+            if explicit_branches:
+                stats["positions_with_variations"] += 1
+                stats["max_variations_at_position"] = max(
+                    stats["max_variations_at_position"], explicit_branches
+                )
+                stats["total_variations"] += explicit_branches
+                stats["total_variation_branches"] += explicit_branches
+            for index, child in enumerate(node.variations):
+                child_on_mainline = on_mainline and index == 0
+                child_depth = depth if index == 0 else depth + 1
+                if child_on_mainline:
+                    stats["mainline_plies"] += 1
+                else:
+                    stats["variation_plies"] += 1
+                    stats["max_nesting_depth"] = max(stats["max_nesting_depth"], child_depth)
+                stack.append((child, child_on_mainline, child_depth))
+        stats["total_plies"] = stats["mainline_plies"] + stats["variation_plies"]
+        return stats
 
     def _native_route_allowed(self) -> bool:
         """Use Rust only for default production PGN branch semantics."""

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+﻿import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { Archive, CheckCircle2, ChevronDown, Download, Eye, EyeOff, File, FileKey2, Fingerprint, Key, RotateCw, ShieldAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -71,6 +71,8 @@ export default function Rekey() {
   const [newKeyphraseEnabled, setNewKeyphraseEnabled] = useState(false)
   const [newKeyphrase, setNewKeyphrase] = useState('')
   const [outputFilePath, setOutputFilePath] = useState('')
+  const [creatorIdentities, setCreatorIdentities] = useState<Array<{ identity_id: string; label: string }>>([])
+  const [creatorIdentityId, setCreatorIdentityId] = useState('')
 
   const [showOldPassword, setShowOldPassword] = useState(false)
   const [showNewPassword, setShowNewPassword] = useState(false)
@@ -89,6 +91,7 @@ export default function Rekey() {
     setNewKeyphraseEnabled(false)
     setNewKeyphrase('')
     setOutputFilePath('')
+    setCreatorIdentityId('')
     setShowOldPassword(false)
     setShowNewPassword(false)
     setIsCopied(false)
@@ -100,6 +103,15 @@ export default function Rekey() {
     setRekeyResult(null)
     resetRightPanel()
   }, [resetRightPanel])
+
+  useEffect(() => {
+    void window.electron?.creatorIdentity?.list().then(result => {
+      setCreatorIdentities((result.identities || []).map(item => ({
+        identity_id: String(item.identity_id || ''),
+        label: String(item.label || 'Creator identity'),
+      })).filter(item => /^[0-9a-f]{64}$/.test(item.identity_id)))
+    }).catch(() => setCreatorIdentities([]))
+  }, [])
 
   useEffect(() => {
     if (!backendRuntime.isReady || keyphraseWordPairs.length > 0) return
@@ -307,6 +319,7 @@ export default function Rekey() {
         old_keyphrase: splitKeyphraseWords(oldKeyphrase).length > 0 ? splitKeyphraseWords(oldKeyphrase) : undefined,
         new_password: newPasswordEnabled ? newPassword || undefined : undefined,
         new_keyphrase: newKeyphraseEnabled ? splitKeyphraseWords(newKeyphrase) : undefined,
+        creator_identity_id: creatorIdentityId || undefined,
       })
 
       setRekeyResult(result)
@@ -468,7 +481,7 @@ export default function Rekey() {
             <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Rekey Settings</h3>
           </div>
 
-          <div className={`rounded-[20px] border shadow-sm overflow-hidden backdrop-blur-xl ${
+          <div className={`rounded-[20px] border shadow-sm overflow-hidden ${
             isReducingProtection
               ? 'bg-amber-500/8 border-amber-500/30'
               : 'bg-av-surface/40 border-av-border/30'
@@ -516,6 +529,15 @@ export default function Rekey() {
                 </div>
                 <p className="line-clamp-2 break-all text-sm text-av-main">{outputFilePath || 'No output selected.'}</p>
               </div>
+              {creatorIdentities.length > 0 && (
+                <label className="mt-3 block text-[11px] font-medium text-av-muted">
+                  Rekey signature identity
+                  <select value={creatorIdentityId} onChange={event => setCreatorIdentityId(event.target.value)} className="mt-1 w-full rounded-xl border border-av-border/40 bg-av-surface px-3 py-2 text-sm text-av-main">
+                    <option value="">Per-rekey identity</option>
+                    {creatorIdentities.map(identity => <option key={identity.identity_id} value={identity.identity_id}>{identity.label}</option>)}
+                  </select>
+                </label>
+              )}
             </div>
           </div>
 
@@ -568,7 +590,7 @@ export default function Rekey() {
             onToggle={() => setShowNewCredentialsPanel((value) => !value)}
           >
             <div className="space-y-4">
-                <div className={`rounded-[18px] border transition-all duration-300 overflow-hidden backdrop-blur-xl ${newPasswordEnabled ? 'bg-av-surface/80 border-emerald-500/35 ring-1 ring-emerald-500/15' : 'bg-av-surface/40 border-av-border/30'}`}>
+                <div className={`rounded-[18px] border transition-all duration-300 overflow-hidden ${newPasswordEnabled ? 'bg-av-surface/80 border-emerald-500/35 ring-1 ring-emerald-500/15' : 'bg-av-surface/40 border-av-border/30'}`}>
                   <div className="p-3.5 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <LockBadge />
@@ -603,7 +625,7 @@ export default function Rekey() {
                   )}
                 </div>
 
-                <div className={`rounded-[18px] border transition-all duration-300 overflow-hidden backdrop-blur-xl ${newKeyphraseEnabled ? 'bg-av-surface/80 border-purple-500/35 ring-1 ring-purple-500/15' : 'bg-av-surface/40 border-av-border/30'}`}>
+                <div className={`rounded-[18px] border transition-all duration-300 overflow-hidden ${newKeyphraseEnabled ? 'bg-av-surface/80 border-purple-500/35 ring-1 ring-purple-500/15' : 'bg-av-surface/40 border-av-border/30'}`}>
                   <div className="p-3.5 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <KeyBadge />
@@ -657,7 +679,7 @@ export default function Rekey() {
           </CollapsibleSettingsCard>
 
           {unsupportedReason && (
-            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-[16px] bg-amber-500/10 border border-amber-500/30 flex items-start gap-3 backdrop-blur-md shadow-inner">
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-[16px] bg-amber-500/10 border border-amber-500/30 flex items-start gap-3 shadow-inner">
               <ShieldAlert className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
               <div>
                 <p className="text-[13px] font-bold text-amber-500 uppercase tracking-wide mb-1">Unsupported Rekey Scenario</p>
@@ -673,7 +695,7 @@ export default function Rekey() {
               disabled={!canRekey}
               className={`w-full py-4 rounded-2xl text-[15px] font-semibold tracking-wide transition-all duration-300 flex items-center justify-center gap-2 ${
                 !canRekey
-                  ? 'bg-av-border/10 dark:bg-white/5 border border-av-border/20 dark:border-white/5 text-av-muted cursor-not-allowed shadow-inner backdrop-blur-sm'
+                  ? 'bg-av-border/10 dark:bg-white/5 border border-av-border/20 dark:border-white/5 text-av-muted cursor-not-allowed shadow-inner'
                   : 'bg-av-main hover:opacity-90 text-av-surface shadow-[0_10px_30px_rgba(0,0,0,0.15)] hover:shadow-[0_10px_40px_rgba(0,0,0,0.2)] hover:-translate-y-0.5'
               }`}
             >
@@ -724,7 +746,7 @@ function CollapsibleSettingsCard({
   children: ReactNode
 }) {
   return (
-    <div className="rounded-[20px] border bg-av-surface/40 border-av-border/30 shadow-sm overflow-hidden backdrop-blur-xl">
+    <div className="rounded-[20px] border bg-av-surface/40 border-av-border/30 shadow-sm overflow-hidden">
       <div className="p-4 flex items-start justify-between gap-3">
         <div className="flex items-start gap-3 min-w-0 flex-1">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center border bg-av-surface shadow-[0_2px_8px_rgba(0,0,0,0.04)] border-av-border/20 shrink-0">

@@ -20,6 +20,14 @@
   --av-muted-fill: rgb(148 163 184 / 0.12);
   --av-muted-fill-strong: rgb(148 163 184 / 0.2);
   --av-overlay: rgb(15 23 42 / 0.2);
+  --av-titlebar-bg-light: #f8fafc;
+  --av-titlebar-bg-dark: #050505;
+  --av-modal-bg-light: #fbfaf7;
+  --av-modal-bg-dark: #080808;
+  --av-processing-overlay-light: rgb(248 250 252 / 0.92);
+  --av-processing-overlay-dark: rgb(0 0 0 / 0.82);
+  --av-processing-card-light: #ffffff;
+  --av-processing-card-dark: #080809;
 }
 
 .dark {
@@ -42,6 +50,10 @@
   --av-muted-fill: rgb(255 255 255 / 0.05);
   --av-muted-fill-strong: rgb(255 255 255 / 0.1);
   --av-overlay: rgb(0 0 0 / 0.6);
+  --av-processing-overlay-light: rgb(0 0 0 / 0.82);
+  --av-processing-overlay-dark: rgb(0 0 0 / 0.82);
+  --av-processing-card-light: #080809;
+  --av-processing-card-dark: #080809;
 }
 
 @theme {
@@ -102,17 +114,8 @@
 @layer base {
   * {
     border-color: var(--av-border);
-    /* Smooth transitions for layout changes on window resize */
-    transition-property: padding, margin, width, max-width;
-    transition-duration: 150ms;
-    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   }
 
-  /* Don't apply layout transitions to animated elements — framer-motion handles those */
-  [data-framer-motion] * {
-    transition: none;
-  }
-  
   body {
     background-color: var(--av-secondary);
     color: var(--av-text-main);
@@ -132,7 +135,6 @@
 @layer components {
   .glass {
     background-color: var(--av-glass-bg);
-    backdrop-filter: blur(24px);
     border: 1px solid var(--av-glass-border);
     box-shadow: var(--av-shadow-soft);
   }
@@ -232,32 +234,78 @@
 
   .theme-backdrop {
     background-color: var(--av-overlay);
-    backdrop-filter: blur(10px);
   }
 
   .av-titlebar-glass {
     isolation: isolate;
-    background: rgb(248 250 252 / 0.88);
-    border-bottom: 1px solid rgb(203 213 225 / 0.72);
+    background: var(--av-titlebar-bg-light);
+    border-bottom: 1px solid color-mix(in srgb, var(--av-border) 72%, transparent);
     box-shadow: 0 1px 0 rgb(255 255 255 / 0.55) inset, 0 10px 30px rgb(15 23 42 / 0.08);
-    backdrop-filter: blur(18px) saturate(145%);
-    -webkit-backdrop-filter: blur(18px) saturate(145%);
   }
 
   .dark .av-titlebar-glass {
-    background: rgb(5 5 5 / 0.88);
+    background: var(--av-titlebar-bg-dark);
     border-bottom-color: rgb(255 255 255 / 0.08);
     box-shadow: 0 1px 0 rgb(255 255 255 / 0.055) inset, 0 10px 30px rgb(0 0 0 / 0.32);
   }
 
-  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    .av-titlebar-glass {
-      background: rgb(248 250 252 / 0.96);
-    }
+  body.effects-enabled .av-titlebar-glass,
+  body.effects-enabled .av-modal-backdrop,
+  body.effects-enabled .av-modal-surface,
+  body.effects-enabled .av-processing-overlay,
+  body.effects-enabled .av-decode-processing-overlay,
+  body.effects-enabled .av-processing-card,
+  body.effects-enabled .av-result-card,
+  body.effects-enabled .av-decode-processing-card,
+  body.effects-enabled .av-primary-panel,
+  body.effects-enabled .av-left-workspace,
+  body.effects-enabled .av-panel-header {
+    -webkit-backdrop-filter: blur(25px) saturate(1.25);
+    backdrop-filter: blur(25px) saturate(1.25);
+    transform: translateZ(0);
+    will-change: transform;
+  }
 
-    .dark .av-titlebar-glass {
-      background: rgb(5 5 5 / 0.96);
-    }
+  body.effects-enabled .av-titlebar-glass {
+    background: rgb(248 250 252 / 0.72);
+  }
+
+  body.effects-enabled.dark .av-titlebar-glass,
+  .dark body.effects-enabled .av-titlebar-glass {
+    background: rgb(5 5 5 / 0.62);
+  }
+
+  body.effects-enabled .av-modal-surface,
+  body.effects-enabled .av-processing-card,
+  body.effects-enabled .av-result-card,
+  body.effects-enabled .av-decode-processing-card {
+    background: rgb(255 255 255 / 0.78);
+  }
+
+  body.effects-enabled.dark .av-modal-surface,
+  body.effects-enabled.dark .av-processing-card,
+  body.effects-enabled.dark .av-result-card,
+  body.effects-enabled.dark .av-decode-processing-card,
+  .dark body.effects-enabled .av-modal-surface,
+  .dark body.effects-enabled .av-processing-card,
+  .dark body.effects-enabled .av-result-card,
+  .dark body.effects-enabled .av-decode-processing-card {
+    background: rgb(8 8 9 / 0.72);
+  }
+
+  body.effects-enabled .av-primary-panel,
+  body.effects-enabled .av-left-workspace,
+  body.effects-enabled .av-panel-header {
+    background: rgb(255 255 255 / 0.66);
+  }
+
+  body.effects-enabled.dark .av-primary-panel,
+  body.effects-enabled.dark .av-left-workspace,
+  body.effects-enabled.dark .av-panel-header,
+  .dark body.effects-enabled .av-primary-panel,
+  .dark body.effects-enabled .av-left-workspace,
+  .dark body.effects-enabled .av-panel-header {
+    background: rgb(8 8 9 / 0.56);
   }
 
   .security-keyphrase-card {
@@ -559,7 +607,6 @@
     border: 1px solid color-mix(in srgb, var(--av-border) 78%, white 22%);
     border-radius: 1.5rem;
     box-shadow: 0 24px 60px rgb(15 23 42 / 0.08), 0 2px 8px rgb(15 23 42 / 0.04);
-    backdrop-filter: blur(20px);
     transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
   }
 
@@ -621,61 +668,51 @@
   }
 
   .av-processing-overlay {
-    background: color-mix(in srgb, var(--av-surface) 70%, #050505 30%);
-    backdrop-filter: blur(18px);
+    background: var(--av-processing-overlay-light);
   }
 
   .av-processing-card,
   .av-result-card {
     border: 1px solid color-mix(in srgb, var(--av-border) 70%, transparent);
-    background: color-mix(in srgb, var(--av-surface) 82%, #050505 18%);
+    background: var(--av-processing-card-light);
     box-shadow: 0 22px 64px rgb(0 0 0 / 0.18);
+  }
+
+  .dark .av-processing-overlay {
+    background: var(--av-processing-overlay-dark);
   }
 
   .dark .av-processing-card,
   .dark .av-result-card {
+    background: var(--av-processing-card-dark);
     box-shadow: 0 24px 72px rgb(0 0 0 / 0.45);
   }
 
   .av-decode-processing-overlay {
     isolation: isolate;
-    background: rgb(248 250 252 / 0.9);
-    backdrop-filter: blur(18px) saturate(135%);
-    -webkit-backdrop-filter: blur(18px) saturate(135%);
+    background: color-mix(in srgb, var(--av-processing-overlay-light) 90%, transparent);
   }
 
   .dark .av-decode-processing-overlay {
-    background: rgb(0 0 0 / 0.78);
+    background: color-mix(in srgb, var(--av-processing-overlay-dark) 90%, transparent);
   }
 
   .av-decode-processing-card {
     position: relative;
     overflow: hidden;
-    border: 1px solid rgb(203 213 225 / 0.82);
-    background: rgb(255 255 255);
+    border: 1px solid color-mix(in srgb, var(--av-border) 78%, transparent);
+    background: color-mix(in srgb, var(--av-processing-card-light) 98%, var(--av-surface) 2%);
     box-shadow:
-      0 28px 86px rgb(15 23 42 / 0.18),
-      inset 0 1px 0 rgb(255 255 255 / 0.76);
-  }
-
-  .av-decode-processing-card::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: linear-gradient(180deg, rgb(255 255 255 / 0.5), rgb(255 255 255 / 0) 42%);
+      0 16px 40px rgb(15 23 42 / 0.12),
+      inset 0 1px 0 rgb(255 255 255 / 0.55);
   }
 
   .dark .av-decode-processing-card {
-    border-color: rgb(255 255 255 / 0.1);
-    background: rgb(8 8 9);
+    border-color: rgb(255 255 255 / 0.11);
+    background: color-mix(in srgb, var(--av-processing-card-dark) 98%, #111827 2%);
     box-shadow:
-      0 30px 90px rgb(0 0 0 / 0.58),
+      0 18px 48px rgb(0 0 0 / 0.44),
       inset 0 1px 0 rgb(255 255 255 / 0.06);
-  }
-
-  .dark .av-decode-processing-card::before {
-    background: linear-gradient(180deg, rgb(255 255 255 / 0.045), rgb(255 255 255 / 0) 44%);
   }
 
   .av-decode-processing-card > * {
@@ -686,80 +723,36 @@
   .av-decode-pulse-shell {
     position: relative;
     display: grid;
-    width: 3rem;
-    height: 3rem;
+    width: 2.55rem;
+    height: 2.55rem;
     flex-shrink: 0;
     place-items: center;
-  }
-
-  .av-decode-pulse-ring {
-    position: absolute;
-    inset: 0.15rem;
-    border-radius: 1.25rem;
-    border: 1px solid color-mix(in srgb, var(--av-accent) 48%, transparent);
-    background: color-mix(in srgb, var(--av-accent) 12%, transparent);
-    box-shadow: 0 0 24px color-mix(in srgb, var(--av-accent) 18%, transparent);
   }
 
   .av-decode-pulse-core {
     position: relative;
     display: grid;
-    width: 2.4rem;
-    height: 2.4rem;
+    width: 2.35rem;
+    height: 2.35rem;
     place-items: center;
-    border-radius: 1rem;
-    border: 1px solid color-mix(in srgb, var(--av-accent) 40%, transparent);
-    background: color-mix(in srgb, var(--av-surface) 70%, var(--av-accent) 10%);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
-  }
-
-  .av-decode-processing-stat {
-    border: 1px solid rgb(203 213 225 / 0.68);
-    border-radius: 1rem;
-    background: rgb(248 250 252 / 0.78);
-    padding: 0.65rem 0.8rem;
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.64);
-  }
-
-  .av-decode-processing-stat p {
-    font-size: 0.56rem;
-    font-weight: 700;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: color-mix(in srgb, var(--av-muted) 88%, #0f172a 12%);
-  }
-
-  .av-decode-processing-stat strong {
-    display: block;
-    margin-top: 0.18rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: var(--av-main);
-  }
-
-  .dark .av-decode-processing-stat {
-    border-color: rgb(255 255 255 / 0.085);
-    background: rgb(17 17 19);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
+    border-radius: 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--av-border) 70%, transparent);
+    background: color-mix(in srgb, var(--av-surface) 88%, var(--av-accent) 8%);
   }
 
   .av-decode-progress-track {
     position: relative;
-    height: 0.42rem;
+    height: 0.36rem;
     overflow: hidden;
     border-radius: 999px;
-    background: rgb(203 213 225 / 0.58);
+    background: color-mix(in srgb, var(--av-border) 68%, transparent);
   }
 
   .av-decode-progress-fill,
   .av-decode-progress-sweep {
     height: 100%;
     border-radius: inherit;
-    background: linear-gradient(90deg, var(--av-accent), color-mix(in srgb, var(--av-accent) 70%, white 30%));
-    box-shadow: 0 0 18px color-mix(in srgb, var(--av-accent) 28%, transparent);
+    background: var(--av-accent);
   }
 
   .av-decode-progress-sweep {
@@ -771,28 +764,9 @@
     background: rgb(255 255 255 / 0.09);
   }
 
-  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    .av-decode-processing-overlay {
-      background: rgb(248 250 252 / 0.92);
-    }
-
-    .dark .av-decode-processing-overlay {
-      background: rgb(0 0 0 / 0.86);
-    }
-
-    .av-decode-processing-card {
-      background: rgb(255 255 255 / 0.98);
-    }
-
-    .dark .av-decode-processing-card {
-      background: rgb(8 8 9 / 0.98);
-    }
-  }
-
   .av-explorer-toolbar {
     border-bottom: 1px solid color-mix(in srgb, var(--av-border) 74%, white 26%);
     background: color-mix(in srgb, var(--av-surface) 88%, white 12%);
-    backdrop-filter: blur(16px);
   }
 
   .av-tree-surface {
@@ -825,7 +799,6 @@
     border: 1px solid color-mix(in srgb, var(--av-border) 58%, transparent);
     background: color-mix(in srgb, var(--av-surface) 64%, transparent);
     box-shadow: 0 10px 28px rgb(15 23 42 / 0.045);
-    backdrop-filter: blur(16px);
   }
 
   .dark .av-control-card {
@@ -834,7 +807,6 @@
 
   .av-modal-backdrop {
     background: rgb(0 0 0 / 0.36);
-    backdrop-filter: blur(12px);
   }
 
   .dark .av-modal-backdrop {
@@ -843,9 +815,12 @@
 
   .av-modal-surface {
     border: 1px solid color-mix(in srgb, var(--av-border) 72%, transparent);
-    background: color-mix(in srgb, var(--av-surface) 96%, transparent);
+    background: var(--av-modal-bg-light);
     box-shadow: 0 28px 90px rgb(0 0 0 / 0.24);
-    backdrop-filter: blur(24px);
+  }
+
+  .dark .av-modal-surface {
+    background: var(--av-modal-bg-dark);
   }
   
   .drag-region {
@@ -857,7 +832,8 @@
   }
   
   .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
+    width: 8px;
+    height: 8px;
   }
   
   .custom-scrollbar::-webkit-scrollbar-track {
@@ -875,8 +851,8 @@
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -886,7 +862,7 @@
 ::-webkit-scrollbar-thumb {
   background-color: var(--av-border);
   border-radius: 9999px;
-  border: 2px solid var(--av-secondary);
+  border: 0;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -897,4 +873,89 @@
 ::selection {
   background-color: rgb(37 99 235 / 0.3);
   color: var(--color-primary-100);
+}
+
+/* Production visual engine.
+   Native acrylic is owned by Electron/Windows. Renderer CSS stays deterministic. */
+
+html,
+body,
+#root {
+  min-height: 100%;
+  overflow-x: hidden;
+}
+
+html {
+  overflow-y: scroll;
+}
+
+.settings-tab-list::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+html.av-visual-normal {
+  --av-bg-gradient: linear-gradient(180deg, #eef3f8 0%, #f5f3ed 46%, #faf8f3 100%);
+  --av-surface: #fbfaf7;
+  --av-secondary: #f1ede5;
+  --av-card-bg: #ffffff;
+  --av-glass-bg: #fbfaf7;
+  --av-input-bg: #ffffff;
+  --av-titlebar-bg-light: #f8fafc;
+  --av-titlebar-bg-dark: #050505;
+  --av-modal-bg-light: #fbfaf7;
+  --av-modal-bg-dark: #080808;
+  --av-processing-overlay-light: #f8fafc;
+  --av-processing-overlay-dark: #050505;
+  --av-processing-card-light: #ffffff;
+  --av-processing-card-dark: #080809;
+}
+
+html.av-visual-normal.dark {
+  --av-bg-gradient: linear-gradient(180deg, #000000 0%, #050505 100%);
+  --av-surface: #0a0a0a;
+  --av-secondary: #0f0f0f;
+  --av-card-bg: #0a0a0a;
+  --av-glass-bg: #0a0a0a;
+  --av-input-bg: #0a0a0a;
+}
+
+html.av-visual-effects {
+  --av-bg-gradient: linear-gradient(180deg, rgb(238 243 248 / 0.92) 0%, rgb(245 243 237 / 0.9) 46%, rgb(250 248 243 / 0.92) 100%);
+  --av-surface: rgb(251 250 247 / 0.9);
+  --av-secondary: rgb(241 237 229 / 0.88);
+  --av-card-bg: rgb(255 255 255 / 0.86);
+  --av-glass-bg: rgb(251 250 247 / 0.9);
+  --av-input-bg: rgb(255 255 255 / 0.9);
+  --av-titlebar-bg-light: rgb(248 250 252 / 0.96);
+  --av-titlebar-bg-dark: rgb(5 5 5 / 0.92);
+  --av-modal-bg-light: rgb(251 250 247 / 0.98);
+  --av-modal-bg-dark: rgb(8 8 8 / 0.98);
+  --av-processing-overlay-light: rgb(248 250 252 / 0.92);
+  --av-processing-overlay-dark: rgb(0 0 0 / 0.82);
+  --av-processing-card-light: rgb(255 255 255 / 0.98);
+  --av-processing-card-dark: rgb(8 8 9 / 0.98);
+}
+
+html.av-visual-effects.dark {
+  --av-bg-gradient: linear-gradient(180deg, rgb(0 0 0 / 0.82) 0%, rgb(5 5 5 / 0.9) 100%);
+  --av-surface: rgb(10 10 10 / 0.9);
+  --av-secondary: rgb(15 15 15 / 0.9);
+  --av-card-bg: rgb(10 10 10 / 0.9);
+  --av-glass-bg: rgb(10 10 10 / 0.88);
+  --av-input-bg: rgb(10 10 10 / 0.9);
+}
+
+.settings-tab-button {
+  min-height: 44px;
+}
+
+.av-panel-header h2 {
+  font-size: clamp(1.35rem, 1.7vw, 1.75rem) !important;
+  line-height: 1.15;
+}
+
+.av-panel-header p {
+  font-size: 0.875rem;
+  line-height: 1.55;
 }

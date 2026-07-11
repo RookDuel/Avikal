@@ -7,8 +7,12 @@ export type OutputFolderMode = 'ask' | 'remember'
 export type PreviewCleanupPolicy = 'on_close_15m' | 'manual'
 export type LargeFileMode = 'auto' | 'low_resource'
 export type DecodeOutputLimit = 'standard' | 'high'
+export type VisualEffectsMode = 'auto' | 'effects' | 'normal'
 
 export interface UserPreferences {
+  appearance: {
+    visual_effects_mode: VisualEffectsMode
+  }
   privacy: {
     activity_log_mode: ActivityLogMode
     activity_retention_days: ActivityRetentionDays
@@ -31,6 +35,9 @@ export interface UserPreferences {
 }
 
 export const DEFAULT_USER_PREFERENCES: UserPreferences = {
+  appearance: {
+    visual_effects_mode: 'auto',
+  },
   privacy: {
     activity_log_mode: 'minimal',
     activity_retention_days: 30,
@@ -69,12 +76,16 @@ function retention(value: unknown): ActivityRetentionDays {
 
 export function sanitizeUserPreferences(raw: unknown): UserPreferences {
   const source = isRecord(raw) ? raw : {}
+  const appearance = isRecord(source.appearance) ? source.appearance : {}
   const privacy = isRecord(source.privacy) ? source.privacy : {}
   const archive = isRecord(source.archive_defaults) ? source.archive_defaults : {}
   const preview = isRecord(source.preview) ? source.preview : {}
   const advanced = isRecord(source.advanced) ? source.advanced : {}
 
   return {
+    appearance: {
+      visual_effects_mode: choice(appearance.visual_effects_mode, ['auto', 'effects', 'normal'], DEFAULT_USER_PREFERENCES.appearance.visual_effects_mode),
+    },
     privacy: {
       activity_log_mode: choice(privacy.activity_log_mode, ['off', 'minimal', 'detailed'], DEFAULT_USER_PREFERENCES.privacy.activity_log_mode),
       activity_retention_days: retention(privacy.activity_retention_days),

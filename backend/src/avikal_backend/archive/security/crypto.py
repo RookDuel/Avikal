@@ -91,6 +91,23 @@ def derive_time_only_payload_key(time_key: bytes, salt: bytes) -> bytes:
     return native_hkdf_sha256(time_key, salt, b"avikal_time_only_payload_v1", length=32)
 
 
+def derive_time_gated_metadata_key(master_key: bytes | None, time_key: bytes, salt: bytes) -> bytes:
+    """Bind Chess-PGN metadata confidentiality to the provider-held release key."""
+    if master_key is not None and len(master_key) != 32:
+        raise ValueError("master_key must be 32 bytes when supplied")
+    if len(time_key) != 32:
+        raise ValueError("time_key must be 32 bytes")
+    if len(salt) != 32:
+        raise ValueError("salt must be 32 bytes")
+    user_component = master_key if master_key is not None else bytes(32)
+    return native_hkdf_sha256(
+        user_component + time_key,
+        salt,
+        b"avikal_time_gated_keychain_v1",
+        length=32,
+    )
+
+
 def _normalize_aad(aad: bytes | None) -> bytes:
     if aad is None:
         raise ValueError("AAD is required")
@@ -195,6 +212,23 @@ def derive_pqc_hybrid_payload_key(payload_key: bytes, pqc_shared_secret: bytes, 
         raise ValueError("salt must be 32 bytes")
 
     return native_hkdf_sha256(payload_key + pqc_shared_secret, salt, b"avikal_payload_pqc_v1", length=32)
+
+
+def derive_pqc_hybrid_metadata_key(master_key: bytes, pqc_shared_secret: bytes, salt: bytes) -> bytes:
+    """Derive the PQC-gated key used by the protected chess metadata envelope."""
+    if len(master_key) != 32:
+        raise ValueError("master_key must be 32 bytes")
+    if not pqc_shared_secret:
+        raise ValueError("pqc_shared_secret is required")
+    if len(salt) != 32:
+        raise ValueError("salt must be 32 bytes")
+
+    return native_hkdf_sha256(
+        master_key + pqc_shared_secret,
+        salt,
+        b"avikal_keychain_pqc_v1",
+        length=32,
+    )
 
 
 def combine_split_keys(user_key: bytes, time_key: bytes, salt: bytes) -> bytes:

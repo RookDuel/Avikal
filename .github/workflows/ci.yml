@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
   pull_request:
@@ -11,10 +14,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -37,7 +40,7 @@ jobs:
         working-directory: frontend
 
       - name: Build frontend
-        run: npm run build
+        run: npm run build:check
         working-directory: frontend
 
   backend:
@@ -45,23 +48,21 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Install backend dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
-          pip install -r backend/requirements-build.txt
-          pip install pip-audit
-          pip install pytest
+          python -m pip install --upgrade pip==26.0.1
+          pip install --require-hashes -r backend/requirements-lock-windows.txt
+          pip install pip-audit==2.10.1 pytest==9.1.1
 
       - name: Audit backend Python dependencies
         run: |
@@ -77,14 +78,14 @@ jobs:
 
       - name: Audit native Rust dependencies
         run: |
-          cargo install cargo-audit --locked
+          cargo install cargo-audit --version 0.22.2 --locked
           cargo audit --deny warnings
         working-directory: backend/native/avikal_backend_native
 
       - name: Compile key backend modules
         run: |
-          python -m py_compile backend/api_server.py
-          python -m py_compile backend/src/avikal_backend/api/server.py
+          python -m py_compile backend/core_server.py
+          python -m py_compile backend/src/avikal_backend/core/services.py
           python -m py_compile backend/src/avikal_backend/archive/pipeline/encoder.py
           python -m py_compile backend/src/avikal_backend/archive/pipeline/decoder.py
 
@@ -101,23 +102,22 @@ jobs:
       - name: Run targeted backend security tests
         env:
           PYTHONPATH: ${{ github.workspace }}\backend\src
-        shell: powershell
         run: |
-          $tests = @(
-            "backend\tests\test_native_crypto.py",
-            "backend\tests\test_local_backend_security.py",
-            "backend\tests\test_archive_security_guards.py",
-            "backend\tests\test_archive_fuzz_smoke.py",
-            "backend\tests\test_api_archive_routing.py"
-          )
-          foreach ($test in $tests) {
-            if (Test-Path -LiteralPath $test) {
-              python -m pytest $test -q
-              if ($LASTEXITCODE -ne 0) {
-                exit $LASTEXITCODE
-              }
-            }
-            else {
-              Write-Host "$test is not present; skipping."
-            }
-          }
+          python -m pytest backend/tests/test_native_crypto.py -q
+          python -m pytest backend/tests/test_local_backend_security.py -q
+          python -m pytest backend/tests/test_archive_security_guards.py -q
+          python -m pytest backend/tests/test_archive_fuzz_smoke.py -q
+          python -m pytest backend/tests/test_api_archive_routing.py -q
+          python -m pytest backend/tests/test_archive_sessions.py -q
+          python -m pytest backend/tests/test_assured_archive_features.py -q
+          python -m pytest backend/tests/test_pqc_keychain_integrity.py -q
+          python -m pytest backend/tests/test_pqc_keyfile_dual_password.py -q
+          python -m pytest backend/tests/test_core_timecapsule_security.py -q
+          python -m pytest backend/tests/test_drand_runtime.py -q
+          python -m pytest backend/tests/test_multipart_volumes.py -q
+          python -m pytest backend/tests/test_desktop_runtime_guards.py -q
+          python -m pytest backend/tests/test_creator_trust_policy.py -q
+
+      - name: Run native Rust tests
+        run: cargo test --locked --quiet
+        working-directory: backend/native/avikal_backend_native

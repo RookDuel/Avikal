@@ -1,5 +1,8 @@
 name: Build OpenSSL PQC Runtime
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -26,12 +29,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install build tools
         shell: powershell
         run: |
-          choco install strawberryperl nasm -y --no-progress
+          choco install strawberryperl --version=5.42.2.1 -y --no-progress
+          choco install nasm --version=3.2.0 -y --no-progress
           "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
@@ -51,7 +55,7 @@ jobs:
           & $openssl list -signature-algorithms | Select-String "SLH-DSA"
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
 
@@ -65,14 +69,7 @@ jobs:
         env:
           AVIKAL_OPENSSL_EXEC: ${{ github.workspace }}\runtime\pqc\bin\openssl.exe
           PYTHONPATH: ${{ github.workspace }}\backend\src
-        shell: powershell
-        run: |
-          if (Test-Path -LiteralPath "backend\tests\test_pqc_provider.py") {
-            python -m pytest backend/tests/test_pqc_provider.py -q
-          }
-          else {
-            Write-Host "backend\tests\test_pqc_provider.py is not present in this repository; skipping private provider test suite."
-          }
+        run: python -m pytest backend/tests/test_pqc_provider.py -q
 
       - name: Package runtime artifact
         shell: powershell
@@ -83,7 +80,7 @@ jobs:
           Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256 | Format-List
 
       - name: Upload runtime artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: avikal-openssl-pqc-runtime-win-x64-openssl-${{ env.OPENSSL_VERSION }}
           path: avikal-openssl-pqc-runtime-win-x64-openssl-${{ env.OPENSSL_VERSION }}.zip

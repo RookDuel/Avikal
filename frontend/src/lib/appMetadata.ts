@@ -1,6 +1,6 @@
 export type AvikalReleaseChannel = 'beta' | 'production'
 
-const configuredChannel = String(import.meta.env.VITE_AVIKAL_RELEASE_CHANNEL || 'beta').toLowerCase()
+const configuredChannel = String(import.meta.env.VITE_AVIKAL_RELEASE_CHANNEL || 'production').toLowerCase()
 
 export const AVIKAL_RELEASE_CHANNEL: AvikalReleaseChannel =
   configuredChannel === 'production' ? 'production' : 'beta'

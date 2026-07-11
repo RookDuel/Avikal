@@ -1,10 +1,10 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+﻿import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { motion } from 'framer-motion'
 import {
   Lock, Key, Upload, Shield, ShieldAlert, RefreshCw, CheckCircle2,
   ChevronDown, Search, Eye, EyeOff, CheckCircle, ExternalLink,
-  DownloadCloud, Copy, Calendar, Clock, Wifi, WifiOff, File, Folder, Fingerprint
+  DownloadCloud, Copy, Calendar, Clock, Wifi, WifiOff, File, Folder, Fingerprint, MessageSquare, BarChart3
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../lib/api'
@@ -20,9 +20,23 @@ import type { PendingExternalLaunchAction } from '../lib/externalLaunch'
 import { useBackendRuntime } from '../hooks/useBackendRuntime'
 import BackendStartupNotice from '../components/BackendStartupNotice'
 import ProcessingOverlay from '../components/ProcessingOverlay'
+import ArchiveReportModal from '../components/ArchiveReportModal'
 import { copyKeyphraseToClipboard, downloadStructuredKeyphrase } from '../lib/keyphraseExport'
 import PasswordStrengthMeter from '../components/PasswordStrengthMeter'
 import TrustedTimeNotice from '../components/TrustedTimeNotice'
+import PqcSuiteSelector from '../components/PqcSuiteSelector'
+import {
+  DEFAULT_CUSTOM_KEM,
+  DEFAULT_CUSTOM_SIGNATURE,
+  DEFAULT_CUSTOM_SLH_SIGNATURE,
+  DEFAULT_PQC_SUITE_ID,
+  PQC_CUSTOM_SUITE_ID,
+  pqcSuiteLabel,
+  type MlDsaOption,
+  type MlKemOption,
+  type PqcSuiteId,
+  type SlhDsaOption,
+} from '../lib/pqcSuites'
 import {
   getDefaultPqcStorageMode,
   getDefaultTimecapsuleProvider,
@@ -31,7 +45,7 @@ import {
   type UserPreferences,
 } from '../lib/preferences'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 type PanelType = 'datetime' | 'password' | 'keyphrase' | 'pqc' | null
 type PqcStorageMode = 'embedded' | 'external'
 
@@ -96,10 +110,10 @@ function getLocalIsoString(dateValue: string, timeValue: string): string | null 
   return buildLocalDate(dateValue, timeValue)?.toISOString() ?? null
 }
 
-// ─── NTP fetch ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ NTP fetch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function fetchNTPTime(): Promise<Date> {
   // We use a lightweight public HTTP endpoint that returns the server time in headers.
-  // time.google.com is a pure NTP server (UDP), not HTTP — so we use the backend NTP endpoint
+  // time.google.com is a pure NTP server (UDP), not HTTP â€” so we use the backend NTP endpoint
   // which already calls time.google.com, or fall back to a public HTTP time API.
   try {
     await waitForBackendReady()
@@ -109,12 +123,12 @@ async function fetchNTPTime(): Promise<Date> {
       if (data.timestamp) return new Date(data.timestamp * 1000)
     }
   } catch {
-    // backend unavailable — try world time API
+    // backend unavailable â€” try world time API
   }
   throw new Error('Trusted time is currently unavailable')
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 interface TimeCapsuleProps {
   externalLaunchAction?: PendingExternalLaunchAction | null
 }
@@ -150,6 +164,16 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const [pqcKeyfilePassword, setPqcKeyfilePassword] = useState('')
   const [showPqcKeyfilePassword, setShowPqcKeyfilePassword] = useState(false)
   const [pqcModeOverridden, setPqcModeOverridden] = useState(false)
+  const [pqcSuiteId, setPqcSuiteId] = useState<PqcSuiteId>(DEFAULT_PQC_SUITE_ID)
+  const [pqcCustomKem, setPqcCustomKem] = useState<MlKemOption>(DEFAULT_CUSTOM_KEM)
+  const [pqcCustomSignature, setPqcCustomSignature] = useState<MlDsaOption>(DEFAULT_CUSTOM_SIGNATURE)
+  const [pqcCustomSlhSignature, setPqcCustomSlhSignature] = useState<SlhDsaOption>(DEFAULT_CUSTOM_SLH_SIGNATURE)
+  const [senderMessageEnabled, setSenderMessageEnabled] = useState(false)
+  const [senderMessage, setSenderMessage] = useState('')
+  const [creatorIdentities, setCreatorIdentities] = useState<Array<{ identity_id: string; label: string }>>([])
+  const [creatorIdentityId, setCreatorIdentityId] = useState('')
+  const [creationReport, setCreationReport] = useState<Record<string, unknown> | null>(null)
+  const [showCreationReport, setShowCreationReport] = useState(false)
   const progress = useProgress()
   const backendRuntime = useBackendRuntime()
 
@@ -189,6 +213,19 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
     setPqcKeyfilePassword('')
     setShowPqcKeyfilePassword(false)
     setPqcModeOverridden(false)
+    setPqcSuiteId(DEFAULT_PQC_SUITE_ID)
+    setPqcCustomKem(DEFAULT_CUSTOM_KEM)
+    setPqcCustomSignature(DEFAULT_CUSTOM_SIGNATURE)
+    setPqcCustomSlhSignature(DEFAULT_CUSTOM_SLH_SIGNATURE)
+    setSenderMessageEnabled(false)
+    setSenderMessage('')
+    setCreatorIdentityId('')
+  }, [])
+
+  useEffect(() => {
+    void window.electron?.creatorIdentity?.list().then(result => {
+      setCreatorIdentities((result.identities || []).map(item => ({ identity_id: String(item.identity_id || ''), label: String(item.label || 'Creator identity') })).filter(item => /^[0-9a-f]{64}$/.test(item.identity_id)))
+    }).catch(() => setCreatorIdentities([]))
   }, [])
 
   useEffect(() => {
@@ -255,6 +292,9 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           etaSeconds: event.etaSeconds,
           fileSize: event.fileSize,
           compressionRatio: event.compressionRatio,
+          processedBytes: event.processedBytes,
+          totalBytes: event.totalBytes,
+          throughputBytesPerSecond: event.throughputBytesPerSecond,
         })
       }
     })
@@ -624,11 +664,18 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         pqc_keyfile_output: pqcEnabled && pqcStorageMode === 'external' ? nextPqcKeyfilePath : undefined,
         pqc_keyfile_protection_mode: needsPqcKeyfilePassword ? 'dual_password' : 'archive_secret',
         pqc_keyfile_password: needsPqcKeyfilePassword ? pqcKeyfilePassword : undefined,
+        pqc_suite_id: pqcEnabled ? pqcSuiteId : undefined,
+        pqc_custom_kem: pqcEnabled && pqcSuiteId === PQC_CUSTOM_SUITE_ID ? pqcCustomKem : undefined,
+        pqc_custom_signature: pqcEnabled && pqcSuiteId === PQC_CUSTOM_SUITE_ID ? pqcCustomSignature : undefined,
+        pqc_custom_slh_signature: pqcEnabled && pqcSuiteId === PQC_CUSTOM_SUITE_ID ? pqcCustomSlhSignature : undefined,
+        sender_message: senderMessageEnabled ? senderMessage : undefined,
+        creator_identity_id: creatorIdentityId || undefined,
       }, timecapsuleProvider === 'aavrit' ? (sessionToken || '') : undefined)
       
       if (!result.success) throw new Error(result.message || 'Time-Capsule creation failed')
 
       setCreatedPqcKeyfilePath(result?.result?.pqc?.keyfile || nextPqcKeyfilePath || '')
+      setCreationReport((result?.result?.creation_report as Record<string, unknown> | undefined) || null)
       setIsEncrypted(true)
       if (timecapsuleProvider === 'aavrit' && sessionToken) {
         void refreshUserProfile()
@@ -688,7 +735,10 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
   const isUnlockReady = unlockMs !== null && (ntpSynced ? nowMs !== null && unlockMs > nowMs : true)
   const isFilesReady = files.length > 0
   const showInlineProgressCard = false
-  const canAttemptCreateTimeCapsule = backendRuntime.isReady && !loading && isFilesReady && unlockMs !== null && isValidPqcKeyfilePassword
+  const senderMessageWordCount = senderMessage.trim().split(/\s+/).filter(Boolean).length
+  const senderMessageByteCount = new TextEncoder().encode(senderMessage).length
+  const isSenderMessageValid = !senderMessageEnabled || (senderMessageWordCount > 0 && senderMessageWordCount <= 100 && senderMessageByteCount <= 1024)
+  const canAttemptCreateTimeCapsule = backendRuntime.isReady && !loading && isFilesReady && unlockMs !== null && isValidPqcKeyfilePassword && isSenderMessageValid
   const isAavritAvailable = Boolean(aavritServerUrl && (aavritMode !== 'private' || sessionToken))
   const providerModeLabel = timecapsuleProvider === 'drand'
     ? 'drand'
@@ -703,7 +753,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
       {/* 60/40 Split Architecture */}
       <div className="av-work-grid">
 
-      {/* ── Left Panel: File Staging (60%) ───────────────────────── */}
+      {/* â”€â”€ Left Panel: File Staging (60%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="av-primary-panel lg:col-span-3 flex flex-col overflow-hidden relative">
         <div className="av-panel-header z-10 shrink-0">
           <h2 className="text-[28px] font-medium tracking-tight text-av-main mb-1.5 flex items-center gap-3">
@@ -795,6 +845,8 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                   </div>
                 )}
 
+                {creationReport && <button type="button" onClick={() => setShowCreationReport(true)} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-av-border/50 bg-av-surface/70 px-4 py-3 text-sm font-semibold text-av-main"><BarChart3 className="h-4 w-4" />View detailed report</button>}
+
                 <button
                   onClick={() => {
                     setIsEncrypted(false)
@@ -806,6 +858,8 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                       setPqcStorageMode('embedded')
                       setPqcKeyfilePath('')
                       setCreatedPqcKeyfilePath('')
+                      setCreationReport(null)
+                      setShowCreationReport(false)
                   }}
                   className="mt-8 w-full py-4 rounded-xl bg-av-accent text-white font-bold hover:opacity-90 transition-all shadow-lg shadow-av-accent/20"
                 >
@@ -899,14 +953,14 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         </div>
       </div>
 
-      {/* ── Right Panel: Security Protocol (40%) ───────────────────── */}
+      {/* â”€â”€ Right Panel: Security Protocol (40%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className={`av-side-stack av-natural-side-stack lg:col-span-2 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
         <div className="px-2 mb-1">
           <h3 className="text-sm font-semibold text-av-muted uppercase tracking-[0.15em]">Time-Lock Settings</h3>
         </div>
 
-        <div className="rounded-[20px] border border-av-border/30 bg-av-surface/40 backdrop-blur-xl overflow-hidden shadow-sm">
+        <div className="rounded-[20px] border border-av-border/30 bg-av-surface/40 overflow-hidden shadow-sm">
           <button
             type="button"
             onClick={() => isAavritAvailable && setAuthorityExpanded(value => !value)}
@@ -965,7 +1019,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <h4 className="text-sm font-semibold text-av-main">Aavrit</h4>
-                        <p className="mt-1 text-[11px] text-av-muted">{aavritMode === 'private' ? 'Private server' : 'Signed release'}</p>
+                        <p className="mt-1 text-[11px] text-av-muted">{aavritMode === 'private' ? 'Private authority' : 'Hybrid-PQC release'}</p>
                       </div>
                       <CheckCircle2 className={`h-4 w-4 ${timecapsuleProvider === 'aavrit' ? 'text-blue-400' : 'text-transparent'}`} />
                     </div>
@@ -973,12 +1027,14 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
               </div>
             </div>
           )}
+
+          {showCreationReport && creationReport && <ArchiveReportModal report={creationReport} title="Time-Capsule creation report" onClose={() => { setShowCreationReport(false); setCreationReport(null) }} />}
         </div>
 
         {/* Accordion 1: Date & Time */}
         <div
           onClick={() => setActivePanel(activePanel === 'datetime' ? null : 'datetime')}
-          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden backdrop-blur-xl relative group ${
+          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden relative group ${
             activePanel === 'datetime'
               ? 'bg-av-surface/80 border-blue-500 shadow-[0_8px_30px_rgba(59,130,246,0.08)] ring-1 ring-blue-500/20'
               : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
@@ -1067,14 +1123,14 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           )}
         </div>
 
-        {/* ── Accordion 2: Password ──────────────────────────── */}
+        {/* â”€â”€ Accordion 2: Password â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div className="rounded-[18px] border border-av-border/30 bg-av-surface/35 px-4 py-3 text-[12px] leading-relaxed text-av-muted">
           Unlock date and time are always required. Password and keyphrase stay optional unless you turn them on for an extra protection layer after release.
         </div>
 
         <div
           onClick={togglePasswordProtection}
-          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden backdrop-blur-xl relative group ${
+          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden relative group ${
             passwordEnabled
               ? 'bg-av-surface/80 border-emerald-500 shadow-[0_8px_30px_rgba(16,185,129,0.08)] ring-1 ring-emerald-500/20'
               : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
@@ -1103,7 +1159,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
 
           {passwordEnabled && (
             <div className="px-5 pb-5 space-y-5 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
-              <div className="relative rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 backdrop-blur-md group/input">
+              <div className="relative rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 group/input">
                 <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
                    <Fingerprint className={`w-4 h-4 transition-colors duration-300 ${(password.length > 0) ? 'text-emerald-400 opacity-100' : 'text-av-muted opacity-50 group-hover/input:opacity-100 group-hover/input:text-emerald-400'}`} />
                 </div>
@@ -1125,10 +1181,10 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           )}
         </div>
 
-        {/* ── Accordion 3: Keyphrase ─────────────────────────── */}
+        {/* â”€â”€ Accordion 3: Keyphrase â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div
           onClick={toggleKeyphraseProtection}
-          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden backdrop-blur-xl relative group ${
+          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden relative group ${
             keyphraseEnabled
               ? 'bg-av-surface/80 border-purple-500 shadow-[0_8px_30px_rgba(168,85,247,0.08)] ring-1 ring-purple-500/20'
               : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
@@ -1192,10 +1248,10 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           )}
         </div>
 
-        {/* ── Lock button ────────────────────────────────────── */}
+        {/* â”€â”€ Lock button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div
           onClick={togglePqcProtection}
-          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden backdrop-blur-xl relative group ${
+          className={`rounded-[20px] border transition-all duration-300 cursor-pointer overflow-hidden relative group ${
             pqcEnabled
               ? 'bg-av-surface/80 border-amber-500 shadow-[0_8px_30px_rgba(245,158,11,0.12)] ring-1 ring-amber-500/20'
               : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
@@ -1211,7 +1267,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
               </div>
               <div>
                 <h3 className="font-medium text-av-main tracking-tight text-sm mb-0.5">Quantum Protection</h3>
-                <p className="text-av-muted text-[13px] font-light">{pqcStorageMode === 'embedded' ? 'Embedded PQC bundle' : 'External .avkkey bundle'}</p>
+                <p className="text-av-muted text-[13px] font-light">{pqcSuiteLabel(pqcSuiteId)} Â· {pqcStorageMode === 'embedded' ? 'Embedded bundle' : 'External .avkkey'}</p>
               </div>
             </div>
             <div className="flex items-center gap-2 pr-1" onClick={e => e.stopPropagation()}>
@@ -1226,6 +1282,16 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
 
           {pqcEnabled && (
             <div className="px-5 pb-5 space-y-3 pt-1 relative z-10" onClick={e => e.stopPropagation()}>
+              <PqcSuiteSelector
+                suiteId={pqcSuiteId}
+                customKem={pqcCustomKem}
+                customSignature={pqcCustomSignature}
+                customSlhSignature={pqcCustomSlhSignature}
+                onSuiteChange={setPqcSuiteId}
+                onCustomKemChange={setPqcCustomKem}
+                onCustomSignatureChange={setPqcCustomSignature}
+                onCustomSlhSignatureChange={setPqcCustomSlhSignature}
+              />
                 <div className="grid grid-cols-2 gap-3">
                   <button
                   onClick={() => { setPqcStorageMode('embedded'); setPqcModeOverridden(true); setPqcKeyfilePath(''); setPqcKeyfilePasswordEnabled(false); setPqcKeyfilePassword('') }}
@@ -1319,11 +1385,12 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
         </div>
 
         <div className="shrink-0 flex flex-col gap-3 pt-2">
+          <div className="rounded-2xl border border-av-border/40 bg-av-surface/65 p-4"><div className="flex items-center justify-between gap-4"><div className="flex items-center gap-3"><MessageSquare className="h-4 w-4 text-av-muted" /><div><p className="text-sm font-semibold text-av-main">Sender message</p><p className="text-[11px] text-av-muted">Released with the authenticated keychain</p></div></div><button type="button" onClick={() => { setSenderMessageEnabled(value => !value); if (senderMessageEnabled) setSenderMessage('') }} className={`relative h-6 w-11 rounded-full border ${senderMessageEnabled ? 'border-av-accent bg-av-accent' : 'border-av-border/50 bg-av-border/20'}`}><span className={`absolute left-[1px] top-[1px] h-5 w-5 rounded-full bg-white shadow transition-transform ${senderMessageEnabled ? 'translate-x-5' : ''}`} /></button></div>{senderMessageEnabled && <div className="mt-3"><textarea value={senderMessage} onChange={event => setSenderMessage(event.target.value)} rows={3} maxLength={1024} className="w-full resize-none rounded-xl border border-av-border/40 bg-av-border/10 px-3 py-2 text-sm text-av-main outline-none focus:border-av-accent" placeholder="Add recovery context for the recipient..." /><div className="mt-1 flex justify-between text-[10px] text-av-muted"><span>{senderMessage.trim().split(/\s+/).filter(Boolean).length}/100 words</span><span>{new TextEncoder().encode(senderMessage).length}/1024 bytes</span></div></div>}{creatorIdentities.length > 0 && <label className="mt-3 block text-[11px] font-medium text-av-muted">Creator signature identity<select value={creatorIdentityId} onChange={event => setCreatorIdentityId(event.target.value)} className="mt-1 w-full rounded-xl border border-av-border/40 bg-av-surface px-3 py-2 text-sm text-av-main"><option value="">Per-archive identity</option>{creatorIdentities.map(identity => <option key={identity.identity_id} value={identity.identity_id}>{identity.label}</option>)}</select></label>}</div>
           {showInlineProgressCard && progress.status !== 'idle' && !loading && !isEncrypted && (
             <ProgressCard
-              status={progress.status === 'running' ? 'Creating…' : progress.status === 'completed' ? 'Completed' : progress.status === 'error' ? 'Error' : progress.status === 'cancelled' ? 'Cancelled' : 'Preparing…'}
+              status={progress.status === 'running' ? 'Creatingâ€¦' : progress.status === 'completed' ? 'Completed' : progress.status === 'error' ? 'Error' : progress.status === 'cancelled' ? 'Cancelled' : 'Preparingâ€¦'}
               percentage={progress.percentage}
-              currentOperation={progress.currentOperation || 'Executing…'}
+              currentOperation={progress.currentOperation || 'Executingâ€¦'}
               fileSize={progress.fileSize}
               compressionRatio={progress.compressionRatio}
               onCancel={progress.cancel}
@@ -1334,7 +1401,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
           )}
 
           {isBoth && (
-            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-[16px] bg-red-500/10 border border-red-500/30 flex items-start gap-3 backdrop-blur-md shadow-inner">
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-[16px] bg-red-500/10 border border-red-500/30 flex items-start gap-3 shadow-inner">
               <ShieldAlert className="w-5 h-5 text-red-500 shrink-0 mt-0.5 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
               <div>
                 <p className="text-[13px] font-bold text-red-500 uppercase tracking-wide mb-1 drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]">
@@ -1356,7 +1423,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
             disabled={!canAttemptCreateTimeCapsule}
             className={`w-full py-4 rounded-2xl text-[15px] font-semibold tracking-wide transition-all duration-300 flex items-center justify-center gap-2 ${
               !canAttemptCreateTimeCapsule
-                ? 'bg-av-border/10 dark:bg-white/5 border border-av-border/20 dark:border-white/5 text-av-muted cursor-not-allowed shadow-inner backdrop-blur-sm'
+                ? 'bg-av-border/10 dark:bg-white/5 border border-av-border/20 dark:border-white/5 text-av-muted cursor-not-allowed shadow-inner'
                 : 'bg-av-main hover:opacity-90 text-av-surface shadow-[0_10px_30px_rgba(0,0,0,0.15)] hover:shadow-[0_10px_40px_rgba(0,0,0,0.2)] hover:-translate-y-0.5'
             }`}
           >
@@ -1386,7 +1453,7 @@ export default function TimeCapsule({ externalLaunchAction }: TimeCapsuleProps) 
               ? 'Aavrit requires a connected server, and private mode also requires an active login.'
               : !hasProtection
               ? timecapsuleProvider === 'aavrit'
-                ? 'Aavrit release will verify the signed reveal before payload decryption.'
+                ? 'Aavrit will verify a capability-bound, triple-signed release before decryption.'
                 : 'drand release will unlock the archive once the public round is available.'
               : usePass && useKeyp
               ? 'Password and keyphrase will both be required after release.'

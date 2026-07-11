@@ -62,6 +62,24 @@ function normalizeErrorInput(error: unknown): string {
   return String(error ?? '')
 }
 
+function stripElectronIpcWrapper(message: string): string {
+  let cleaned = message.trim()
+  const wrappers = [
+    /^Error invoking remote method 'core:invoke':\s*Error:\s*/i,
+    /^Error invoking remote method "core:invoke":\s*Error:\s*/i,
+    /^Error:\s*Error invoking remote method 'core:invoke':\s*Error:\s*/i,
+    /^Error:\s*/i,
+  ]
+  for (let index = 0; index < 3; index += 1) {
+    const before = cleaned
+    for (const wrapper of wrappers) {
+      cleaned = cleaned.replace(wrapper, '').trim()
+    }
+    if (cleaned === before) break
+  }
+  return cleaned
+}
+
 function inferErrorCode(message: string): ErrorCode {
   const text = message.toLowerCase()
   if (text.includes('authentication failed') || text.includes('session expired') || text.includes('unauthorized')) return 'auth_failed'
@@ -82,7 +100,7 @@ function inferErrorCode(message: string): ErrorCode {
 }
 
 export function parseError(error: unknown): AppError {
-  const rawMessage = normalizeErrorInput(error).trim()
+  const rawMessage = stripElectronIpcWrapper(normalizeErrorInput(error))
   const code = inferErrorCode(rawMessage)
   const base = ERROR_CATALOG[code]
 
@@ -96,6 +114,6 @@ export function parseError(error: unknown): AppError {
 }
 
 export function getErrorMessage(error: unknown, fallback: string): string {
-  const rawMessage = normalizeErrorInput(error).trim()
+  const rawMessage = stripElectronIpcWrapper(normalizeErrorInput(error))
   return rawMessage || fallback
 }

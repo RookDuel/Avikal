@@ -9,23 +9,29 @@ from __future__ import annotations
 import base64
 import json
 import os
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from avikal_backend.core.secure_delete import secure_remove_file
+from avikal_backend.core.temp_janitor import register_temp_artifact, unregister_temp_artifact
 
 from ..security.crypto import derive_argon2id_key
 from ..security.native_bridge import aes256gcm_decrypt, aes256gcm_encrypt, hkdf_sha256, random_bytes
 from ..security.password_validator import validate_password_strength
 from ..security.pqc_provider import (
-    PQC_SUITE,
-    PQC_SUITE_ID,
+    PQC_DEFAULT_SUITE_ID,
     compute_pqc_key_id,
+    is_supported_pqc_suite_id,
+    resolve_pqc_suite,
 )
 
 
 PQC_KEYFILE_FORMAT = "avikal-pqc-keyfile"
 PQC_KEYFILE_VERSION = 1
-PQC_KEYFILE_ALGORITHM = PQC_SUITE_ID
+PQC_KEYFILE_ALGORITHM = PQC_DEFAULT_SUITE_ID
 PQC_KEYFILE_EXTENSION = ".avkkey"
 PQC_KEYFILE_MAX_BYTES = 4 * 1024 * 1024
 PQC_KEYFILE_PROTECTION_ARCHIVE_SECRET = "archive_secret"
@@ -102,12 +108,25 @@ def _require_bundle(value: dict[str, Any], bundle_name: str) -> dict[str, Any]:
     return value
 
 
+def _suite_for_document_algorithm(
+    algorithm: str,
+    bundle: dict[str, Any] | None = None,
+    document: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    algorithms = bundle.get("algorithms") if isinstance(bundle, dict) and isinstance(bundle.get("algorithms"), dict) else None
+    if algorithms is None and isinstance(document, dict):
+        suite = document.get("suite")
+        if isinstance(suite, dict) and isinstance(suite.get("algorithms"), dict):
+            algorithms = suite["algorithms"]
+    return resolve_pqc_suite(algorithm, algorithms)
+
+
 def _embedded_pqc_aad(header_aad: bytes, *, algorithm: str, key_id: str) -> bytes:
     if not isinstance(header_aad, (bytes, bytearray)) or not header_aad:
         raise ValueError("Embedded PQC protection requires archive header bytes")
     if not isinstance(key_id, str) or not key_id:
         raise ValueError("Embedded PQC protection requires a key identifier")
-    if algorithm != PQC_KEYFILE_ALGORITHM:
+    if not is_supported_pqc_suite_id(algorithm):
         raise ValueError("Unsupported embedded PQC algorithm")
     return b"|".join(
         [
@@ -168,12 +187,19 @@ def wrap_pqc_keyfile_document(
     algorithm: str,
 ) -> dict[str, Any]:
     """Encrypt a normal .avkkey JSON document inside a second password envelope."""
-    if algorithm != PQC_KEYFILE_ALGORITHM:
+    if not is_supported_pqc_suite_id(algorithm):
         raise ValueError("Unsupported PQC keyfile wrapper algorithm")
     if not isinstance(inner_document_bytes, (bytes, bytearray)) or not inner_document_bytes:
         raise ValueError("PQC keyfile wrapper requires an inner document")
     if not isinstance(key_id, str) or not key_id:
         raise ValueError("PQC keyfile wrapper requires a key identifier")
+    try:
+        inner_document = json.loads(bytes(inner_document_bytes).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("PQC keyfile wrapper inner document is malformed") from exc
+    if not isinstance(inner_document, dict):
+        raise ValueError("PQC keyfile wrapper inner document must be an object")
+    suite = _suite_for_document_algorithm(algorithm, inner_document.get("public_bundle"), inner_document)
 
     salt = random_bytes(32)
     nonce = random_bytes(12)
@@ -190,7 +216,7 @@ def wrap_pqc_keyfile_document(
         "protection_mode": PQC_KEYFILE_PROTECTION_DUAL_PASSWORD,
         "algorithm": algorithm,
         "key_id": key_id,
-        "suite": PQC_SUITE,
+        "suite": suite,
         "salt": _b64encode(salt),
         "nonce": _b64encode(nonce),
         "ciphertext": _b64encode(ciphertext),
@@ -216,7 +242,7 @@ def unwrap_pqc_keyfile_document(
 
     algorithm = wrapper_document.get("algorithm")
     key_id = wrapper_document.get("key_id")
-    if algorithm != PQC_KEYFILE_ALGORITHM:
+    if not is_supported_pqc_suite_id(algorithm):
         raise ValueError("Invalid PQC keyfile wrapper: unsupported algorithm")
     if not isinstance(key_id, str) or not key_id:
         raise ValueError("Invalid PQC keyfile wrapper: missing key identifier")
@@ -259,7 +285,7 @@ def inspect_pqc_keyfile(keyfile_path: str) -> dict[str, Any]:
         version = document.get("version")
         if version != PQC_KEYFILE_VERSION:
             raise ValueError("Invalid PQC keyfile: unsupported version")
-        if document.get("algorithm") != PQC_KEYFILE_ALGORITHM:
+        if not is_supported_pqc_suite_id(document.get("algorithm")):
             raise ValueError("Invalid PQC keyfile: unsupported algorithm")
         if not isinstance(document.get("key_id"), str) or not document.get("key_id"):
             raise ValueError("Invalid PQC keyfile: missing key identifier")
@@ -276,7 +302,7 @@ def inspect_pqc_keyfile(keyfile_path: str) -> dict[str, Any]:
         version = document.get("version")
         if version != PQC_KEYFILE_WRAPPER_VERSION:
             raise ValueError("Invalid PQC keyfile wrapper: unsupported version")
-        if document.get("algorithm") != PQC_KEYFILE_ALGORITHM:
+        if not is_supported_pqc_suite_id(document.get("algorithm")):
             raise ValueError("Invalid PQC keyfile wrapper: unsupported algorithm")
         if not isinstance(document.get("key_id"), str) or not document.get("key_id"):
             raise ValueError("Invalid PQC keyfile wrapper: missing key identifier")
@@ -312,7 +338,7 @@ def write_pqc_keyfile(
     protected with a key derived from the same user secret that unlocks the
     archive.
     """
-    if algorithm != PQC_KEYFILE_ALGORITHM:
+    if not is_supported_pqc_suite_id(algorithm):
         raise ValueError("Unsupported PQC keyfile algorithm")
     if protection_mode is None:
         protection_mode = PQC_KEYFILE_PROTECTION_ARCHIVE_SECRET
@@ -340,13 +366,16 @@ def write_pqc_keyfile(
     salt = random_bytes(32)
     nonce = random_bytes(12)
     key_id = compute_pqc_key_id(public_bundle, pqc_ciphertext)
+    suite = _suite_for_document_algorithm(algorithm, public_bundle)
+    inner_kdf_started = time.perf_counter()
     keyfile_key = _derive_keyfile_encryption_key(password, keyphrase, salt)
+    inner_kdf_ms = (time.perf_counter() - inner_kdf_started) * 1000
 
     inner_payload = {
         "format": PQC_KEYFILE_FORMAT,
         "version": PQC_KEYFILE_VERSION,
         "algorithm": algorithm,
-        "suite": PQC_SUITE,
+        "suite": suite,
         "key_id": key_id,
         "archive_filename": archive_filename,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -365,7 +394,7 @@ def write_pqc_keyfile(
         "version": PQC_KEYFILE_VERSION,
         "algorithm": algorithm,
         "key_id": key_id,
-        "suite": PQC_SUITE,
+        "suite": suite,
         "salt": _b64encode(salt),
         "nonce": _b64encode(nonce),
         "ciphertext": _b64encode(ciphertext),
@@ -374,17 +403,49 @@ def write_pqc_keyfile(
         raise ValueError("PQC keyfile document is too large")
 
     document_to_write = outer_document
+    outer_wrapper_ms = 0.0
     if protection_mode == PQC_KEYFILE_PROTECTION_DUAL_PASSWORD:
         inner_document_bytes = json.dumps(outer_document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        outer_wrapper_started = time.perf_counter()
         document_to_write = wrap_pqc_keyfile_document(
             inner_document_bytes,
             keyfile_password,
             key_id=key_id,
             algorithm=algorithm,
         )
+        outer_wrapper_ms = (time.perf_counter() - outer_wrapper_started) * 1000
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(document_to_write, f, indent=2, sort_keys=True)
+    write_started = time.perf_counter()
+    output_directory = os.path.dirname(output_path) or os.getcwd()
+    temporary = tempfile.NamedTemporaryFile(
+        prefix=".avikal-keyfile-",
+        suffix=PQC_KEYFILE_EXTENSION,
+        dir=output_directory,
+        delete=False,
+    )
+    temporary_path = temporary.name
+    temporary.close()
+    register_temp_artifact(temporary_path)
+    try:
+        with open(temporary_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(document_to_write, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        # Hard-link publication is atomic and refuses to replace an existing keyfile.
+        # After the link succeeds both paths reference the same file content, so
+        # only unlink the temporary name. Secure-wiping the temp path would also
+        # wipe the published .avkkey on filesystems with hard-link semantics.
+        os.link(temporary_path, output_path)
+        os.unlink(temporary_path)
+        unregister_temp_artifact(temporary_path)
+    except Exception:
+        try:
+            if os.path.exists(temporary_path):
+                secure_remove_file(temporary_path)
+        finally:
+            unregister_temp_artifact(temporary_path)
+        raise
+    write_ms = (time.perf_counter() - write_started) * 1000
 
     return {
         "key_id": key_id,
@@ -392,6 +453,11 @@ def write_pqc_keyfile(
         "path": output_path,
         "protection_mode": protection_mode,
         "requires_keyfile_password": protection_mode == PQC_KEYFILE_PROTECTION_DUAL_PASSWORD,
+        "telemetry": {
+            "inner_kdf_ms": round(inner_kdf_ms, 2),
+            "outer_wrapper_ms": round(outer_wrapper_ms, 2),
+            "write_ms": round(write_ms, 2),
+        },
     }
 
 
@@ -408,7 +474,7 @@ def build_embedded_pqc_blob(
     algorithm: str = PQC_KEYFILE_ALGORITHM,
 ) -> bytes:
     """Create the encrypted pqc.enc member for embedded PQC archives."""
-    if algorithm != PQC_KEYFILE_ALGORITHM:
+    if not is_supported_pqc_suite_id(algorithm):
         raise ValueError("Unsupported embedded PQC algorithm")
     private_bundle = _require_bundle(private_bundle, "private")
     public_bundle = _require_bundle(public_bundle, "public")
@@ -416,6 +482,7 @@ def build_embedded_pqc_blob(
         raise ValueError("PQC ciphertext is missing")
 
     resolved_key_id = key_id or compute_pqc_key_id(public_bundle, pqc_ciphertext)
+    suite = _suite_for_document_algorithm(algorithm, public_bundle)
     salt = random_bytes(32)
     nonce = random_bytes(12)
     embedded_key = _derive_embedded_encryption_key(password, keyphrase, salt)
@@ -425,7 +492,7 @@ def build_embedded_pqc_blob(
         "version": PQC_EMBEDDED_VERSION,
         "storage_mode": PQC_STORAGE_MODE_EMBEDDED,
         "algorithm": algorithm,
-        "suite": PQC_SUITE,
+        "suite": suite,
         "key_id": resolved_key_id,
         "archive_filename": archive_filename,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -445,7 +512,7 @@ def build_embedded_pqc_blob(
         "storage_mode": PQC_STORAGE_MODE_EMBEDDED,
         "algorithm": algorithm,
         "key_id": resolved_key_id,
-        "suite": PQC_SUITE,
+        "suite": suite,
         "salt": _b64encode(salt),
         "nonce": _b64encode(nonce),
         "ciphertext": _b64encode(ciphertext),
@@ -479,7 +546,7 @@ def read_pqc_keyfile(
 
     algorithm = document.get("algorithm")
     key_id = document.get("key_id")
-    if algorithm != expected_algorithm or algorithm != PQC_KEYFILE_ALGORITHM:
+    if algorithm != expected_algorithm or not is_supported_pqc_suite_id(algorithm):
         raise ValueError("Invalid PQC keyfile: unsupported algorithm")
     if expected_key_id and key_id != expected_key_id:
         raise ValueError("PQC keyfile does not match this archive.")
@@ -563,7 +630,7 @@ def read_embedded_pqc_blob(
 
     algorithm = document.get("algorithm")
     key_id = document.get("key_id")
-    if algorithm != expected_algorithm or algorithm != PQC_KEYFILE_ALGORITHM:
+    if algorithm != expected_algorithm or not is_supported_pqc_suite_id(algorithm):
         raise ValueError("Invalid embedded PQC bundle: unsupported algorithm")
     if expected_key_id and key_id != expected_key_id:
         raise ValueError("Embedded PQC bundle does not match this archive.")

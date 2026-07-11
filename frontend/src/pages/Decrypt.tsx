@@ -1,9 +1,10 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
+﻿import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { flushSync } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Unlock, FolderOpen, FileText, Key, Shield, X, Eye, EyeOff, Download,
   Archive, Upload, Search, CheckCircle2, File, Folder,
-  ChevronLeft, ChevronRight, ChevronDown, Fingerprint, Lock, StopCircle
+  ChevronLeft, ChevronRight, ChevronDown, Fingerprint, Lock, StopCircle, ShieldCheck, BarChart3
 } from 'lucide-react'
 import { api, cancelDecrypt } from '../lib/api'
 import type { KeyphraseWordPair } from '../lib/api'
@@ -21,12 +22,14 @@ import BackendStartupNotice from '../components/BackendStartupNotice'
 import KeyphraseAssistInput, { splitKeyphraseWords } from '../components/KeyphraseAssistInput'
 import ProcessingOverlay from '../components/ProcessingOverlay'
 import TrustedTimeNotice from '../components/TrustedTimeNotice'
+import ArchiveReportModal from '../components/ArchiveReportModal'
 
-// ── Result Tree Types ─────────────────────────────────────────────
+// â”€â”€ Result Tree Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 interface ExtractedFile {
   filename: string
   path: string
   size: number
+  type?: 'file' | 'directory'
 }
 
 interface ResultTreeNode {
@@ -48,6 +51,14 @@ interface DecryptResponseEnvelope {
   message?: string
   preview_session_id?: string
   result?: DecryptResultPayload
+  archive_integrity?: Record<string, unknown> | null
+  sender_message?: string | null
+  compatibility?: {
+    created_with_version?: string | null
+    minimum_reader_version?: string | null
+    update_recommended?: boolean
+  }
+  report?: Record<string, unknown>
 }
 
 interface PreviewTab {
@@ -71,6 +82,71 @@ interface ArchiveInspectHints {
   keyphrase_wordlist_id?: string | null
 }
 
+interface AuthenticatedArchiveEntry {
+  id: string
+  path: string
+  type: 'file' | 'directory'
+  size: number
+}
+
+interface OpenedArchiveSession {
+  session_id: string
+  archive: { file_count: number; folder_count: number; total_original_size: number; sender_message?: string | null }
+  entries: AuthenticatedArchiveEntry[]
+  sender_message?: string | null
+  report: Record<string, unknown>
+}
+
+interface AuthenticatedTreeNode {
+  id?: string
+  name: string
+  path: string
+  type: 'file' | 'directory'
+  size: number
+  children: AuthenticatedTreeNode[]
+}
+
+function buildAuthenticatedTree(entries: AuthenticatedArchiveEntry[]): AuthenticatedTreeNode[] {
+  const root: AuthenticatedTreeNode = { name: '', path: '', type: 'directory', size: 0, children: [] }
+  const byPath = new Map<string, AuthenticatedTreeNode>()
+  byPath.set('', root)
+  for (const entry of [...entries].sort((a, b) => a.path.localeCompare(b.path))) {
+    const parts = entry.path.split('/').filter(Boolean)
+    let parent = root
+    for (let index = 0; index < parts.length; index += 1) {
+      const currentPath = parts.slice(0, index + 1).join('/')
+      let node = byPath.get(currentPath)
+      if (!node) {
+        const isFinal = index === parts.length - 1
+        node = { id: isFinal ? entry.id : undefined, name: parts[index], path: currentPath, type: isFinal ? entry.type : 'directory', size: isFinal ? entry.size : 0, children: [] }
+        parent.children.push(node)
+        byPath.set(currentPath, node)
+      } else if (index === parts.length - 1) {
+        node.id = entry.id; node.type = entry.type; node.size = entry.size
+      }
+      parent = node
+    }
+  }
+  const finalize = (node: AuthenticatedTreeNode): number => {
+    if (node.type === 'file') return node.size
+    node.size = node.children.reduce((sum, child) => sum + finalize(child), 0)
+    node.children.sort((a, b) => a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'directory' ? -1 : 1)
+    return node.size
+  }
+  finalize(root)
+  return root.children
+}
+
+function filterAuthenticatedTree(nodes: AuthenticatedTreeNode[], query: string): AuthenticatedTreeNode[] {
+  const normalized = query.trim().toLocaleLowerCase()
+  if (!normalized) return nodes
+  return nodes.flatMap(node => {
+    const children = filterAuthenticatedTree(node.children, normalized)
+    const matches = node.name.toLocaleLowerCase().includes(normalized) || node.path.toLocaleLowerCase().includes(normalized)
+    return matches || children.length > 0 ? [{ ...node, children: matches ? node.children : children }] : []
+  })
+}
+
 function formatSize(bytes: number): string {
   if (bytes === 0) return '0 B'
   const k = 1024
@@ -89,6 +165,7 @@ function buildResultTree(files: ExtractedFile[]): ResultTreeNode[] {
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i]
       const isLast = i === parts.length - 1
+      const isDirectoryEntry = isLast && f.type === 'directory'
       const pathSoFar = parts.slice(0, i + 1).join('/')
 
       let child = cursor.children.find(c => c.name === part)
@@ -96,9 +173,9 @@ function buildResultTree(files: ExtractedFile[]): ResultTreeNode[] {
         child = {
           name: part,
           fullPath: pathSoFar,
-          isDir: !isLast,
+          isDir: !isLast || isDirectoryEntry,
           size: isLast ? f.size : 0,
-          file: isLast ? f : undefined,
+          file: isLast && !isDirectoryEntry ? f : undefined,
           children: []
         }
         cursor.children.push(child)
@@ -145,7 +222,7 @@ function getFileColor(ext: string): string {
   }
 }
 
-// ── Result Tree Node Component ──────────────────────────────────────
+// â”€â”€ Result Tree Node Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function ResultNode({
   node,
   depth,
@@ -254,7 +331,14 @@ function ResultNode({
   )
 }
 
-// ── Main Decrypt Component ──────────────────────────────────────────
+// â”€â”€ Main Decrypt Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function AuthenticatedNode({ node, depth, selected, toggle, forceExpanded = false }: { node: AuthenticatedTreeNode; depth: number; selected: Set<string>; toggle: (node: AuthenticatedTreeNode) => void; forceExpanded?: boolean }) {
+  const [expanded, setExpanded] = useState(depth < 1)
+  const checked = Boolean(node.id && selected.has(node.id))
+  const showChildren = forceExpanded || expanded
+  return <div><div className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-av-border/10" style={{ paddingLeft: `${8 + depth * 18}px` }}><input type="checkbox" checked={checked} disabled={!node.id} onChange={() => toggle(node)} className="h-4 w-4 accent-av-accent disabled:opacity-30" />{node.type === 'directory' ? <button onClick={() => setExpanded(value => !value)} className="flex min-w-0 flex-1 items-center gap-2 text-left"><ChevronDown className={`h-3.5 w-3.5 shrink-0 transition ${showChildren ? '' : '-rotate-90'}`} /><Folder className="h-4 w-4 shrink-0 text-amber-500" /><span className="truncate text-sm text-av-main">{node.name}</span><span className="ml-auto text-[10px] text-av-muted">{formatSize(node.size)}</span></button> : <div className="flex min-w-0 flex-1 items-center gap-2"><File className="h-4 w-4 shrink-0 text-av-muted" /><span className="truncate text-sm text-av-main">{node.name}</span><span className="ml-auto text-[10px] text-av-muted">{formatSize(node.size)}</span></div>}</div>{node.type === 'directory' && showChildren && node.children.map(child => <AuthenticatedNode key={child.path} node={child} depth={depth + 1} selected={selected} toggle={toggle} forceExpanded={forceExpanded} />)}</div>
+}
+
 export default function Decrypt() {
   const { sessionToken } = useAuth()
   const [file, setFile] = useState<string[]>([])
@@ -277,6 +361,12 @@ export default function Decrypt() {
   const [searchQuery, setSearchQuery] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [archiveHints, setArchiveHints] = useState<ArchiveInspectHints | null>(null)
+  const [openedArchive, setOpenedArchive] = useState<OpenedArchiveSession | null>(null)
+  const [browseAuthenticatedContents, setBrowseAuthenticatedContents] = useState(false)
+  const [selectedAuthenticatedIds, setSelectedAuthenticatedIds] = useState<Set<string>>(() => new Set())
+  const [showAssuranceReport, setShowAssuranceReport] = useState(false)
+  const [verificationBlocked, setVerificationBlocked] = useState<string | null>(null)
+  const [authenticatedSearchQuery, setAuthenticatedSearchQuery] = useState('')
   // Ref holds the preview session ID that may be created server-side during a decrypt
   const activeSessionIdRef = useRef<string | null>(null)
   const previewTabsRef = useRef<PreviewTab[]>([])
@@ -285,7 +375,7 @@ export default function Decrypt() {
   const backendRuntime = useBackendRuntime()
   const activePreview = useMemo(() => previewTabs.find(tab => tab.id === activePreviewId) ?? null, [previewTabs, activePreviewId])
   const decryptionResult = activePreview?.result ?? null
-  const canDecrypt = backendRuntime.isReady && file.length > 0 && !loading && !pqcKeyfileInspecting && (!pqcKeyfileRequiresPassword || pqcKeyfilePassword.trim().length > 0)
+  const canDecrypt = backendRuntime.isReady && file.length > 0 && !verificationBlocked && !loading && !pqcKeyfileInspecting && (!pqcKeyfileRequiresPassword || pqcKeyfilePassword.trim().length > 0)
   const expectsEmbeddedPqc = Boolean(archiveHints?.pqc_required && archiveHints?.pqc_storage_mode === 'embedded')
   const expectsExternalPqc = Boolean(archiveHints?.pqc_required && archiveHints?.pqc_storage_mode !== 'embedded')
 
@@ -329,6 +419,9 @@ export default function Decrypt() {
           etaSeconds: event.etaSeconds,
           fileSize: event.fileSize,
           compressionRatio: event.compressionRatio,
+          processedBytes: event.processedBytes,
+          totalBytes: event.totalBytes,
+          throughputBytesPerSecond: event.throughputBytesPerSecond,
         })
       }
     })
@@ -389,6 +482,13 @@ export default function Decrypt() {
 
   const handleFileSelected = (paths: string[]) => {
     if (paths?.length > 0) {
+      if (openedArchive?.session_id) void api.closeArchiveSession(openedArchive.session_id).catch(() => undefined)
+      setOpenedArchive(null)
+      setBrowseAuthenticatedContents(false)
+      setSelectedAuthenticatedIds(new Set())
+      setShowAssuranceReport(false)
+      setAuthenticatedSearchQuery('')
+      setVerificationBlocked(null)
       setFile([paths[0]])
       setActivePreviewId(null)
       resetUnlockInputs()
@@ -465,7 +565,7 @@ export default function Decrypt() {
         body: JSON.stringify({ session_id: activeSessionIdRef.current }),
       }, 10_000)
     } catch {
-      // Backend cleanup is best-effort — the abort already fired
+      // Backend cleanup is best-effort â€” the abort already fired
     }
     activeSessionIdRef.current = null
     progress.reset()
@@ -525,18 +625,55 @@ export default function Decrypt() {
       }
       progress.update({ status: 'running', currentOperation: initialOperation, percentage: null })
 
+      const unlockRequest = {
+        input_file: file[0],
+        password: password || undefined,
+        keyphrase: keyphrase ? splitKeyphraseWords(keyphrase) : undefined,
+        pqc_keyfile: pqcKeyfile || undefined,
+        pqc_keyfile_password: keyfileRequiresPassword ? pqcKeyfilePassword : undefined,
+      }
+
+      if (archiveHints?.archive_type === 'multi_file') {
+        try {
+          const opened = await api.openArchiveSession(unlockRequest, sessionToken || undefined) as OpenedArchiveSession & { success: boolean }
+          if (opened.success) {
+            let revokedIdentity = false
+            try {
+              const identityState = await window.electron?.creatorIdentity?.list()
+              const assurance = opened.report?.assurance as Record<string, unknown> | undefined
+              const identityId = String(assurance?.identity_id || '')
+              const trusted = identityState?.trusted?.find(item => String(item.identity_id || '') === identityId) as Record<string, unknown> | undefined
+              if (assurance && trusted) {
+                assurance.identity_trust = trusted.status === 'revoked' ? 'revoked' : 'trusted'
+                revokedIdentity = trusted.status === 'revoked'
+              }
+            } catch { /* Trust pin lookup is local presentation state. */ }
+            if (revokedIdentity) {
+              await api.closeArchiveSession(opened.session_id)
+              throw new Error('This archive was signed by a locally revoked creator identity.')
+            }
+            setOpenedArchive(opened)
+            setBrowseAuthenticatedContents(false)
+            setSelectedAuthenticatedIds(new Set())
+            setShowAssuranceReport(false)
+            progress.update({ status: 'completed', currentOperation: 'Archive authenticated', percentage: 100 })
+            toast.success('Archive authenticated. Choose how to open its contents.')
+            resetUnlockInputs()
+            return
+          }
+        } catch (sessionError) {
+          const sessionMessage = getErrorMessage(sessionError, 'Archive unlock failed')
+          if (!sessionMessage.toLowerCase().includes('indexed payload')) throw sessionError
+        }
+      }
+
       const result = await api.decrypt(
-        {
-          input_file: file[0],
-          password: password || undefined,
-          keyphrase: keyphrase ? splitKeyphraseWords(keyphrase) : undefined,
-          pqc_keyfile: pqcKeyfile || undefined,
-          pqc_keyfile_password: keyfileRequiresPassword ? pqcKeyfilePassword.trim() : undefined,
-        },
+        unlockRequest,
         sessionToken || undefined,
       )
 
       if (result.success) {
+        setVerificationBlocked(null)
         // Store the session ID so cancel can clean it up if needed
         if (result.preview_session_id) {
           activeSessionIdRef.current = result.preview_session_id
@@ -563,10 +700,13 @@ export default function Decrypt() {
         progress.update({ status: 'completed', currentOperation: 'Preview ready', percentage: 100 })
       }
     } catch (error: unknown) {
-      // Cancelled by user — silent, no error toast
+      // Cancelled by user â€” silent, no error toast
       if ((error as Error & { cancelled?: boolean })?.cancelled) return
       const message = getErrorMessage(error, 'Decryption failed')
       const normalizedLockMessage = message.replace(/^Failed to open \.avk file:\s*/i, '').trim()
+      if (message.includes('Mandatory archive verification failed') || message.includes('File integrity check failed')) {
+        setVerificationBlocked('Mandatory cryptographic verification failed. No metadata or files will be exposed from this archive.')
+      }
       if (
         message.includes('Time-capsule locked')
         || normalizedLockMessage.toLowerCase().includes('locked until')
@@ -574,7 +714,7 @@ export default function Decrypt() {
       ) {
         toast.error(normalizedLockMessage)
       } else if (message.includes('Not authenticated') || message.includes('Please login first')) {
-        toast.error('Private Aavrit mode requires a valid session before reveal can continue.')
+        toast.error('Aavrit authentication is required for this operation. Reconnect the configured authority.')
         setSettingsInitialTab('aavrit')
         setShowSecuritySettings(true)
       } else if (message.includes('Authentication failed')) toast.error('Authentication failed. Please try again.')
@@ -601,6 +741,83 @@ export default function Decrypt() {
     }
   }
 
+  const authenticatedTree = useMemo(() => buildAuthenticatedTree(openedArchive?.entries || []), [openedArchive])
+  const filteredAuthenticatedTree = useMemo(() => filterAuthenticatedTree(authenticatedTree, authenticatedSearchQuery), [authenticatedTree, authenticatedSearchQuery])
+  const toggleAuthenticatedNode = useCallback((node: AuthenticatedTreeNode) => {
+    if (!node.id || !openedArchive) return
+    const entryById = new Map(openedArchive.entries.map(entry => [entry.id, entry]))
+    setSelectedAuthenticatedIds(current => {
+      const next = new Set(current)
+      if (next.has(node.id!)) {
+        next.delete(node.id!)
+        return next
+      }
+
+      const prefix = `${node.path}/`
+      for (const selectedId of next) {
+        const selectedEntry = entryById.get(selectedId)
+        if (!selectedEntry) {
+          next.delete(selectedId)
+          continue
+        }
+        const selectedIsDescendant = selectedEntry.path.startsWith(prefix)
+        const selectedIsAncestor = node.path.startsWith(`${selectedEntry.path}/`)
+        if (selectedIsDescendant || selectedIsAncestor) next.delete(selectedId)
+      }
+      next.add(node.id!)
+      return next
+    })
+  }, [openedArchive])
+
+  const registerExtractedPreview = useCallback((result: DecryptResponseEnvelope, archivePath: string) => {
+    const tabId = result.preview_session_id || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const nextTab: PreviewTab = { id: tabId, title: archivePath.split('\\').pop()?.split('/').pop() || 'Decoded archive', archivePath, result }
+    setPreviewTabs(current => [...current.filter(tab => tab.id !== tabId), nextTab])
+    setActivePreviewId(tabId)
+  }, [])
+
+  const extractOpenedArchive = useCallback(async (all: boolean) => {
+    if (!openedArchive) return
+    if (!all && selectedAuthenticatedIds.size === 0) { toast.error('Select at least one file or folder'); return }
+    try {
+      setLoading(true)
+      progress.update({ status: 'running', currentOperation: all ? 'Decrypting complete archive' : 'Decrypting selected contents', percentage: null })
+      const result = all
+        ? await api.extractArchiveAll(openedArchive.session_id)
+        : await api.extractArchiveSelection({ session_id: openedArchive.session_id, entry_ids: Array.from(selectedAuthenticatedIds) })
+      registerExtractedPreview(result, file[0] || 'Authenticated archive')
+      if (result.report) setOpenedArchive(current => current ? { ...current, report: result.report as Record<string, unknown> } : current)
+      if (all) {
+        await api.closeArchiveSession(openedArchive.session_id)
+        setOpenedArchive(null)
+        setFile([])
+      }
+      progress.update({ status: 'completed', currentOperation: 'Verified preview ready', percentage: 100 })
+      toast.success(`${result.result?.file_count || 0} verified file(s) ready`)
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Selected extraction failed'))
+    } finally {
+      setLoading(false)
+    }
+  }, [openedArchive, selectedAuthenticatedIds, file, progress, registerExtractedPreview])
+
+  const verifyOpenedArchive = useCallback(async () => {
+    if (!openedArchive) return
+    try {
+      setLoading(true)
+      progress.update({ status: 'running', currentOperation: 'Verifying complete archive', percentage: null })
+      const result = await api.verifyArchiveAll(openedArchive.session_id) as { report?: Record<string, unknown> }
+      if (result.report) setOpenedArchive(current => current ? { ...current, report: result.report! } : current)
+      progress.update({ status: 'completed', currentOperation: 'Entire archive verified', percentage: 100 })
+      setShowAssuranceReport(true)
+      toast.success('Entire archive verified without extracting files')
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Archive verification failed'))
+    } finally {
+      setLoading(false)
+    }
+  }, [openedArchive, progress])
+
   // Build tree from extracted files
   const extractedFiles = useMemo<ExtractedFile[]>(() => decryptionResult?.result?.files ?? [], [decryptionResult])
   const resultTree = useMemo(() => buildResultTree(extractedFiles), [extractedFiles])
@@ -616,6 +833,7 @@ export default function Decrypt() {
         .map((fileObj) => ({
           sourcePath: fileObj.path,
           relativePath: fileObj.filename.replace(/\\/g, '/'),
+          type: fileObj.type || 'file',
         }))
       if (exportableFiles.length === 0) {
         throw new Error('No extracted files are available to export')
@@ -647,12 +865,15 @@ export default function Decrypt() {
   }, [cleanupPreviewSession])
 
   const handleNewDecode = useCallback(() => {
-    setFile([])
-    setSearchQuery('')
-    resetUnlockInputs()
-    setArchiveHints(null)
-    setActivePreviewId(null)
-    setPreviewFile(null)
+    flushSync(() => {
+      setFile([])
+      setSearchQuery('')
+      resetUnlockInputs()
+      setArchiveHints(null)
+      setActivePreviewId(null)
+      setPreviewFile(null)
+      setVerificationBlocked(null)
+    })
   }, [resetUnlockInputs])
 
   const scrollPreviewTabs = useCallback((direction: -1 | 1) => {
@@ -697,6 +918,11 @@ export default function Decrypt() {
     }
   }, [cleanupPreviewSession])
 
+  useEffect(() => {
+    const sessionId = openedArchive?.session_id
+    return () => { if (sessionId) void api.closeArchiveSession(sessionId).catch(() => undefined) }
+  }, [openedArchive?.session_id])
+
   const selectedFileName = file.length > 0 ? (file[0].split('\\').pop()?.split('/').pop() || file[0]) : null
 
   return (
@@ -706,7 +932,7 @@ export default function Decrypt() {
       {/* 60/40 Split Architecture */}
       <div className="av-work-grid">
 
-      {/* ── Left Panel: File / Result Tree (60%) ──────────────────────── */}
+      {/* â”€â”€ Left Panel: File / Result Tree (60%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div
         className="av-primary-panel lg:col-span-3 flex flex-col overflow-hidden relative"
         onDragOver={handleDragOver}
@@ -761,7 +987,7 @@ export default function Decrypt() {
           </ProcessingOverlay>
         )}
 
-        {/* State 1: Before Decryption — Drop Zone */}
+        {/* State 1: Before Decryption â€” Drop Zone */}
         {previewTabs.length > 0 && (
           <div className="av-explorer-toolbar flex items-center gap-2 px-3 py-2.5">
             <button
@@ -833,6 +1059,7 @@ export default function Decrypt() {
             </button>
 
             <button
+              type="button"
               onClick={handleNewDecode}
               disabled={loading}
               className="shrink-0 rounded-xl border border-av-border/50 bg-av-surface/60 px-3.5 py-2 text-xs font-semibold text-av-main transition-all hover:border-av-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
@@ -842,7 +1069,7 @@ export default function Decrypt() {
           </div>
         )}
 
-        {!decryptionResult && (
+        {!decryptionResult && !openedArchive && (
           <div className="av-left-workspace flex-1 flex flex-col relative overflow-hidden">
             <div className="flex-1 p-8 flex flex-col relative">
               <div
@@ -859,7 +1086,7 @@ export default function Decrypt() {
                 <motion.div animate={{ y: isDragging ? -10 : 0 }} className="z-10 flex flex-col items-center">
                   <div className="relative mb-6">
                     <div className="absolute inset-0 rounded-2xl bg-av-border/10" />
-                    <div className="w-20 h-20 rounded-2xl bg-av-surface/80 backdrop-blur-sm flex items-center justify-center border border-av-border/30 shadow-[0_4px_20px_rgba(0,0,0,0.05)] text-av-main relative z-10">
+                    <div className="w-20 h-20 rounded-2xl bg-av-surface/80 flex items-center justify-center border border-av-border/30 shadow-[0_4px_20px_rgba(0,0,0,0.05)] text-av-main relative z-10">
                       {file.length > 0
                         ? <Shield className="w-8 h-8 text-av-accent" strokeWidth={1.25} />
                         : <Upload className="w-8 h-8" strokeWidth={1.25} />
@@ -899,6 +1126,13 @@ export default function Decrypt() {
                     </div>
                   )}
 
+                  {verificationBlocked && (
+                    <div className="mb-6 w-full max-w-xl rounded-2xl border border-red-500/45 bg-red-500/10 px-4 py-3 text-left" role="alert">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-red-700 dark:text-red-300">Archive blocked</p>
+                      <p className="mt-1 text-sm leading-5 text-red-950 dark:text-red-100">{verificationBlocked}</p>
+                    </div>
+                  )}
+
                   {file.length > 0 ? (
                     <div className="flex items-center gap-3">
                       <button
@@ -908,7 +1142,7 @@ export default function Decrypt() {
                         <File className="w-3.5 h-3.5" /> Change File
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); setFile([]); setPqcKeyfile(''); setArchiveHints(null) }}
+                        onClick={(e) => { e.stopPropagation(); setFile([]); setPqcKeyfile(''); setArchiveHints(null); setVerificationBlocked(null) }}
                         className="flex items-center gap-2 text-xs bg-red-500/10 border border-red-500/20 text-red-400 font-semibold px-4 py-2.5 rounded-xl transition-all shadow-sm hover:bg-red-500/20 active:scale-95"
                       >
                         <X className="w-3.5 h-3.5" /> Remove
@@ -928,7 +1162,50 @@ export default function Decrypt() {
           </div>
         )}
 
-        {/* State 2: After Decryption — Result Tree */}
+        {/* State 2: After Decryption â€” Result Tree */}
+        {openedArchive && (
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="av-explorer-toolbar flex items-center justify-between gap-4 px-6 py-4">
+              <div className="flex items-center gap-3"><div className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/25 bg-emerald-500/10"><ShieldCheck className="h-5 w-5 text-emerald-500" /></div><div><p className="text-sm font-semibold text-av-main">Authenticated archive</p><p className="text-[10px] text-av-muted">{openedArchive.archive.file_count} files Â· {openedArchive.archive.folder_count} folders Â· {formatSize(openedArchive.archive.total_original_size)}</p></div></div>
+              <div className="flex flex-wrap justify-end gap-2"><button onClick={() => void verifyOpenedArchive()} disabled={loading} className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-800 dark:text-emerald-200 disabled:opacity-50"><ShieldCheck className="h-3.5 w-3.5" />Verify all</button><button onClick={() => setShowAssuranceReport(true)} className="flex items-center gap-1.5 rounded-lg border border-av-border/50 px-3 py-2 text-xs font-semibold text-av-main"><BarChart3 className="h-3.5 w-3.5" />Assurance report</button><button onClick={() => { void api.closeArchiveSession(openedArchive.session_id); setOpenedArchive(null); setBrowseAuthenticatedContents(false); setSelectedAuthenticatedIds(new Set()); setAuthenticatedSearchQuery('') }} className="rounded-lg border border-av-border/50 p-2 text-av-muted"><X className="h-4 w-4" /></button></div>
+            </div>
+            {openedArchive.sender_message && <div className="mx-5 mt-4 rounded-2xl border border-cyan-500/25 bg-cyan-500/10 p-4"><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-700 dark:text-cyan-300">Authenticated sender message</p><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-av-main">{openedArchive.sender_message}</p></div>}
+            {!browseAuthenticatedContents ? (
+              <div className="flex flex-1 items-center justify-center p-8">
+                <div className="w-full max-w-xl rounded-3xl border border-av-border/50 bg-av-surface/75 p-7 text-center">
+                  <Archive className="mx-auto h-10 w-10 text-av-accent" />
+                  <h3 className="mt-4 text-xl font-semibold text-av-main">Choose how to open this archive</h3>
+                  <p className="mt-2 text-sm text-av-muted">Open everything for a complete preview, or browse the signed index and decrypt only what you need.</p>
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                    <button onClick={() => void extractOpenedArchive(true)} className="rounded-xl bg-av-main px-4 py-3 text-sm font-semibold text-av-surface">Open everything</button>
+                    <button onClick={() => setBrowseAuthenticatedContents(true)} className="rounded-xl border border-av-border/60 px-4 py-3 text-sm font-semibold text-av-main">Browse contents</button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="border-b border-av-border/40 px-5 py-3">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-av-muted" />
+                    <input value={authenticatedSearchQuery} onChange={event => setAuthenticatedSearchQuery(event.target.value)} placeholder="Search authenticated contents" className="w-full rounded-xl border border-av-border/45 bg-av-surface py-2.5 pl-10 pr-3 text-sm text-av-main outline-none focus:border-av-accent/50" />
+                  </div>
+                </div>
+                <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                  {filteredAuthenticatedTree.length > 0 ? filteredAuthenticatedTree.map(node => <AuthenticatedNode key={node.path} node={node} depth={0} selected={selectedAuthenticatedIds} toggle={toggleAuthenticatedNode} forceExpanded={Boolean(authenticatedSearchQuery.trim())} />) : <p className="py-12 text-center text-sm text-av-muted">No authenticated entries match this search.</p>}
+                </div>
+                <div className="flex items-center justify-between border-t border-av-border/40 px-5 py-4">
+                  <p className="text-xs text-av-muted">{selectedAuthenticatedIds.size} authenticated entries selected</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => { setBrowseAuthenticatedContents(false); setAuthenticatedSearchQuery('') }} className="rounded-xl border border-av-border/50 px-4 py-2 text-xs font-semibold text-av-main">Back</button>
+                    <button disabled={selectedAuthenticatedIds.size === 0 || loading} onClick={() => void extractOpenedArchive(false)} className="rounded-xl bg-av-main px-4 py-2 text-xs font-semibold text-av-surface disabled:opacity-40">Open selected</button>
+                  </div>
+                </div>
+              </>
+            )}
+            {showAssuranceReport && <ArchiveReportModal report={openedArchive.report} onClose={() => setShowAssuranceReport(false)} />}
+          </div>
+        )}
+
         {decryptionResult && extractedFiles.length > 0 && (
           <div className="flex-1 flex flex-col relative overflow-hidden">
             {/* Success Header */}
@@ -958,6 +1235,12 @@ export default function Decrypt() {
 
               <div className="flex items-center gap-2 shrink-0">
                 <button
+                  onClick={() => setShowAssuranceReport(true)}
+                  className="flex items-center gap-1.5 rounded-lg border border-av-border/50 px-3 py-1.5 text-[11px] font-medium text-av-main"
+                >
+                  <BarChart3 className="h-3 w-3" /> Assurance
+                </button>
+                <button
                   onClick={handleExtractAll}
                   className="flex items-center gap-1.5 text-[11px] bg-av-main text-av-surface font-medium px-3.5 py-1.5 rounded-lg transition-all shadow-sm hover:opacity-90"
                 >
@@ -972,6 +1255,24 @@ export default function Decrypt() {
                 </button>
               </div>
             </div>
+
+            {decryptionResult.archive_integrity?.status === 'legacy_unsigned' && (
+              <div className="mx-5 mt-4 rounded-2xl border border-amber-500/35 bg-amber-500/10 p-4">
+                <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">Legacy unsigned archive</p>
+                <p className="mt-1 text-sm text-amber-950 dark:text-amber-100">This historical archive has no archive-level creator signature. Its legacy payload authentication was still required before preview.</p>
+              </div>
+            )}
+            {decryptionResult.compatibility?.update_recommended && (
+              <div className="mx-5 mt-4 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 p-4 text-sm text-cyan-950 dark:text-cyan-100">
+                This archive was created by a newer compatible Avikal version. Update from Settings &gt; Updates when practical.
+              </div>
+            )}
+            {decryptionResult.sender_message && (
+              <div className="mx-5 mt-4 rounded-2xl border border-cyan-500/25 bg-cyan-500/10 p-4">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-800 dark:text-cyan-300">Authenticated sender message</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-av-main">{decryptionResult.sender_message}</p>
+              </div>
+            )}
 
             {/* Tree View */}
             <div className="av-tree-surface flex-1 overflow-y-auto custom-scrollbar px-3 py-3">
@@ -993,11 +1294,13 @@ export default function Decrypt() {
                 </div>
               ) : null}
             </div>
+            {showAssuranceReport && decryptionResult.report && <ArchiveReportModal report={decryptionResult.report} onClose={() => setShowAssuranceReport(false)} />}
+            {showAssuranceReport && !decryptionResult.report && <div className="av-processing-overlay absolute inset-0 z-30 flex items-center justify-center p-6"><div className="av-result-card w-full max-w-lg rounded-[24px] border border-av-border/60 p-6"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-[0.15em] text-amber-700 dark:text-amber-300">Legacy assurance</p><h3 className="mt-1 text-lg font-bold text-av-main">No exportable signed report</h3></div><button onClick={() => setShowAssuranceReport(false)} className="rounded-xl border border-av-border/50 p-2 text-av-muted"><X className="h-4 w-4" /></button></div><p className="mt-4 text-sm leading-6 text-av-muted">This historical archive predates canonical assurance reports. Its supported legacy authentication was still required before preview.</p></div></div>}
           </div>
         )}
       </div>
 
-      {/* ── Right Panel: Security Protocol (40%) ─────────────────────── */}
+      {/* â”€â”€ Right Panel: Security Protocol (40%) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className={`av-side-stack av-natural-side-stack lg:col-span-2 transition-opacity ${loading ? 'pointer-events-none opacity-70' : ''}`}>
 
         <div className="px-2 mb-1">
@@ -1005,7 +1308,7 @@ export default function Decrypt() {
         </div>
 
         {/* Module: Symmetric Key (Password) */}
-        <div className={`rounded-[20px] border transition-all duration-300 overflow-hidden backdrop-blur-xl relative group ${
+        <div className={`rounded-[20px] border transition-all duration-300 overflow-hidden relative group ${
           password.length > 0
             ? 'bg-av-surface/80 border-emerald-500 shadow-[0_8px_30px_rgba(16,185,129,0.08)] ring-1 ring-emerald-500/20'
             : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
@@ -1028,7 +1331,7 @@ export default function Decrypt() {
               </div>
             </div>
 
-            <div className="relative rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 backdrop-blur-md group/input">
+            <div className="relative mt-4 rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] hover:bg-container-bg/80 transition-all duration-300 group/input">
               <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
                 <Fingerprint className={`w-4 h-4 transition-colors duration-300 ${password.length > 0 ? 'text-emerald-400 opacity-100' : 'text-av-muted opacity-50 group-hover/input:opacity-100 group-hover/input:text-emerald-400'}`} />
               </div>
@@ -1047,7 +1350,7 @@ export default function Decrypt() {
         </div>
 
         {/* Module: Seed Vector (Keyphrase) */}
-        <div className={`rounded-[20px] border transition-all duration-300 overflow-hidden backdrop-blur-xl relative group ${
+        <div className={`rounded-[20px] border transition-all duration-300 overflow-hidden relative group ${
           keyphrase.trim().length > 0
             ? 'bg-av-surface/80 border-purple-500 shadow-[0_8px_30px_rgba(168,85,247,0.08)] ring-1 ring-purple-500/20'
             : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
@@ -1096,7 +1399,7 @@ export default function Decrypt() {
           </div>
         </div>
 
-        <div className={`rounded-[20px] border transition-all duration-300 overflow-hidden backdrop-blur-xl relative group ${
+        <div className={`rounded-[20px] border transition-all duration-300 overflow-hidden relative group ${
           pqcKeyfile.trim().length > 0
             ? 'bg-av-surface/80 border-amber-500 shadow-[0_8px_30px_rgba(245,158,11,0.12)] ring-1 ring-amber-500/20'
             : 'bg-av-surface/40 border-av-border/30 shadow-sm hover:border-av-border/60 hover:bg-av-surface/60'
@@ -1203,7 +1506,7 @@ export default function Decrypt() {
             disabled={!canDecrypt}
             className={`w-full py-4 rounded-2xl text-[15px] font-semibold tracking-wide transition-all duration-300 flex items-center justify-center gap-2 ${
               !canDecrypt
-                ? 'bg-av-border/10 dark:bg-white/5 border border-av-border/20 dark:border-white/5 text-av-muted cursor-not-allowed shadow-inner backdrop-blur-sm'
+                ? 'bg-av-border/10 dark:bg-white/5 border border-av-border/20 dark:border-white/5 text-av-muted cursor-not-allowed shadow-inner'
                 : 'bg-av-main hover:opacity-90 text-av-surface shadow-[0_10px_30px_rgba(0,0,0,0.15)] hover:shadow-[0_10px_40px_rgba(0,0,0,0.2)] hover:-translate-y-0.5'
             }`}
           >
@@ -1217,7 +1520,7 @@ export default function Decrypt() {
       </div>
       </div>
 
-      {/* ── File Preview Modal ───────────────────────────────────────── */}
+      {/* â”€â”€ File Preview Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <AnimatePresence>
         {previewFile && (
           <motion.div

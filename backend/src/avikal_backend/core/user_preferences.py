@@ -22,8 +22,12 @@ OUTPUT_FOLDER_MODES = {"ask", "remember"}
 LARGE_FILE_MODES = {"auto", "low_resource"}
 DECODE_OUTPUT_LIMITS = {"standard", "high"}
 PREVIEW_CLEANUP_POLICIES = {"on_close_15m", "manual"}
+VISUAL_EFFECTS_MODES = {"auto", "effects", "normal"}
 
 DEFAULT_PREFERENCES: dict[str, Any] = {
+    "appearance": {
+        "visual_effects_mode": "auto",
+    },
     "privacy": {
         "activity_log_mode": "minimal",
         "activity_retention_days": 30,
@@ -79,6 +83,13 @@ def sanitize_preferences(raw: Any) -> dict[str, Any]:
     prefs = deepcopy(DEFAULT_PREFERENCES)
     if not isinstance(raw, dict):
         return prefs
+
+    appearance = raw.get("appearance") if isinstance(raw.get("appearance"), dict) else {}
+    prefs["appearance"]["visual_effects_mode"] = _coerce_choice(
+        appearance.get("visual_effects_mode"),
+        VISUAL_EFFECTS_MODES,
+        prefs["appearance"]["visual_effects_mode"],
+    )
 
     privacy = raw.get("privacy") if isinstance(raw.get("privacy"), dict) else {}
     prefs["privacy"]["activity_log_mode"] = _coerce_choice(
@@ -160,4 +171,3 @@ def save_user_preferences(raw: Any) -> dict[str, Any]:
     temp_path.write_text(json.dumps(prefs, indent=2, sort_keys=True), encoding="utf-8")
     temp_path.replace(path)
     return prefs
-

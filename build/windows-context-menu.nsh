@@ -1,8 +1,8 @@
 !macro RegisterAvikalContextMenu ROOT_KEY KEY_NAME MENU_LABEL ACTION_NAME
   WriteRegStr ${ROOT_KEY} "Software\Classes\AllFilesystemObjects\shell\${KEY_NAME}" "" "${MENU_LABEL}"
-  WriteRegStr ${ROOT_KEY} "Software\Classes\AllFilesystemObjects\shell\${KEY_NAME}" "Icon" "$INSTDIR\RookDuel Avikal-beta.exe"
+  WriteRegStr ${ROOT_KEY} "Software\Classes\AllFilesystemObjects\shell\${KEY_NAME}" "Icon" "$INSTDIR\RookDuel-Avikal.exe"
   WriteRegStr ${ROOT_KEY} "Software\Classes\AllFilesystemObjects\shell\${KEY_NAME}" "MultiSelectModel" "Player"
-  WriteRegStr ${ROOT_KEY} "Software\Classes\AllFilesystemObjects\shell\${KEY_NAME}\command" "" '$\"$INSTDIR\RookDuel Avikal-beta.exe$\" --shell-action=${ACTION_NAME} %V'
+  WriteRegStr ${ROOT_KEY} "Software\Classes\AllFilesystemObjects\shell\${KEY_NAME}\command" "" '$\"$INSTDIR\RookDuel-Avikal.exe$\" --shell-action=${ACTION_NAME} %V'
 !macroend
 
 !macro UnregisterAvikalContextMenu ROOT_KEY KEY_NAME

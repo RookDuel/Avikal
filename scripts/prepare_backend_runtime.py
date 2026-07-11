@@ -17,6 +17,7 @@ PQC_RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "pqc"
 PYINSTALLER_SPEC = BACKEND_ROOT / "pyinstaller-backend.spec"
 PYINSTALLER_TMP_ROOT = PROJECT_ROOT / ".tmp_build" / "pyinstaller-backend"
 NATIVE_BUILD_SCRIPT = BACKEND_ROOT / "scripts" / "build_native_extension.py"
+NOTICE_INVENTORY_SCRIPT = PROJECT_ROOT / "scripts" / "generate_third_party_inventory.py"
 
 
 def copy_pqc_runtime() -> bool:
@@ -91,6 +92,7 @@ def main() -> None:
     backend_executable = build_backend_bundle()
     verify_packaged_backend_native_runtime(backend_executable)
     write_manifest(backend_executable=backend_executable, pqc_runtime_present=pqc_runtime_present)
+    subprocess.run([sys.executable, str(NOTICE_INVENTORY_SCRIPT)], cwd=str(PROJECT_ROOT), check=True)
 
     print(f"Prepared production backend bundle at {BACKEND_OUTPUT_ROOT}")
     print(f"Prepared production backend runtime at {OUTPUT_ROOT}")

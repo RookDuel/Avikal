@@ -1,5 +1,6 @@
 param(
   [string]$Version = "3.5.6",
+  [string]$ExpectedSha256 = "",
   [switch]$Clean,
   [switch]$RunTests
 )
@@ -17,6 +18,9 @@ $Sha256Url = "$SourceUrl.sha256"
 $ArchivePath = Join-Path $DownloadsRoot $ArchiveName
 $Sha256Path = Join-Path $DownloadsRoot "$ArchiveName.sha256"
 $ExtractedSource = Join-Path $SourceRoot "openssl-$Version"
+$PinnedOpenSslHashes = @{
+  "3.5.6" = "deae7c80cba99c4b4f940ecadb3c3338b13cb77418409238e57d7f31f2a3b736"
+}
 
 function Find-VcVars64 {
   $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
@@ -81,7 +85,17 @@ if (-not (Test-Path -LiteralPath $Sha256Path)) {
   Invoke-WebRequest -Uri $Sha256Url -OutFile $Sha256Path
 }
 
-$expectedSha256 = Read-Sha256FromFile $Sha256Path
+$releaseSha256 = Read-Sha256FromFile $Sha256Path
+if ([string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+  $ExpectedSha256 = [string]$PinnedOpenSslHashes[$Version]
+}
+if ([string]::IsNullOrWhiteSpace($ExpectedSha256) -or $ExpectedSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+  throw "OpenSSL $Version does not have a repository-pinned SHA256. Pass -ExpectedSha256 only after independently reviewing the release."
+}
+$expectedSha256 = $ExpectedSha256.ToUpperInvariant()
+if ($releaseSha256 -ne $expectedSha256) {
+  throw "OpenSSL published checksum does not match the repository-pinned checksum. Pinned=$expectedSha256 Published=$releaseSha256"
+}
 $actualSha256 = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToUpperInvariant()
 if ($actualSha256 -ne $expectedSha256) {
   throw "OpenSSL archive SHA256 mismatch. Expected $expectedSha256 but got $actualSha256"

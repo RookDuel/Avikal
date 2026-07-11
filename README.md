@@ -13,7 +13,7 @@
   <a href="https://github.com/RookDuel/Avikal/forks"><img src="https://img.shields.io/github/forks/RookDuel/Avikal?style=for-the-badge&label=Forks&color=0f172a" alt="GitHub forks" /></a>
   <a href="https://github.com/RookDuel/Avikal/issues"><img src="https://img.shields.io/github/issues/RookDuel/Avikal?style=for-the-badge&label=Issues&color=b45309" alt="GitHub issues" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-2563eb?style=for-the-badge" alt="Apache-2.0 license" /></a>
-  <img src="https://img.shields.io/badge/Status-Beta-0f172a?style=for-the-badge" alt="Beta status" />
+  <img src="https://img.shields.io/badge/Status-Production%20Ready-0f172a?style=for-the-badge" alt="Production ready status" />
   <img src="https://img.shields.io/badge/Desktop-Windows%20First-111827?style=for-the-badge" alt="Windows-first desktop" />
   <img src="https://img.shields.io/badge/Core-Python%20%2B%20Rust-b45309?style=for-the-badge" alt="Python and Rust core" />
   <img src="https://img.shields.io/badge/Format-.avk-334155?style=for-the-badge" alt=".avk archive format" />
@@ -92,6 +92,7 @@ Current PQC workflows include:
 - external `.avkkey` keyfiles
 - optional second-password protection for external `.avkkey` files
 - hybrid post-quantum/classical key material handling in the backend core
+- Standard, Maximum, and guarded Custom profiles using supported ML-KEM, ML-DSA, and SLH-DSA parameter sets
 
 The practical benefit is separation of access material. For example, an archive can require the normal user secret and matching PQC key material before it opens.
 
@@ -251,11 +252,11 @@ More setup details are in [SETUP.md](./SETUP.md).
 - [CONTRIBUTING.md](./CONTRIBUTING.md) - contribution workflow
 - [ROADMAP.md](./ROADMAP.md) - project direction
 - [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) - third-party license notes
-- [updates.md](./updates.md) - v1.0.5 update summary
+- [CHANGELOG.md](./CHANGELOG.md) - release history and public change summary
 
 ## Project Status
 
-Avikal is in active beta development. Windows desktop packaging is the primary supported production target. CLI and future Linux/macOS packaging are part of the project direction, but they require separate release verification.
+Avikal is Windows-first for the current production release line. Windows desktop packaging is the primary supported distribution target. CLI and future Linux/macOS packaging remain part of the project direction, but they require separate release verification.
 
 ## Responsible Use
 

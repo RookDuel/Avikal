@@ -9,6 +9,9 @@ export interface ProgressState {
   etaSeconds: number | null
   fileSize: number | null
   compressionRatio: number | null
+  processedBytes: number | null
+  totalBytes: number | null
+  throughputBytesPerSecond: number | null
   isCancelling: boolean
   elapsedSeconds: number
 }
@@ -39,6 +42,9 @@ const initialState: ProgressState = {
   etaSeconds: null,
   fileSize: null,
   compressionRatio: null,
+  processedBytes: null,
+  totalBytes: null,
+  throughputBytesPerSecond: null,
   isCancelling: false,
   elapsedSeconds: 0,
 }

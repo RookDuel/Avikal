@@ -8,6 +8,9 @@ export interface BackendProgressEvent {
   etaSeconds: number | null
   fileSize: number | null
   compressionRatio: number | null
+  processedBytes: number | null
+  totalBytes: number | null
+  throughputBytesPerSecond: number | null
 }
 
 const PREFIX = '__AVIKAL_PROGRESS__'

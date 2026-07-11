@@ -58,6 +58,16 @@ function Resolve-Makensis {
         }
     }
 
+    $electronBuilderNsis = Join-Path $env:LOCALAPPDATA "electron-builder\Cache\nsis"
+    if (Test-Path -LiteralPath $electronBuilderNsis) {
+        $cached = Get-ChildItem -LiteralPath $electronBuilderNsis -Recurse -Filter "makensis.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName |
+            Select-Object -First 1
+        if ($cached) {
+            return $cached.FullName
+        }
+    }
+
     throw "NSIS makensis.exe was not found. Install NSIS before building the CLI installer."
 }
 
@@ -87,7 +97,7 @@ try {
     $distRoot = Join-Path $projectRoot "dist"
     $workRoot = Join-Path $projectRoot ".tmp_build\windows-cli-installer"
     $payloadRoot = Join-Path $workRoot "payload"
-    $installerPath = Join-Path $distRoot "RookDuel Avikal CLI.exe"
+    $installerPath = Join-Path $distRoot "RookDuel-Avikal-CLI.exe"
     $nsiPath = Join-Path $workRoot "avikal-cli-installer.nsi"
 
     if (Test-Path -LiteralPath $workRoot) {
@@ -111,10 +121,10 @@ try {
     $nsisScript = @"
 Unicode true
 RequestExecutionLevel user
-Name "RookDuel Avikal CLI Beta"
+Name "RookDuel-Avikal CLI"
 OutFile "$installerPathForNsis"
-InstallDir "`$LOCALAPPDATA\Programs\RookDuel Avikal CLI"
-BrandingText "RookDuel Avikal CLI"
+InstallDir "`$LOCALAPPDATA\Programs\RookDuel-Avikal CLI"
+BrandingText "RookDuel-Avikal CLI"
 SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
@@ -148,14 +158,14 @@ Section "Install"
   `${EndIf}
 
   WriteUninstaller "`$INSTDIR\Uninstall.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "DisplayName" "RookDuel Avikal CLI Beta"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "DisplayVersion" "$versionForNsis"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "Publisher" "RookDuel"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "InstallLocation" "`$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "DisplayIcon" "`$INSTDIR\payload\backend\avikal-backend.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "UninstallString" '"`$INSTDIR\Uninstall.exe"'
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "NoModify" 1
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta" "NoRepair" 1
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "DisplayName" "RookDuel-Avikal CLI"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "DisplayVersion" "$versionForNsis"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "Publisher" "RookDuel"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "InstallLocation" "`$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "DisplayIcon" "`$INSTDIR\payload\backend\avikal-backend.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "UninstallString" '"`$INSTDIR\Uninstall.exe"'
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "NoModify" 1
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"
@@ -163,7 +173,7 @@ Section "Uninstall"
   Delete "`$INSTDIR\Uninstall.exe"
   RMDir /r "`$INSTDIR\payload"
   RMDir "`$INSTDIR"
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel Avikal CLI Beta"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI"
 SectionEnd
 "@
 

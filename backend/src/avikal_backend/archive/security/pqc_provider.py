@@ -8,15 +8,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
-import shutil
 import struct
-import subprocess
 import sys
-import tempfile
-import uuid
-from contextlib import contextmanager
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,35 +22,102 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from ...runtime_paths import backend_root as runtime_backend_root
 from ...runtime_paths import is_frozen as runtime_is_frozen
 from ...runtime_paths import project_root as runtime_project_root
+from .native_bridge import (
+    openssl_derive_secret,
+    openssl_generate_keypair,
+    openssl_kem_decapsulate,
+    openssl_kem_encapsulate,
+    openssl_runtime_version,
+    openssl_sign_message,
+    openssl_verify_signature,
+)
 
 
 PQC_PROVIDER_NAME = "openssl"
 PQC_SUITE_VERSION = 1
 PQC_SUITE_ID = "avikal-pqc-openssl-hybrid-kem-triple-stack-v1"
+PQC_STANDARD_SUITE_ID = "avikal-pqc-std-v1"
+PQC_CUSTOM_SUITE_ID = "avikal-pqc-custom-v1"
+PQC_DEFAULT_SUITE_ID = PQC_SUITE_ID
+ML_KEM_ALGORITHMS = {"ML-KEM-768", "ML-KEM-1024"}
+ML_DSA_ALGORITHMS = {"ML-DSA-65", "ML-DSA-87"}
+SLH_DSA_ALGORITHMS = {
+    "SLH-DSA-SHA2-128s",
+    "SLH-DSA-SHA2-192s",
+    "SLH-DSA-SHA2-256s",
+}
 ML_KEM_ALGORITHM = "ML-KEM-1024"
 X25519_ALGORITHM = "X25519"
 ML_DSA_ALGORITHM = "ML-DSA-87"
 SLH_DSA_ALGORITHM = "SLH-DSA-SHA2-256s"
+ARCHIVE_SIGNING_IDENTITY_FORMAT = "avikal-signing-identity"
+ARCHIVE_SIGNING_IDENTITY_VERSION = 1
 OPENSSL_EXE_NAME = "openssl.exe"
-PQC_PROVIDER_TIMEOUT_SECONDS = 60
 HYBRID_CIPHERTEXT_MAGIC = b"AVKH"
 HYBRID_CIPHERTEXT_VERSION = 1
 MAX_MLKEM_CIPHERTEXT_BYTES = 2048
 MAX_X25519_PUBLIC_PEM_BYTES = 512
+_RUNTIME_INTEGRITY_VERIFIED = False
 
-PQC_SUITE = {
-    "suite_id": PQC_SUITE_ID,
-    "suite_version": PQC_SUITE_VERSION,
-    "provider": PQC_PROVIDER_NAME,
-    "provider_minimum": "OpenSSL 3.5",
-    "algorithms": {
-        "kem": f"{ML_KEM_ALGORITHM}+{X25519_ALGORITHM}",
-        "post_quantum_kem": ML_KEM_ALGORITHM,
-        "classical_kem": X25519_ALGORITHM,
-        "kem_combiner": "HKDF-SHA3-256",
-        "authentication_signature": ML_DSA_ALGORITHM,
-        "long_term_signature": SLH_DSA_ALGORITHM,
-    },
+
+def _ensure_runtime_integrity_verified() -> None:
+    """Fail closed if a frozen runtime's signed crypto files changed."""
+
+    global _RUNTIME_INTEGRITY_VERIFIED
+    if _RUNTIME_INTEGRITY_VERIFIED:
+        return
+    from avikal_backend.runtime_requirements import verify_publisher_runtime_manifest
+
+    verify_publisher_runtime_manifest()
+    _RUNTIME_INTEGRITY_VERIFIED = True
+
+
+def _build_suite(
+    *,
+    suite_id: str,
+    profile: str,
+    post_quantum_kem: str,
+    authentication_signature: str,
+    long_term_signature: str,
+    custom: bool = False,
+) -> dict[str, Any]:
+    return {
+        "suite_id": suite_id,
+        "suite_version": PQC_SUITE_VERSION,
+        "profile": profile,
+        "provider": PQC_PROVIDER_NAME,
+        "provider_minimum": "OpenSSL 3.5",
+        "custom": custom,
+        "algorithms": {
+            "kem": f"{post_quantum_kem}+{X25519_ALGORITHM}",
+            "post_quantum_kem": post_quantum_kem,
+            "classical_kem": X25519_ALGORITHM,
+            "kem_combiner": "HKDF-SHA3-256",
+            "authentication_signature": authentication_signature,
+            "long_term_signature": long_term_signature,
+        },
+    }
+
+
+PQC_SUITE = _build_suite(
+    suite_id=PQC_SUITE_ID,
+    profile="maximum",
+    post_quantum_kem=ML_KEM_ALGORITHM,
+    authentication_signature=ML_DSA_ALGORITHM,
+    long_term_signature=SLH_DSA_ALGORITHM,
+)
+
+PQC_STANDARD_SUITE = _build_suite(
+    suite_id=PQC_STANDARD_SUITE_ID,
+    profile="standard",
+    post_quantum_kem="ML-KEM-768",
+    authentication_signature="ML-DSA-65",
+    long_term_signature="SLH-DSA-SHA2-128s",
+)
+
+PQC_SUITE_REGISTRY = {
+    PQC_SUITE_ID: PQC_SUITE,
+    PQC_STANDARD_SUITE_ID: PQC_STANDARD_SUITE,
 }
 
 
@@ -63,6 +127,78 @@ class PQCProviderUnavailable(RuntimeError):
 
 class PQCProviderError(RuntimeError):
     """Raised when OpenSSL returns malformed or failed output."""
+
+
+def pqc_suite_options() -> dict[str, Any]:
+    """Return the safe PQC choices exposed to UI and CLI callers."""
+    return {
+        "default_suite_id": PQC_DEFAULT_SUITE_ID,
+        "profiles": {
+            "standard": PQC_STANDARD_SUITE,
+            "maximum": PQC_SUITE,
+            "custom": {
+                "suite_id": PQC_CUSTOM_SUITE_ID,
+                "suite_version": PQC_SUITE_VERSION,
+                "profile": "custom",
+                "provider": PQC_PROVIDER_NAME,
+                "provider_minimum": "OpenSSL 3.5",
+                "custom": True,
+                "choices": {
+                    "post_quantum_kem": sorted(ML_KEM_ALGORITHMS),
+                    "authentication_signature": sorted(ML_DSA_ALGORITHMS),
+                    "long_term_signature": sorted(SLH_DSA_ALGORITHMS),
+                    "classical_kem": [X25519_ALGORITHM],
+                    "kem_combiner": ["HKDF-SHA3-256"],
+                },
+            },
+        },
+    }
+
+
+def is_supported_pqc_suite_id(suite_id: str | None) -> bool:
+    return suite_id in PQC_SUITE_REGISTRY or suite_id == PQC_CUSTOM_SUITE_ID
+
+
+def resolve_pqc_suite(
+    suite_id: str | None = None,
+    custom_algorithms: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve and validate an Avikal PQC suite description."""
+    normalized_suite_id = (suite_id or PQC_DEFAULT_SUITE_ID).strip()
+    if normalized_suite_id in PQC_SUITE_REGISTRY:
+        return json.loads(json.dumps(PQC_SUITE_REGISTRY[normalized_suite_id]))
+    if normalized_suite_id != PQC_CUSTOM_SUITE_ID:
+        raise ValueError("Unsupported PQC suite")
+
+    algorithms = custom_algorithms or {}
+    post_quantum_kem = algorithms.get("post_quantum_kem")
+    authentication_signature = algorithms.get("authentication_signature")
+    long_term_signature = algorithms.get("long_term_signature")
+    if post_quantum_kem not in ML_KEM_ALGORITHMS:
+        raise ValueError("Unsupported custom PQC KEM")
+    if authentication_signature not in ML_DSA_ALGORITHMS:
+        raise ValueError("Unsupported custom PQC authentication signature")
+    if long_term_signature not in SLH_DSA_ALGORITHMS:
+        raise ValueError("Unsupported custom PQC long-term signature")
+    return _build_suite(
+        suite_id=PQC_CUSTOM_SUITE_ID,
+        profile="custom",
+        post_quantum_kem=post_quantum_kem,
+        authentication_signature=authentication_signature,
+        long_term_signature=long_term_signature,
+        custom=True,
+    )
+
+
+def _suite_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    suite_id = bundle.get("suite_id")
+    algorithms = bundle.get("algorithms") if isinstance(bundle.get("algorithms"), dict) else {}
+    if suite_id == PQC_CUSTOM_SUITE_ID:
+        return resolve_pqc_suite(suite_id, algorithms)
+    suite = resolve_pqc_suite(suite_id)
+    if algorithms != suite.get("algorithms"):
+        raise ValueError("Invalid PQC bundle algorithm set")
+    return suite
 
 
 def _openssl_binary_name(platform_name: str | None = None) -> str:
@@ -98,37 +234,15 @@ def _package_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _pqc_temp_root() -> Path:
-    configured = os.environ.get("AVIKAL_PQC_TEMP_DIR")
-    if configured:
-        root = Path(configured)
-    elif runtime_is_frozen():
-        root = Path(tempfile.gettempdir()) / "avikal-pqc-provider"
-    else:
-        root = _project_root() / ".tmp_pqc_provider"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-@contextmanager
-def _pqc_work_dir():
-    work_dir = _pqc_temp_root() / f"avikal-pqc-{uuid.uuid4().hex}"
-    work_dir.mkdir(parents=True, exist_ok=False)
-    try:
-        yield work_dir
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-
 def _candidate_openssl_paths() -> list[Path]:
     candidates: list[Path] = []
     openssl_binary_name = _openssl_binary_name()
 
-    env_path = os.environ.get("AVIKAL_OPENSSL_EXEC")
+    env_path = os.environ.get("AVIKAL_OPENSSL_EXEC") if not runtime_is_frozen() else None
     if env_path:
         candidates.append(Path(env_path))
 
-    runtime_dir = os.environ.get("AVIKAL_PQC_RUNTIME_DIR")
+    runtime_dir = os.environ.get("AVIKAL_PQC_RUNTIME_DIR") if not runtime_is_frozen() else None
     if runtime_dir:
         runtime_root = Path(runtime_dir)
         candidates.extend(
@@ -182,66 +296,60 @@ def resolve_openssl_executable() -> Path | None:
     return None
 
 
-def _openssl_modules_dir(openssl_executable: Path) -> Path | None:
-    runtime_root = openssl_executable.parent.parent
-    candidates = [
-        runtime_root / "lib" / "ossl-modules",
-        runtime_root / "lib64" / "ossl-modules",
-        openssl_executable.parent / "ossl-modules",
-    ]
+def resolve_libcrypto_library() -> Path | None:
+    """Resolve the bundled OpenSSL 3 libcrypto used by the native EVP bridge."""
+    candidates: list[Path] = []
+    if sys.platform == "win32":
+        names = ("libcrypto-3-x64.dll", "libcrypto-3.dll")
+    elif sys.platform == "darwin":
+        names = ("libcrypto.3.dylib", "libcrypto.dylib")
+    else:
+        names = ("libcrypto.so.3", "libcrypto.so")
+    for executable_candidate in _candidate_openssl_paths():
+        parent = executable_candidate.parent
+        for library_parent in (parent, parent.parent / "lib", parent.parent / "lib64"):
+            candidates.extend(library_parent / name for name in names)
+    configured = os.environ.get("AVIKAL_LIBCRYPTO_PATH") if not runtime_is_frozen() else None
+    if configured:
+        candidates.insert(0, Path(configured))
     for candidate in candidates:
-        if candidate.exists():
-            return candidate
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved.is_file():
+            return resolved
     return None
 
 
-def _run_openssl(args: list[str], *, cwd: Path | None = None, input_data: bytes | None = None) -> bytes:
-    openssl_executable = require_openssl()
-    env = os.environ.copy()
-    modules_dir = _openssl_modules_dir(openssl_executable)
-    if modules_dir is not None:
-        env["OPENSSL_MODULES"] = str(modules_dir)
-
-    try:
-        completed = subprocess.run(
-            [str(openssl_executable), *args],
-            input=input_data,
-            capture_output=True,
-            cwd=str(cwd) if cwd else None,
-            env=env,
-            timeout=PQC_PROVIDER_TIMEOUT_SECONDS,
-            check=False,
+def require_libcrypto(*, verify_runtime_integrity: bool = True) -> Path:
+    if verify_runtime_integrity:
+        _ensure_runtime_integrity_verified()
+    library = resolve_libcrypto_library()
+    if library is None:
+        raise PQCProviderUnavailable(
+            "Bundled OpenSSL libcrypto is unavailable for native PQC operations."
         )
-    except subprocess.TimeoutExpired as exc:
-        raise PQCProviderError("OpenSSL PQC provider timed out") from exc
-    except OSError as exc:
-        raise PQCProviderUnavailable(f"Unable to execute bundled OpenSSL runtime: {exc}") from exc
-
-    if completed.returncode != 0:
-        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
-        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
-        detail = stderr or stdout or "unknown OpenSSL failure"
-        raise PQCProviderError(f"OpenSSL PQC provider failed: {detail}")
-    return completed.stdout
+    return library
 
 
-def _openssl_version() -> str:
-    output = _run_openssl(["version"])
-    return output.decode("utf-8", errors="replace").strip()
+def _openssl_version(*, verify_runtime_integrity: bool = True) -> str:
+    return openssl_runtime_version(str(require_libcrypto(verify_runtime_integrity=verify_runtime_integrity)))
 
 
-def provider_status() -> dict[str, Any]:
+def provider_status(*, verify_runtime_integrity: bool = True) -> dict[str, Any]:
     """Report whether the bundled OpenSSL PQC runtime is available."""
     executable = resolve_openssl_executable()
-    if executable is None:
+    library = resolve_libcrypto_library()
+    if library is None:
         return {
             "available": False,
             "provider": PQC_PROVIDER_NAME,
             "suite": PQC_SUITE,
+            "suite_options": pqc_suite_options(),
             "reason": (
-                "OpenSSL PQC provider is unavailable. Bundle OpenSSL 3.5+ "
-                f"{_openssl_binary_name()} under runtime/pqc or set AVIKAL_OPENSSL_EXEC "
-                "or AVIKAL_PQC_RUNTIME_DIR."
+                "OpenSSL PQC provider is unavailable. Bundle the OpenSSL 3.5+ "
+                "libcrypto runtime under runtime/pqc."
             ),
         }
 
@@ -249,10 +357,13 @@ def provider_status() -> dict[str, Any]:
         "available": True,
         "provider": PQC_PROVIDER_NAME,
         "suite": PQC_SUITE,
-        "executable": str(executable),
+        "suite_options": pqc_suite_options(),
+        "executable": str(executable) if executable else None,
+        "libcrypto": str(library),
+        "execution_mode": "native_evp",
     }
     try:
-        status["openssl_version"] = _openssl_version()
+        status["openssl_version"] = _openssl_version(verify_runtime_integrity=verify_runtime_integrity)
     except Exception as exc:
         status["available"] = False
         status["reason"] = f"Bundled OpenSSL runtime is not usable: {exc}"
@@ -261,30 +372,15 @@ def provider_status() -> dict[str, Any]:
 
 def require_openssl() -> Path:
     """Resolve the OpenSSL executable or raise a fail-closed error."""
+    _ensure_runtime_integrity_verified()
     executable = resolve_openssl_executable()
     if executable is None:
         raise PQCProviderUnavailable(provider_status()["reason"])
     return executable
 
 
-def _write_bytes(path: Path, data: bytes) -> None:
-    path.write_bytes(data)
-
-
-def _write_text(path: Path, data: str) -> None:
-    path.write_text(data, encoding="utf-8", newline="\n")
-
-
-def _read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
-
-
-def _generate_keypair(work_dir: Path, algorithm: str, stem: str) -> tuple[str, str]:
-    private_path = work_dir / f"{stem}_private.pem"
-    public_path = work_dir / f"{stem}_public.pem"
-    _run_openssl(["genpkey", "-algorithm", algorithm, "-out", private_path.name], cwd=work_dir)
-    _run_openssl(["pkey", "-in", private_path.name, "-pubout", "-out", public_path.name], cwd=work_dir)
-    return _read_text(private_path), _read_text(public_path)
+def _generate_keypair(algorithm: str) -> tuple[str, str]:
+    return openssl_generate_keypair(str(require_libcrypto()), algorithm)
 
 
 def _public_binding(public_bundle: dict[str, Any]) -> bytes:
@@ -293,117 +389,25 @@ def _public_binding(public_bundle: dict[str, Any]) -> bytes:
     return _canonical_json(binding)
 
 
-def _sign_message(work_dir: Path, private_pem: str, message: bytes, stem: str) -> bytes:
-    private_path = work_dir / f"{stem}_sign_private.pem"
-    message_path = work_dir / f"{stem}_message.bin"
-    signature_path = work_dir / f"{stem}_signature.bin"
-    _write_text(private_path, private_pem)
-    _write_bytes(message_path, message)
-    _run_openssl(
-        [
-            "pkeyutl",
-            "-sign",
-            "-rawin",
-            "-inkey",
-            private_path.name,
-            "-in",
-            message_path.name,
-            "-out",
-            signature_path.name,
-        ],
-        cwd=work_dir,
-    )
-    return signature_path.read_bytes()
+def _sign_message(private_pem: str, message: bytes) -> bytes:
+    return openssl_sign_message(str(require_libcrypto()), private_pem, message)
 
 
-def _verify_signature(work_dir: Path, public_pem: str, message: bytes, signature: bytes, stem: str) -> None:
-    public_path = work_dir / f"{stem}_verify_public.pem"
-    message_path = work_dir / f"{stem}_verify_message.bin"
-    signature_path = work_dir / f"{stem}_verify_signature.bin"
-    _write_text(public_path, public_pem)
-    _write_bytes(message_path, message)
-    _write_bytes(signature_path, signature)
-    _run_openssl(
-        [
-            "pkeyutl",
-            "-verify",
-            "-rawin",
-            "-pubin",
-            "-inkey",
-            public_path.name,
-            "-in",
-            message_path.name,
-            "-sigfile",
-            signature_path.name,
-        ],
-        cwd=work_dir,
-    )
+def _verify_signature(public_pem: str, message: bytes, signature: bytes) -> None:
+    if not openssl_verify_signature(str(require_libcrypto()), public_pem, message, signature):
+        raise PQCProviderError("OpenSSL PQC signature verification failed")
 
 
-def _encapsulate_mlkem(work_dir: Path, public_pem: str) -> tuple[bytes, bytes]:
-    public_path = work_dir / "mlkem_public.pem"
-    ciphertext_path = work_dir / "mlkem_ciphertext.bin"
-    secret_path = work_dir / "mlkem_shared_secret.bin"
-    _write_text(public_path, public_pem)
-    _run_openssl(
-        [
-            "pkeyutl",
-            "-encap",
-            "-pubin",
-            "-inkey",
-            public_path.name,
-            "-out",
-            ciphertext_path.name,
-            "-secret",
-            secret_path.name,
-        ],
-        cwd=work_dir,
-    )
-    return ciphertext_path.read_bytes(), secret_path.read_bytes()
+def _encapsulate_mlkem(public_pem: str) -> tuple[bytes, bytes]:
+    return openssl_kem_encapsulate(str(require_libcrypto()), public_pem)
 
 
-def _decapsulate_mlkem(work_dir: Path, private_pem: str, pqc_ciphertext: bytes) -> bytes:
-    private_path = work_dir / "mlkem_private.pem"
-    ciphertext_path = work_dir / "mlkem_ciphertext.bin"
-    secret_path = work_dir / "mlkem_shared_secret.bin"
-    _write_text(private_path, private_pem)
-    _write_bytes(ciphertext_path, pqc_ciphertext)
-    _run_openssl(
-        [
-            "pkeyutl",
-            "-decap",
-            "-inkey",
-            private_path.name,
-            "-in",
-            ciphertext_path.name,
-            "-secret",
-            secret_path.name,
-        ],
-        cwd=work_dir,
-    )
-    return secret_path.read_bytes()
+def _decapsulate_mlkem(private_pem: str, pqc_ciphertext: bytes) -> bytes:
+    return openssl_kem_decapsulate(str(require_libcrypto()), private_pem, pqc_ciphertext)
 
 
-def _derive_x25519(work_dir: Path, private_pem: str, peer_public_pem: str, stem: str) -> bytes:
-    private_path = work_dir / f"{stem}_private.pem"
-    peer_public_path = work_dir / f"{stem}_peer_public.pem"
-    secret_path = work_dir / f"{stem}_shared_secret.bin"
-    _write_text(private_path, private_pem)
-    _write_text(peer_public_path, peer_public_pem)
-    _run_openssl(
-        [
-            "pkeyutl",
-            "-derive",
-            "-inkey",
-            private_path.name,
-            "-peerkey",
-            peer_public_path.name,
-            "-out",
-            secret_path.name,
-        ],
-        cwd=work_dir,
-    )
-    return secret_path.read_bytes()
+def _derive_x25519(private_pem: str, peer_public_pem: str) -> bytes:
+    return openssl_derive_secret(str(require_libcrypto()), private_pem, peer_public_pem)
 
 
 def _length_prefixed(*parts: bytes) -> bytes:
@@ -416,13 +420,17 @@ def _length_prefixed(*parts: bytes) -> bytes:
     return bytes(encoded)
 
 
-def _combine_hybrid_kem_secrets(mlkem_secret: bytes, x25519_secret: bytes) -> bytes:
+def _combine_hybrid_kem_secrets(mlkem_secret: bytes, x25519_secret: bytes, suite: dict[str, Any]) -> bytes:
     """Combine independent KEM secrets into one domain-separated suite secret."""
+    suite_id = suite.get("suite_id") or PQC_SUITE_ID
+    info = b"avikal_pqc_hybrid_kem_v1"
+    if suite_id != PQC_SUITE_ID:
+        info = f"avikal_pqc_hybrid_kem_v1|{suite_id}".encode("ascii")
     hkdf = HKDF(
         algorithm=hashes.SHA3_256(),
         length=32,
         salt=None,
-        info=b"avikal_pqc_hybrid_kem_v1",
+        info=info,
     )
     return hkdf.derive(_length_prefixed(mlkem_secret, x25519_secret))
 
@@ -479,8 +487,11 @@ def compute_pqc_key_id(public_bundle: dict[str, Any], pqc_ciphertext: bytes) -> 
         raise ValueError("PQC public bundle is required")
     if not pqc_ciphertext:
         raise ValueError("PQC ciphertext is required")
+    suite_id = public_bundle.get("suite_id")
+    if not is_supported_pqc_suite_id(suite_id):
+        raise ValueError("Unsupported PQC public bundle")
     digest = hashlib.sha256()
-    digest.update(PQC_SUITE_ID.encode("ascii"))
+    digest.update(str(suite_id).encode("ascii"))
     digest.update(b"\x00")
     digest.update(_canonical_json(public_bundle))
     digest.update(b"\x00")
@@ -488,82 +499,189 @@ def compute_pqc_key_id(public_bundle: dict[str, Any], pqc_ciphertext: bytes) -> 
     return digest.hexdigest()
 
 
-def create_pqc_archive_material(*, archive_filename: str) -> dict[str, Any]:
+def create_pqc_archive_material(
+    *,
+    archive_filename: str,
+    suite_id: str | None = None,
+    custom_algorithms: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Generate archive-specific PQC material through the bundled OpenSSL runtime.
     """
     status = provider_status()
     if not status.get("available"):
         raise PQCProviderUnavailable(str(status.get("reason")))
+    suite = resolve_pqc_suite(suite_id, custom_algorithms)
+    algorithms = suite["algorithms"]
+    ml_kem_algorithm = algorithms["post_quantum_kem"]
+    ml_dsa_algorithm = algorithms["authentication_signature"]
+    slh_dsa_algorithm = algorithms["long_term_signature"]
 
-    with _pqc_work_dir() as work_dir:
-        mlkem_private, mlkem_public = _generate_keypair(work_dir, ML_KEM_ALGORITHM, "mlkem")
-        x25519_private, x25519_public = _generate_keypair(work_dir, X25519_ALGORITHM, "x25519")
-        x25519_ephemeral_private, x25519_ephemeral_public = _generate_keypair(
-            work_dir,
-            X25519_ALGORITHM,
-            "x25519_ephemeral",
-        )
-        mldsa_private, mldsa_public = _generate_keypair(work_dir, ML_DSA_ALGORITHM, "mldsa")
-        slhdsa_private, slhdsa_public = _generate_keypair(work_dir, SLH_DSA_ALGORITHM, "slhdsa")
-        mlkem_ciphertext, mlkem_shared_secret = _encapsulate_mlkem(work_dir, mlkem_public)
-        x25519_shared_secret = _derive_x25519(
-            work_dir,
-            x25519_ephemeral_private,
-            x25519_public,
-            "x25519_enc",
-        )
-        ciphertext = _pack_hybrid_ciphertext(mlkem_ciphertext, x25519_ephemeral_public)
-        shared_secret = _combine_hybrid_kem_secrets(mlkem_shared_secret, x25519_shared_secret)
+    operation_started = time.perf_counter()
+    keygen_started = time.perf_counter()
+    mlkem_private, mlkem_public = _generate_keypair(ml_kem_algorithm)
+    x25519_private, x25519_public = _generate_keypair(X25519_ALGORITHM)
+    x25519_ephemeral_private, x25519_ephemeral_public = _generate_keypair(X25519_ALGORITHM)
+    mldsa_private, mldsa_public = _generate_keypair(ml_dsa_algorithm)
+    slhdsa_private, slhdsa_public = _generate_keypair(slh_dsa_algorithm)
+    keygen_ms = (time.perf_counter() - keygen_started) * 1000
+    kem_started = time.perf_counter()
+    mlkem_ciphertext, mlkem_shared_secret = _encapsulate_mlkem(mlkem_public)
+    x25519_shared_secret = _derive_x25519(x25519_ephemeral_private, x25519_public)
+    ciphertext = _pack_hybrid_ciphertext(mlkem_ciphertext, x25519_ephemeral_public)
+    shared_secret = _combine_hybrid_kem_secrets(mlkem_shared_secret, x25519_shared_secret, suite)
+    kem_ms = (time.perf_counter() - kem_started) * 1000
 
-        public_bundle: dict[str, Any] = {
-            "suite_id": PQC_SUITE_ID,
-            "suite_version": PQC_SUITE_VERSION,
-            "provider": PQC_PROVIDER_NAME,
-            "openssl_version": status.get("openssl_version"),
-            "archive_filename": archive_filename,
-            "algorithms": dict(PQC_SUITE["algorithms"]),
-            "keys": {
-                "ml_kem_public_pem": mlkem_public,
-                "x25519_public_pem": x25519_public,
-                "ml_dsa_public_pem": mldsa_public,
-                "slh_dsa_public_pem": slhdsa_public,
-            },
-        }
-        binding = _public_binding(public_bundle)
-        public_bundle["signatures"] = {
-            "ml_dsa_binding": _b64encode(_sign_message(work_dir, mldsa_private, binding, "mldsa")),
-            "slh_dsa_binding": _b64encode(_sign_message(work_dir, slhdsa_private, binding, "slhdsa")),
-        }
+    public_bundle: dict[str, Any] = {
+        "suite_id": suite["suite_id"],
+        "suite_version": suite["suite_version"],
+        "suite_profile": suite.get("profile"),
+        "provider": PQC_PROVIDER_NAME,
+        "openssl_version": status.get("openssl_version"),
+        "archive_filename": archive_filename,
+        "algorithms": dict(suite["algorithms"]),
+        "keys": {
+            "ml_kem_public_pem": mlkem_public,
+            "x25519_public_pem": x25519_public,
+            "ml_dsa_public_pem": mldsa_public,
+            "slh_dsa_public_pem": slhdsa_public,
+        },
+    }
+    binding = _public_binding(public_bundle)
+    bundle_signing_started = time.perf_counter()
+    public_bundle["signatures"] = {
+        "ml_dsa_binding": _b64encode(_sign_message(mldsa_private, binding)),
+        "slh_dsa_binding": _b64encode(_sign_message(slhdsa_private, binding)),
+    }
+    bundle_signing_ms = (time.perf_counter() - bundle_signing_started) * 1000
 
-        private_bundle = {
-            "suite_id": PQC_SUITE_ID,
-            "suite_version": PQC_SUITE_VERSION,
-            "provider": PQC_PROVIDER_NAME,
-            "openssl_version": status.get("openssl_version"),
-            "algorithms": dict(PQC_SUITE["algorithms"]),
-            "keys": {
-                "ml_kem_private_pem": mlkem_private,
-                "x25519_private_pem": x25519_private,
-                "ml_dsa_private_pem": mldsa_private,
-                "slh_dsa_private_pem": slhdsa_private,
-            },
-        }
+    private_bundle = {
+        "suite_id": suite["suite_id"],
+        "suite_version": suite["suite_version"],
+        "suite_profile": suite.get("profile"),
+        "provider": PQC_PROVIDER_NAME,
+        "openssl_version": status.get("openssl_version"),
+        "algorithms": dict(suite["algorithms"]),
+        "keys": {
+            "ml_kem_private_pem": mlkem_private,
+            "x25519_private_pem": x25519_private,
+            "ml_dsa_private_pem": mldsa_private,
+            "slh_dsa_private_pem": slhdsa_private,
+        },
+    }
 
     return {
-        "suite": PQC_SUITE,
-        "algorithm": PQC_SUITE_ID,
+        "suite": suite,
+        "algorithm": suite["suite_id"],
         "key_id": compute_pqc_key_id(public_bundle, ciphertext),
         "public_bundle": public_bundle,
         "private_bundle": private_bundle,
         "ciphertext": ciphertext,
         "shared_secret": shared_secret,
+        "telemetry": {
+            "keygen_ms": round(keygen_ms, 2),
+            "kem_ms": round(kem_ms, 2),
+            "bundle_signing_ms": round(bundle_signing_ms, 2),
+            "total_ms": round((time.perf_counter() - operation_started) * 1000, 2),
+            "execution_mode": "native_evp",
+        },
     }
 
 
+def create_archive_signing_identity(*, label: str = "", persistent: bool = False) -> dict[str, Any]:
+    """Generate a dedicated dual-PQC archive signing identity."""
+    status = provider_status()
+    if not status.get("available"):
+        raise PQCProviderUnavailable(str(status.get("reason")))
+    keygen_started = time.perf_counter()
+    ml_private, ml_public = _generate_keypair(ML_DSA_ALGORITHM)
+    slh_private, slh_public = _generate_keypair(SLH_DSA_ALGORITHM)
+    keygen_ms = (time.perf_counter() - keygen_started) * 1000
+    public_core = {
+        "algorithms": {"ml_dsa": ML_DSA_ALGORITHM, "slh_dsa": SLH_DSA_ALGORITHM},
+        "format": ARCHIVE_SIGNING_IDENTITY_FORMAT,
+        "keys": {"ml_dsa_public_pem": ml_public, "slh_dsa_public_pem": slh_public},
+        "persistent": bool(persistent),
+        "version": ARCHIVE_SIGNING_IDENTITY_VERSION,
+    }
+    identity_id = hashlib.sha256(_canonical_json(public_core)).hexdigest()
+    public_bundle = dict(public_core)
+    public_bundle["identity_id"] = identity_id
+    public_bundle["label"] = str(label or "")[:128]
+    private_bundle = {
+        "algorithms": dict(public_core["algorithms"]),
+        "format": ARCHIVE_SIGNING_IDENTITY_FORMAT,
+        "identity_id": identity_id,
+        "keys": {"ml_dsa_private_pem": ml_private, "slh_dsa_private_pem": slh_private},
+        "persistent": bool(persistent),
+        "version": ARCHIVE_SIGNING_IDENTITY_VERSION,
+    }
+    return {
+        "identity_id": identity_id,
+        "public_bundle": public_bundle,
+        "private_bundle": private_bundle,
+        "telemetry": {"keygen_ms": round(keygen_ms, 2), "execution_mode": "native_evp"},
+    }
+
+
+def _validate_signing_public_bundle(public_bundle: dict[str, Any]) -> None:
+    if public_bundle.get("format") != ARCHIVE_SIGNING_IDENTITY_FORMAT:
+        _validate_public_bundle(public_bundle)
+        return
+    if public_bundle.get("version") != ARCHIVE_SIGNING_IDENTITY_VERSION:
+        raise ValueError("Unsupported archive signing identity")
+    keys = public_bundle.get("keys")
+    algorithms = public_bundle.get("algorithms")
+    if not isinstance(keys, dict) or not isinstance(algorithms, dict):
+        raise ValueError("Invalid archive signing identity")
+    if algorithms.get("ml_dsa") not in ML_DSA_ALGORITHMS or algorithms.get("slh_dsa") not in SLH_DSA_ALGORITHMS:
+        raise ValueError("Unsupported archive signing identity algorithms")
+    for name in ("ml_dsa_public_pem", "slh_dsa_public_pem"):
+        if not isinstance(keys.get(name), str) or "PUBLIC KEY" not in keys[name]:
+            raise ValueError("Invalid archive signing public key")
+    core = {key: public_bundle[key] for key in ("algorithms", "format", "keys", "persistent", "version")}
+    expected_id = hashlib.sha256(_canonical_json(core)).hexdigest()
+    if not hmac.compare_digest(str(public_bundle.get("identity_id") or ""), expected_id):
+        raise ValueError("Archive signing identity fingerprint is invalid")
+
+
+def _validate_signing_private_bundle(private_bundle: dict[str, Any]) -> None:
+    if private_bundle.get("format") != ARCHIVE_SIGNING_IDENTITY_FORMAT:
+        _validate_private_bundle(private_bundle)
+        return
+    if private_bundle.get("version") != ARCHIVE_SIGNING_IDENTITY_VERSION:
+        raise ValueError("Unsupported archive signing identity")
+    keys = private_bundle.get("keys")
+    algorithms = private_bundle.get("algorithms")
+    if not isinstance(keys, dict) or not isinstance(algorithms, dict):
+        raise ValueError("Invalid archive signing identity")
+    if algorithms.get("ml_dsa") not in ML_DSA_ALGORITHMS or algorithms.get("slh_dsa") not in SLH_DSA_ALGORITHMS:
+        raise ValueError("Unsupported archive signing identity algorithms")
+    for name in ("ml_dsa_private_pem", "slh_dsa_private_pem"):
+        if not isinstance(keys.get(name), str) or "PRIVATE KEY" not in keys[name]:
+            raise ValueError("Invalid archive signing private key")
+
+
+def validate_archive_signing_identity(identity: dict[str, Any], *, require_private: bool = True) -> dict[str, Any]:
+    """Validate matching public/private signing identity material."""
+    if not isinstance(identity, dict):
+        raise ValueError("Archive signing identity must be an object")
+    public_bundle = identity.get("public_bundle")
+    private_bundle = identity.get("private_bundle")
+    if not isinstance(public_bundle, dict):
+        raise ValueError("Archive signing public identity is missing")
+    _validate_signing_public_bundle(public_bundle)
+    if require_private:
+        if not isinstance(private_bundle, dict):
+            raise ValueError("Archive signing private identity is missing")
+        _validate_signing_private_bundle(private_bundle)
+        if public_bundle.get("identity_id") != private_bundle.get("identity_id"):
+            raise ValueError("Archive signing identity key material does not match")
+    return {"identity_id": public_bundle["identity_id"], "public_bundle": public_bundle, "private_bundle": private_bundle}
+
+
 def _validate_public_bundle(public_bundle: dict[str, Any]) -> None:
-    if public_bundle.get("suite_id") != PQC_SUITE_ID:
-        raise ValueError("Unsupported PQC public bundle")
+    suite = _suite_from_bundle(public_bundle)
     keys = public_bundle.get("keys")
     signatures = public_bundle.get("signatures")
     if not isinstance(keys, dict) or not isinstance(signatures, dict):
@@ -576,8 +694,7 @@ def _validate_public_bundle(public_bundle: dict[str, Any]) -> None:
 
 
 def _validate_private_bundle(private_bundle: dict[str, Any]) -> None:
-    if private_bundle.get("suite_id") != PQC_SUITE_ID:
-        raise ValueError("Unsupported PQC private bundle")
+    _suite_from_bundle(private_bundle)
     keys = private_bundle.get("keys")
     if not isinstance(keys, dict):
         raise ValueError("Invalid PQC private bundle")
@@ -599,6 +716,10 @@ def decapsulate_pqc_archive_material(
         raise PQCProviderUnavailable(str(status.get("reason")))
     _validate_private_bundle(private_bundle)
     _validate_public_bundle(public_bundle)
+    public_suite = _suite_from_bundle(public_bundle)
+    private_suite = _suite_from_bundle(private_bundle)
+    if public_suite["suite_id"] != private_suite["suite_id"] or public_suite["algorithms"] != private_suite["algorithms"]:
+        raise ValueError("PQC public and private bundles use different suites")
 
     computed_key_id = compute_pqc_key_id(public_bundle, pqc_ciphertext)
     if expected_key_id and computed_key_id != expected_key_id:
@@ -608,26 +729,81 @@ def decapsulate_pqc_archive_material(
     private_keys = private_bundle["keys"]
     binding = _public_binding(public_bundle)
     mlkem_ciphertext, x25519_ephemeral_public = _unpack_hybrid_ciphertext(pqc_ciphertext)
-    with _pqc_work_dir() as work_dir:
+    _verify_signature(
+        public_keys["ml_dsa_public_pem"],
+        binding,
+        _b64decode(public_bundle["signatures"]["ml_dsa_binding"], "ml_dsa_binding"),
+    )
+    _verify_signature(
+        public_keys["slh_dsa_public_pem"],
+        binding,
+        _b64decode(public_bundle["signatures"]["slh_dsa_binding"], "slh_dsa_binding"),
+    )
+    mlkem_shared_secret = _decapsulate_mlkem(private_keys["ml_kem_private_pem"], mlkem_ciphertext)
+    x25519_shared_secret = _derive_x25519(
+        private_keys["x25519_private_pem"],
+        x25519_ephemeral_public,
+    )
+    return _combine_hybrid_kem_secrets(mlkem_shared_secret, x25519_shared_secret, public_suite)
+
+
+MAX_ARCHIVE_SIGNING_MESSAGE_BYTES = 16 * 1024
+
+
+def sign_pqc_archive_manifest(
+    *,
+    private_bundle: dict[str, Any],
+    manifest: bytes,
+) -> dict[str, str]:
+    """Sign a bounded canonical archive manifest with both configured PQC schemes."""
+    status = provider_status()
+    if not status.get("available"):
+        raise PQCProviderUnavailable(str(status.get("reason")))
+    _validate_signing_private_bundle(private_bundle)
+    message = bytes(manifest)
+    if not message or len(message) > MAX_ARCHIVE_SIGNING_MESSAGE_BYTES:
+        raise ValueError("Archive signing manifest size is out of bounds")
+
+    keys = private_bundle["keys"]
+    return {
+        "ml_dsa": _b64encode(_sign_message(keys["ml_dsa_private_pem"], message)),
+        "slh_dsa": _b64encode(_sign_message(keys["slh_dsa_private_pem"], message)),
+    }
+
+
+def verify_pqc_archive_manifest(
+    *,
+    public_bundle: dict[str, Any],
+    manifest: bytes,
+    signatures: dict[str, str],
+) -> None:
+    """Require valid ML-DSA and SLH-DSA signatures for an archive manifest."""
+    status = provider_status()
+    if not status.get("available"):
+        raise PQCProviderUnavailable(str(status.get("reason")))
+    _validate_signing_public_bundle(public_bundle)
+    message = bytes(manifest)
+    if not message or len(message) > MAX_ARCHIVE_SIGNING_MESSAGE_BYTES:
+        raise ValueError("Archive signing manifest size is out of bounds")
+    if not isinstance(signatures, dict):
+        raise ValueError("Archive signatures are missing")
+
+    keys = public_bundle["keys"]
+    ml_public_name = "ml_dsa_public_pem"
+    slh_public_name = "slh_dsa_public_pem"
+    if public_bundle.get("format") != ARCHIVE_SIGNING_IDENTITY_FORMAT:
+        ml_public_name = "ml_dsa_public_pem"
+        slh_public_name = "slh_dsa_public_pem"
+    try:
         _verify_signature(
-            work_dir,
-            public_keys["ml_dsa_public_pem"],
-            binding,
-            _b64decode(public_bundle["signatures"]["ml_dsa_binding"], "ml_dsa_binding"),
-            "mldsa",
+            keys[ml_public_name],
+            message,
+            _b64decode(signatures.get("ml_dsa"), "archive_ml_dsa"),
         )
         _verify_signature(
-            work_dir,
-            public_keys["slh_dsa_public_pem"],
-            binding,
-            _b64decode(public_bundle["signatures"]["slh_dsa_binding"], "slh_dsa_binding"),
-            "slhdsa",
+            keys[slh_public_name],
+            message,
+            _b64decode(signatures.get("slh_dsa"), "archive_slh_dsa"),
         )
-        mlkem_shared_secret = _decapsulate_mlkem(work_dir, private_keys["ml_kem_private_pem"], mlkem_ciphertext)
-        x25519_shared_secret = _derive_x25519(
-            work_dir,
-            private_keys["x25519_private_pem"],
-            x25519_ephemeral_public,
-            "x25519_dec",
-        )
-        return _combine_hybrid_kem_secrets(mlkem_shared_secret, x25519_shared_secret)
+    except Exception as exc:
+        raise ValueError("Archive PQC signature verification failed") from exc

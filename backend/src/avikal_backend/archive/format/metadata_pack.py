@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import unicodedata
 
 from ..path_safety import normalize_single_archive_filename
 from ..security.key_wrap import PAYLOAD_KEY_WRAP_ALGORITHM
@@ -17,8 +18,67 @@ from ..security.pqc_keyfile import PQC_STORAGE_MODE_EMBEDDED, PQC_STORAGE_MODE_E
 
 METADATA_FORMAT_VERSION = 0x01
 METADATA_FORMAT_VERSION_EMBEDDED = 0x02
-SUPPORTED_METADATA_FORMAT_VERSIONS = {METADATA_FORMAT_VERSION, METADATA_FORMAT_VERSION_EMBEDDED}
+METADATA_FORMAT_VERSION_ASSURED = 0x03
+SUPPORTED_METADATA_FORMAT_VERSIONS = {
+    METADATA_FORMAT_VERSION,
+    METADATA_FORMAT_VERSION_EMBEDDED,
+    METADATA_FORMAT_VERSION_ASSURED,
+}
 MAX_METADATA_SIZE = 10 * 1024
+MAX_SENDER_MESSAGE_BYTES = 1024
+MAX_SENDER_MESSAGE_WORDS = 100
+MAX_VERSION_TEXT_BYTES = 32
+
+FEATURE_ASSURED_REPORTS = 0x0001
+FEATURE_INDEXED_PAYLOAD = 0x0002
+FEATURE_MANDATORY_SIGNATURE = 0x0004
+
+_BIDI_CONTROL_CODEPOINTS = {
+    0x061C,
+    0x200E,
+    0x200F,
+    0x202A,
+    0x202B,
+    0x202C,
+    0x202D,
+    0x202E,
+    0x2066,
+    0x2067,
+    0x2068,
+    0x2069,
+}
+
+
+def normalize_sender_message(value: str | None) -> str:
+    """Normalize and bound an encrypted sender note before serialization."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("Sender message must be text")
+    normalized = unicodedata.normalize("NFC", value.replace("\r\n", "\n").replace("\r", "\n")).strip()
+    if not normalized:
+        return ""
+    for character in normalized:
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if codepoint in _BIDI_CONTROL_CODEPOINTS:
+            raise ValueError("Sender message contains unsupported directional controls")
+        if category in {"Cc", "Cf"} and character != "\n":
+            raise ValueError("Sender message contains unsupported control characters")
+    if len(normalized.split()) > MAX_SENDER_MESSAGE_WORDS:
+        raise ValueError(f"Sender message must not exceed {MAX_SENDER_MESSAGE_WORDS} words")
+    if len(normalized.encode("utf-8")) > MAX_SENDER_MESSAGE_BYTES:
+        raise ValueError(f"Sender message must not exceed {MAX_SENDER_MESSAGE_BYTES} UTF-8 bytes")
+    return normalized
+
+
+def _validate_version_text(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} is required")
+    normalized = value.strip()
+    if len(normalized.encode("utf-8")) > MAX_VERSION_TEXT_BYTES:
+        raise ValueError(f"{field_name} is too long")
+    return normalized
 
 
 def pack_cascade_metadata(
@@ -57,6 +117,13 @@ def pack_cascade_metadata(
     manifest_hash: bytes = None,
     payload_key_wrap_algorithm: str = None,
     wrapped_payload_key: bytes = None,
+    created_with_version: str = "1.0.6",
+    minimum_reader_version: str = "1.0.6",
+    required_features: int = FEATURE_ASSURED_REPORTS | FEATURE_MANDATORY_SIGNATURE,
+    sender_message: str = "",
+    folder_count: int = 0,
+    content_index_hash: bytes = None,
+    payload_merkle_root: bytes = None,
 ) -> bytes:
     """
     Pack current public metadata format v1.
@@ -139,7 +206,19 @@ def pack_cascade_metadata(
             raise ValueError("Payload key wrap algorithm requires wrapped payload key material")
         payload_key_wrap_algorithm = ""
 
-    metadata_version = METADATA_FORMAT_VERSION_EMBEDDED if pqc_required and pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED else METADATA_FORMAT_VERSION
+    created_with_version = _validate_version_text(created_with_version, "Creator version")
+    minimum_reader_version = _validate_version_text(minimum_reader_version, "Minimum reader version")
+    sender_message = normalize_sender_message(sender_message)
+    if not isinstance(required_features, int) or required_features < 0 or required_features > 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("Required feature flags are invalid")
+    if not isinstance(folder_count, int) or folder_count < 0 or folder_count > 0xFFFFFFFF:
+        raise ValueError("Folder count is invalid")
+    content_index_hash = bytes(content_index_hash or (b"\x00" * 32))
+    payload_merkle_root = bytes(payload_merkle_root or (b"\x00" * 32))
+    if len(content_index_hash) != 32 or len(payload_merkle_root) != 32:
+        raise ValueError("Index hash and payload Merkle root must be 32 bytes")
+
+    metadata_version = METADATA_FORMAT_VERSION_ASSURED
     flags = 0x01 if keyphrase_protected else 0x00
     packed = struct.pack(">BBB", metadata_version, flags, len(method_bytes))
     packed += method_bytes
@@ -176,8 +255,7 @@ def pack_cascade_metadata(
     packed += struct.pack(">B", 1 if pqc_required else 0)
     packed += _pack_short_text(pqc_algorithm or "", 64, "PQC algorithm")
     packed += _pack_short_text(pqc_key_id or "", 128, "PQC key identifier")
-    if metadata_version == METADATA_FORMAT_VERSION_EMBEDDED:
-        packed += _pack_short_text(pqc_storage_mode, 32, "PQC storage mode")
+    packed += _pack_short_text(pqc_storage_mode if pqc_required else "", 32, "PQC storage mode")
 
     packed += _pack_short_text(archive_type, 32, "Archive type")
     packed += struct.pack(">IQ", entry_count, total_original_size)
@@ -194,6 +272,13 @@ def pack_cascade_metadata(
     packed += _pack_short_text(payload_key_wrap_algorithm, 64, "Payload key wrap algorithm")
     packed += struct.pack(">B", len(wrapped_payload_key))
     packed += wrapped_payload_key
+
+    packed += _pack_short_text(created_with_version, MAX_VERSION_TEXT_BYTES, "Creator version")
+    packed += _pack_short_text(minimum_reader_version, MAX_VERSION_TEXT_BYTES, "Minimum reader version")
+    packed += struct.pack(">QI", required_features, folder_count)
+    packed += content_index_hash
+    packed += payload_merkle_root
+    packed += _pack_long_text(sender_message, MAX_SENDER_MESSAGE_BYTES, "Sender message")
 
     if len(packed) > MAX_METADATA_SIZE:
         raise ValueError(

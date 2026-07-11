@@ -1,4 +1,4 @@
-interface PasswordStrengthMeterProps {
+﻿interface PasswordStrengthMeterProps {
   password: string
   title?: string
   compact?: boolean
@@ -65,10 +65,10 @@ function getStrengthTone(score: number, invalidMessage?: string) {
 function RulePill({ ok, label }: { ok: boolean; label: string }) {
   return (
     <div
-      className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition-colors ${
+      className={`flex items-center gap-2 text-[11px] font-semibold transition-colors ${
         ok
-          ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-          : 'border-av-border/40 bg-av-surface/55 text-av-muted'
+          ? 'text-emerald-700 dark:text-emerald-300'
+          : 'text-av-muted'
       }`}
     >
       <span
@@ -95,26 +95,26 @@ export default function PasswordStrengthMeter({
 
   return (
     <div
-      className={`rounded-2xl border border-av-border/40 bg-white/74 p-4 shadow-[0_12px_30px_rgba(15,23,42,0.06)] backdrop-blur-xl dark:bg-white/[0.045] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${className}`}
+      className={`rounded-2xl border border-av-border/35 bg-av-surface/55 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.45)] dark:bg-white/[0.025] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] ${className}`}
     >
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-av-muted">{title}</p>
           {!compact && <p className="mt-1 text-[11px] text-av-muted">12+ chars with mixed case, number, and symbol.</p>}
         </div>
-        <span className={`rounded-full border border-current/20 px-2.5 py-1 text-[10px] font-bold tracking-[0.14em] ${tone.labelClass}`}>
+        <span className={`text-[10px] font-bold uppercase tracking-[0.14em] ${tone.labelClass}`}>
           {tone.label}
         </span>
       </div>
 
-      <div className="mb-3 h-2 overflow-hidden rounded-full bg-av-border/35 shadow-inner dark:bg-black/35">
+      <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-av-border/35 dark:bg-white/10">
         <div
           style={{ width: `${displayScore}%` }}
           className={`h-full rounded-full transition-all duration-500 ease-out ${tone.barClass}`}
         />
       </div>
 
-      <div className={`grid gap-2 ${compact ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'}`}>
+      <div className={`grid gap-x-4 gap-y-2 ${compact ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'}`}>
         <RulePill ok={rules.hasMinLen} label="12+ chars" />
         <RulePill ok={rules.hasUpper} label="Uppercase" />
         <RulePill ok={rules.hasLower} label="Lowercase" />

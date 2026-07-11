@@ -53,16 +53,51 @@ impl ChessMove {
         }
         token
     }
+
+    fn uci_sort_key(&self) -> (u8, u8, u8, u8, u8) {
+        // Exactly matches ASCII ordering of "a1a2[b|n|q|r]" without allocating.
+        let promotion = self
+            .promotion
+            .map(|value| value.to_ascii_lowercase() as u8)
+            .unwrap_or(0);
+        (
+            file_of(self.from),
+            rank_of(self.from),
+            file_of(self.to),
+            rank_of(self.to),
+            promotion,
+        )
+    }
 }
 
 #[derive(Clone)]
 struct Board {
     cells: [char; 64],
+    occupancy: [u64; 2],
+    piece_masks: [u64; 12],
+    king_squares: [u8; 2],
     turn: bool,
     castling: u8,
     ep_square: Option<u8>,
     halfmove_clock: u32,
     fullmove_number: u32,
+}
+
+#[derive(Clone, Copy)]
+struct MoveUndo {
+    mv: ChessMove,
+    moved_piece: char,
+    captured_piece: char,
+    captured_square: u8,
+    rook_move: Option<(u8, u8, char)>,
+    castling: u8,
+    ep_square: Option<u8>,
+    halfmove_clock: u32,
+    fullmove_number: u32,
+    turn: bool,
+    king_squares: [u8; 2],
+    occupancy: [u64; 2],
+    piece_masks: [u64; 12],
 }
 
 #[derive(Clone)]
@@ -155,6 +190,24 @@ fn piece_role(piece: char) -> char {
     piece.to_ascii_uppercase()
 }
 
+fn piece_mask_index(piece: char) -> Option<usize> {
+    Some(match piece {
+        'P' => 0,
+        'N' => 1,
+        'B' => 2,
+        'R' => 3,
+        'Q' => 4,
+        'K' => 5,
+        'p' => 6,
+        'n' => 7,
+        'b' => 8,
+        'r' => 9,
+        'q' => 10,
+        'k' => 11,
+        _ => return None,
+    })
+}
+
 fn same_side(piece: char, color: bool) -> bool {
     piece_color(piece).is_some_and(|piece_color| piece_color == color)
 }
@@ -172,8 +225,17 @@ impl Board {
             cells[48 + index] = 'p';
             cells[56 + index] = piece.to_ascii_lowercase();
         }
+        let mut piece_masks = [0u64; 12];
+        for (square, piece) in cells.iter().copied().enumerate() {
+            if let Some(index) = piece_mask_index(piece) {
+                piece_masks[index] |= 1u64 << square;
+            }
+        }
         Self {
             cells,
+            occupancy: [0x0000_0000_0000_ffff, 0xffff_0000_0000_0000],
+            piece_masks,
+            king_squares: [parse_square("e1").unwrap(), parse_square("e8").unwrap()],
             turn: WHITE,
             castling: WK | WQ | BK | BQ,
             ep_square: None,
@@ -184,29 +246,33 @@ impl Board {
 
     fn sorted_legal_moves(&self) -> Vec<ChessMove> {
         let mut moves = self.legal_moves();
-        moves.sort_by_key(|mv| mv.uci());
+        moves.sort_unstable_by_key(ChessMove::uci_sort_key);
         moves
     }
 
     fn legal_moves(&self) -> Vec<ChessMove> {
         let color = self.turn;
         let mut legal = Vec::new();
+        let mut probe = self.clone();
         for mv in self.pseudo_legal_moves() {
-            let mut probe = self.clone();
-            if probe.apply_move(mv).is_ok() && !probe.in_check(color) {
+            let Ok(undo) = probe.make_move(mv) else {
+                continue;
+            };
+            if !probe.in_check(color) {
                 legal.push(mv);
             }
+            probe.unmake_move(undo);
         }
         legal
     }
 
     fn pseudo_legal_moves(&self) -> Vec<ChessMove> {
         let mut moves = Vec::new();
-        for origin in 0..64u8 {
+        let mut side_mask = self.occupancy[if self.turn == WHITE { 0 } else { 1 }];
+        while side_mask != 0 {
+            let origin = side_mask.trailing_zeros() as u8;
+            side_mask &= side_mask - 1;
             let piece = self.cells[origin as usize];
-            if !same_side(piece, self.turn) {
-                continue;
-            }
             match piece_role(piece) {
                 'P' => self.pawn_moves(origin, piece, &mut moves),
                 'N' => self.jump_moves(origin, &KNIGHT_DELTAS, &mut moves),
@@ -426,6 +492,7 @@ impl Board {
     fn is_attacked_by(&self, attacker_color: bool, target: u8) -> bool {
         let target_file = file_of(target) as i8;
         let target_rank = rank_of(target) as i8;
+        let base = if attacker_color == WHITE { 0 } else { 6 };
 
         let pawn_rank = if attacker_color == WHITE {
             target_rank - 1
@@ -434,8 +501,8 @@ impl Board {
         };
         for pawn_file in [target_file - 1, target_file + 1] {
             if inside(pawn_file, pawn_rank) {
-                let piece = self.cells[to_square(pawn_file, pawn_rank) as usize];
-                if piece == if attacker_color == WHITE { 'P' } else { 'p' } {
+                let square = to_square(pawn_file, pawn_rank);
+                if self.piece_masks[base] & (1u64 << square) != 0 {
                     return true;
                 }
             }
@@ -445,8 +512,8 @@ impl Board {
             let source_file = target_file + delta_file;
             let source_rank = target_rank + delta_rank;
             if inside(source_file, source_rank) {
-                let piece = self.cells[to_square(source_file, source_rank) as usize];
-                if piece == if attacker_color == WHITE { 'N' } else { 'n' } {
+                let square = to_square(source_file, source_rank);
+                if self.piece_masks[base + 1] & (1u64 << square) != 0 {
                     return true;
                 }
             }
@@ -463,9 +530,13 @@ impl Board {
                         rank_cursor += delta_rank;
                         continue;
                     }
-                    if piece_color(piece) == Some(attacker_color)
-                        && symbols.contains(&piece_role(piece))
-                    {
+                    let square = to_square(file_cursor, rank_cursor);
+                    let attacker = if symbols[0] == 'R' {
+                        self.piece_masks[base + 3] | self.piece_masks[base + 4]
+                    } else {
+                        self.piece_masks[base + 2] | self.piece_masks[base + 4]
+                    };
+                    if attacker & (1u64 << square) != 0 {
                         return true;
                     }
                     break;
@@ -477,8 +548,8 @@ impl Board {
             let source_file = target_file + delta_file;
             let source_rank = target_rank + delta_rank;
             if inside(source_file, source_rank) {
-                let piece = self.cells[to_square(source_file, source_rank) as usize];
-                if piece == if attacker_color == WHITE { 'K' } else { 'k' } {
+                let square = to_square(source_file, source_rank);
+                if self.piece_masks[base + 5] & (1u64 << square) != 0 {
                     return true;
                 }
             }
@@ -487,17 +558,9 @@ impl Board {
         false
     }
 
-    fn find_king(&self, color: bool) -> Option<u8> {
-        let marker = if color == WHITE { 'K' } else { 'k' };
-        self.cells
-            .iter()
-            .position(|piece| *piece == marker)
-            .map(|idx| idx as u8)
-    }
-
     fn in_check(&self, color: bool) -> bool {
-        self.find_king(color)
-            .is_some_and(|king_square| self.is_attacked_by(!color, king_square))
+        let king_square = self.king_squares[if color == WHITE { 0 } else { 1 }];
+        self.is_attacked_by(!color, king_square)
     }
 
     fn is_capture(&self, mv: ChessMove) -> bool {
@@ -511,26 +574,54 @@ impl Board {
     }
 
     fn apply_move(&mut self, mv: ChessMove) -> Result<(), String> {
+        self.make_move(mv).map(|_| ())
+    }
+
+    fn make_move(&mut self, mv: ChessMove) -> Result<MoveUndo, String> {
         let piece = self.cells[mv.from as usize];
         if piece == '.' {
             return Err(format!("no piece on {}", square_name(mv.from)));
         }
         let role = piece_role(piece);
         let capture = self.is_capture(mv);
-        self.update_castling_rights(mv, piece);
-
-        if role == 'P' && self.ep_square == Some(mv.to) && self.cells[mv.to as usize] == '.' {
+        let en_passant_capture =
+            role == 'P' && self.ep_square == Some(mv.to) && self.cells[mv.to as usize] == '.';
+        let captured_square = if en_passant_capture {
             let captured_rank = if self.turn == WHITE {
                 rank_of(mv.to) - 1
             } else {
                 rank_of(mv.to) + 1
             };
-            self.cells[to_square(file_of(mv.to) as i8, captured_rank as i8) as usize] = '.';
+            to_square(file_of(mv.to) as i8, captured_rank as i8)
+        } else {
+            mv.to
+        };
+        let captured_piece = self.cells[captured_square as usize];
+        let undo = MoveUndo {
+            mv,
+            moved_piece: piece,
+            captured_piece,
+            captured_square,
+            rook_move: None,
+            castling: self.castling,
+            ep_square: self.ep_square,
+            halfmove_clock: self.halfmove_clock,
+            fullmove_number: self.fullmove_number,
+            turn: self.turn,
+            king_squares: self.king_squares,
+            occupancy: self.occupancy,
+            piece_masks: self.piece_masks,
+        };
+        self.update_castling_rights(mv, piece);
+
+        if en_passant_capture {
+            self.set_cell(captured_square, '.');
         }
 
-        self.cells[mv.from as usize] = '.';
+        self.set_cell(mv.from, '.');
+        let mut undo = undo;
         if role == 'K' && (file_of(mv.to) as i8 - file_of(mv.from) as i8).abs() == 2 {
-            self.move_rook_for_castle(mv);
+            undo.rook_move = self.move_rook_for_castle(mv);
         }
 
         let mut placed = piece;
@@ -541,7 +632,10 @@ impl Board {
                 promotion.to_ascii_lowercase()
             };
         }
-        self.cells[mv.to as usize] = placed;
+        self.set_cell(mv.to, placed);
+        if role == 'K' {
+            self.king_squares[if self.turn == WHITE { 0 } else { 1 }] = mv.to;
+        }
 
         if role == 'P' && (rank_of(mv.to) as i8 - rank_of(mv.from) as i8).abs() == 2 {
             let middle_rank = (rank_of(mv.to) + rank_of(mv.from)) / 2;
@@ -559,20 +653,61 @@ impl Board {
             self.fullmove_number += 1;
         }
         self.turn = !self.turn;
-        Ok(())
+        Ok(undo)
     }
 
-    fn move_rook_for_castle(&mut self, mv: ChessMove) {
-        let (rook_from, rook_to) = match square_name(mv.to).as_str() {
-            "g1" => ("h1", "f1"),
-            "c1" => ("a1", "d1"),
-            "g8" => ("h8", "f8"),
-            _ => ("a8", "d8"),
+    fn unmake_move(&mut self, undo: MoveUndo) {
+        self.turn = undo.turn;
+        self.castling = undo.castling;
+        self.ep_square = undo.ep_square;
+        self.halfmove_clock = undo.halfmove_clock;
+        self.fullmove_number = undo.fullmove_number;
+        self.king_squares = undo.king_squares;
+        self.occupancy = undo.occupancy;
+        self.piece_masks = undo.piece_masks;
+        self.cells[undo.mv.from as usize] = undo.moved_piece;
+        self.cells[undo.mv.to as usize] = if undo.captured_square == undo.mv.to {
+            undo.captured_piece
+        } else {
+            '.'
         };
-        let from = parse_square(rook_from).unwrap();
-        let to = parse_square(rook_to).unwrap();
-        self.cells[to as usize] = self.cells[from as usize];
-        self.cells[from as usize] = '.';
+        if undo.captured_square != undo.mv.to {
+            self.cells[undo.captured_square as usize] = undo.captured_piece;
+        }
+        if let Some((from, to, rook)) = undo.rook_move {
+            self.cells[from as usize] = rook;
+            self.cells[to as usize] = '.';
+        }
+    }
+
+    fn move_rook_for_castle(&mut self, mv: ChessMove) -> Option<(u8, u8, char)> {
+        let (from, to) = match (file_of(mv.to), rank_of(mv.to)) {
+            (6, 0) => (7, 5),
+            (2, 0) => (0, 3),
+            (6, 7) => (63, 61),
+            (2, 7) => (56, 59),
+            _ => return None,
+        };
+        let rook = self.cells[from as usize];
+        self.set_cell(to, rook);
+        self.set_cell(from, '.');
+        Some((from, to, rook))
+    }
+
+    fn set_cell(&mut self, square: u8, piece: char) {
+        let bit = 1u64 << square;
+        if let Some(index) = piece_mask_index(self.cells[square as usize]) {
+            self.piece_masks[index] &= !bit;
+        }
+        self.occupancy[0] &= !bit;
+        self.occupancy[1] &= !bit;
+        if let Some(color) = piece_color(piece) {
+            self.occupancy[if color == WHITE { 0 } else { 1 }] |= bit;
+        }
+        if let Some(index) = piece_mask_index(piece) {
+            self.piece_masks[index] |= bit;
+        }
+        self.cells[square as usize] = piece;
     }
 
     fn update_castling_rights(&mut self, mv: ChessMove, piece: char) {
@@ -643,24 +778,23 @@ impl Board {
     fn disambiguation(&self, mv: ChessMove, legal_moves: &[ChessMove]) -> String {
         let origin_piece = self.cells[mv.from as usize];
         let role = piece_role(origin_piece);
-        let rivals: Vec<ChessMove> = legal_moves
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                *candidate != mv
-                    && candidate.to == mv.to
-                    && piece_role(self.cells[candidate.from as usize]) == role
-            })
-            .collect();
-        if rivals.is_empty() {
+        let mut found_rival = false;
+        let mut same_file = false;
+        let mut same_rank = false;
+        for candidate in legal_moves {
+            if *candidate == mv
+                || candidate.to != mv.to
+                || piece_role(self.cells[candidate.from as usize]) != role
+            {
+                continue;
+            }
+            found_rival = true;
+            same_file |= file_of(candidate.from) == file_of(mv.from);
+            same_rank |= rank_of(candidate.from) == rank_of(mv.from);
+        }
+        if !found_rival {
             return String::new();
         }
-        let same_file = rivals
-            .iter()
-            .any(|candidate| file_of(candidate.from) == file_of(mv.from));
-        let same_rank = rivals
-            .iter()
-            .any(|candidate| rank_of(candidate.from) == rank_of(mv.from));
         if same_file && same_rank {
             square_name(mv.from)
         } else if same_file {
@@ -1253,29 +1387,30 @@ impl NativeEncoder {
 
     fn encode_variation_branch_with_endpoint(
         &mut self,
-        node: usize,
+        mut node: usize,
         mut board: Board,
-        num: Vec<u8>,
-        ply_count: usize,
+        mut num: Vec<u8>,
+        mut ply_count: usize,
     ) -> Result<(Vec<u8>, usize), String> {
-        if is_zero(&num) || ply_count >= 40 {
-            return Ok((num, node));
+        while !is_zero(&num) && ply_count < 40 {
+            let legal_moves = board.sorted_legal_moves();
+            if legal_moves.is_empty() {
+                break;
+            }
+            let base = legal_moves.len() as u32;
+            let adjusted = sub_one(&num)?;
+            let (remaining, move_index) = div_rem_small(&adjusted, base);
+            node = self.add_encoded_move(
+                node,
+                &mut board,
+                legal_moves[move_index as usize],
+                &legal_moves,
+            )?;
+            self.stats.variation_plies += 1;
+            num = remaining;
+            ply_count += 1;
         }
-        let legal_moves = board.sorted_legal_moves();
-        if legal_moves.is_empty() {
-            return Ok((num, node));
-        }
-        let base = legal_moves.len() as u32;
-        let adjusted = sub_one(&num)?;
-        let (remaining, move_index) = div_rem_small(&adjusted, base);
-        let next_node = self.add_encoded_move(
-            node,
-            &mut board,
-            legal_moves[move_index as usize],
-            &legal_moves,
-        )?;
-        self.stats.variation_plies += 1;
-        self.encode_variation_branch_with_endpoint(next_node, board, remaining, ply_count + 1)
+        Ok((num, node))
     }
 
     fn export_pgn(&self) -> String {
@@ -1382,6 +1517,7 @@ impl NativeDecoder {
     }
 
     fn decode(mut self) -> Result<(Vec<u8>, CodecStats), String> {
+        let stats = self.observed_stats();
         let mainline_positions = self.collect_mainline_positions(0, true);
         let (mainline_num, mainline_capacity) = self.decode_mainline(&mainline_positions)?;
         let variation_num = self.decode_distributed_variations(0)?;
@@ -1390,7 +1526,38 @@ impl NativeDecoder {
         } else {
             add_big(&mainline_num, &mul_big(&variation_num, &mainline_capacity))
         };
-        Ok((value, CodecStats::default()))
+        Ok((value, stats))
+    }
+
+    fn observed_stats(&self) -> CodecStats {
+        let mut stats = CodecStats::default();
+        let mut stack = vec![(0usize, true, 0usize)];
+
+        while let Some((node, on_mainline, depth)) = stack.pop() {
+            let variations = &self.game.nodes[node].variations;
+            let explicit_branches = variations.len().saturating_sub(1) as u64;
+            if explicit_branches > 0 {
+                stats.positions_with_variations += 1;
+                stats.max_variations_at_position =
+                    stats.max_variations_at_position.max(explicit_branches);
+                stats.total_variations += explicit_branches;
+                stats.total_variation_branches += explicit_branches;
+            }
+
+            for (index, child) in variations.iter().enumerate() {
+                let child_on_mainline = on_mainline && index == 0;
+                let child_depth = if index == 0 { depth } else { depth + 1 };
+                if child_on_mainline {
+                    stats.mainline_plies += 1;
+                } else {
+                    stats.variation_plies += 1;
+                    stats.max_nesting_depth = stats.max_nesting_depth.max(child_depth as u64);
+                }
+                stack.push((*child, child_on_mainline, child_depth));
+            }
+        }
+        stats.total_plies = stats.mainline_plies + stats.variation_plies;
+        stats
     }
 
     fn position_state(&mut self, node: usize, board: Option<Board>) -> PositionState {
@@ -1500,76 +1667,74 @@ impl NativeDecoder {
         depth: usize,
         parent_board: Option<Board>,
     ) -> Result<(), String> {
-        let positions = if depth == 0 {
-            self.collect_mainline_positions(parent_node, false)
-        } else {
-            let state = self.position_state(parent_node, parent_board);
-            if state.legal_moves.is_empty() {
-                Vec::new()
+        let mut stack = vec![(parent_node, depth, parent_board)];
+        while let Some((current_parent, current_depth, current_parent_board)) = stack.pop() {
+            let positions = if current_depth == 0 {
+                self.collect_mainline_positions(current_parent, false)
             } else {
-                self.state_cache.insert(parent_node, state);
-                vec![parent_node]
+                let state = self.position_state(current_parent, current_parent_board);
+                if state.legal_moves.is_empty() {
+                    Vec::new()
+                } else {
+                    self.state_cache.insert(current_parent, state);
+                    vec![current_parent]
+                }
+            };
+            if positions.is_empty() {
+                continue;
             }
-        };
-        if positions.is_empty() {
-            return Ok(());
-        }
-        let max_vars = positions
-            .iter()
-            .map(|node| {
-                self.game.nodes[*node]
-                    .variations
-                    .len()
-                    .saturating_sub(if depth == 0 { 1 } else { 0 })
-            })
-            .max()
-            .unwrap_or(0);
-        let mut var_index = 0usize;
-        let mut endpoints = Vec::new();
-        while var_index < max_vars {
-            for node in &positions {
-                let variations = if depth == 0 {
+            let max_vars = positions
+                .iter()
+                .map(|node| {
                     self.game.nodes[*node]
                         .variations
-                        .iter()
-                        .skip(1)
-                        .copied()
-                        .collect::<Vec<_>>()
-                } else {
-                    self.game.nodes[*node].variations.clone()
-                };
-                let mainline_move = if depth == 0 {
-                    let mainline = self.game.nodes[*node].variations[0];
-                    self.game.nodes[mainline].mv
-                } else {
-                    None
-                };
-                for offset in 0..self.variations_per_round {
-                    let current_var_index = var_index + offset;
-                    if current_var_index < variations.len() {
-                        let var_node = variations[current_var_index];
-                        let (var_num, capacity, endpoint, endpoint_board) = self
-                            .decode_single_variation_with_endpoint(
-                                *node,
-                                var_node,
-                                mainline_move,
-                                current_var_index,
-                                depth,
-                            )?;
-                        all_variations.push((var_num, capacity));
-                        endpoints.push((endpoint, endpoint_board));
+                        .len()
+                        .saturating_sub(if current_depth == 0 { 1 } else { 0 })
+                })
+                .max()
+                .unwrap_or(0);
+            let mut var_index = 0usize;
+            let mut endpoints = Vec::new();
+            while var_index < max_vars {
+                for node in &positions {
+                    let variations = if current_depth == 0 {
+                        self.game.nodes[*node]
+                            .variations
+                            .iter()
+                            .skip(1)
+                            .copied()
+                            .collect::<Vec<_>>()
+                    } else {
+                        self.game.nodes[*node].variations.clone()
+                    };
+                    let mainline_move = if current_depth == 0 {
+                        let mainline = self.game.nodes[*node].variations[0];
+                        self.game.nodes[mainline].mv
+                    } else {
+                        None
+                    };
+                    for offset in 0..self.variations_per_round {
+                        let current_var_index = var_index + offset;
+                        if current_var_index < variations.len() {
+                            let var_node = variations[current_var_index];
+                            let (var_num, capacity, endpoint, endpoint_board) = self
+                                .decode_single_variation_with_endpoint(
+                                    *node,
+                                    var_node,
+                                    mainline_move,
+                                    current_var_index,
+                                    current_depth,
+                                )?;
+                            all_variations.push((var_num, capacity));
+                            endpoints.push((endpoint, endpoint_board));
+                        }
                     }
                 }
+                var_index += self.variations_per_round;
             }
-            var_index += self.variations_per_round;
-        }
-        for (endpoint, endpoint_board) in endpoints {
-            self.collect_variations_recursive(
-                endpoint,
-                all_variations,
-                depth + 1,
-                Some(endpoint_board),
-            )?;
+            for (endpoint, endpoint_board) in endpoints.into_iter().rev() {
+                stack.push((endpoint, current_depth + 1, Some(endpoint_board)));
+            }
         }
         Ok(())
     }
@@ -1869,10 +2034,7 @@ pub fn decode_chess_pgn_integer(
 ) -> PyResult<(Py<PyBytes>, Py<PyDict>)> {
     let decoder = NativeDecoder::parse(pgn_text).map_err(value_error)?;
     let (num_bytes, stats) = decoder.decode().map_err(value_error)?;
-    Ok((
-        PyBytes::new(py, &num_bytes).into(),
-        stats_dict(py, &stats)?,
-    ))
+    Ok((PyBytes::new(py, &num_bytes).into(), stats_dict(py, &stats)?))
 }
 
 #[cfg(test)]
@@ -1898,10 +2060,16 @@ mod tests {
         let encoder = NativeEncoder::new(5);
         let (pgn_text, encode_stats) = encoder.encode(&value).unwrap();
         let decoder = NativeDecoder::parse(&pgn_text).unwrap();
-        let (decoded, _decode_stats) = decoder.decode().unwrap();
+        let (decoded, decode_stats) = decoder.decode().unwrap();
 
         assert_eq!(decoded, value);
         assert!(encode_stats.mainline_plies > 0);
+        assert!(decode_stats.mainline_plies > 0);
+        assert_eq!(
+            decode_stats.total_plies,
+            decode_stats.mainline_plies + decode_stats.variation_plies
+        );
+        assert!(decode_stats.variation_plies > 0);
         assert!(pgn_text.contains("VariationsPerRound"));
     }
 }

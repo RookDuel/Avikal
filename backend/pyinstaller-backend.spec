@@ -20,11 +20,8 @@ datas += [
     (str(project_root / "scripts" / "node_modules"), "scripts/node_modules"),
 ]
 
-hiddenimports = collect_submodules(
-    "avikal_backend",
-    filter=lambda name: not name.startswith("avikal_backend.api"),
-)
-for package_name in ("pydantic", "anyio", "jwt"):
+hiddenimports = collect_submodules("avikal_backend")
+for package_name in ("pydantic",):
     hiddenimports += collect_submodules(package_name)
 
 a = Analysis(

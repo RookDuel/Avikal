@@ -7,6 +7,7 @@ Copyright (c) 2026 Atharva Sen Barai.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import hashlib
 import json
@@ -20,6 +21,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import weakref
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +29,7 @@ from pydantic import ValidationError
 
 from avikal_backend.audit.activity_audit import activity_audit
 from avikal_backend.archive.format.container import open_avk_payload_stream
+from avikal_backend.archive.reporting import finalize_assurance_report
 from avikal_backend.archive.security.crypto import secure_zero
 from avikal_backend.archive.security.pqc_keyfile import (
     PQC_KEYFILE_PROTECTION_ARCHIVE_SECRET,
@@ -36,15 +39,25 @@ from avikal_backend.archive.security.pqc_keyfile import (
     inspect_pqc_keyfile,
 )
 from avikal_backend.archive.security.password_validator import validate_password_strength
-from avikal_backend.archive.security.pqc_provider import provider_status
+from avikal_backend.archive.security.pqc_provider import (
+    create_archive_signing_identity,
+    provider_status,
+    validate_archive_signing_identity,
+)
 from avikal_backend.core.private_workspace import ensure_private_dir
 from avikal_backend.core.preview_sessions import PreviewSessionStore
+from avikal_backend.core.archive_sessions import ArchiveSessionStore
 from avikal_backend.core.redaction import redact_text
 from avikal_backend.core.temp_janitor import cleanup_startup_temp_artifacts
 from avikal_backend.core.schemas import (
     AavritLoginRequest,
     AavritServerCheckRequest,
     ArchiveInspectRequest,
+    ArchiveJoinVolumesRequest,
+    ArchiveOpenSessionRequest,
+    ArchiveSelectionRequest,
+    ArchiveSessionRequest,
+    ArchiveSplitVolumesRequest,
     CancelDecryptRequest,
     DecryptRequest,
     EncryptRequest,
@@ -67,13 +80,25 @@ from avikal_backend.version import __version__
 
 
 log = logging.getLogger("avikal.core")
-_crypto_lock = threading.Lock()
+_crypto_lock_guard = threading.Lock()
+_crypto_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _decrypt_cancel_lock = threading.Lock()
 _active_decrypt_tokens: set[Any] = set()
 _aavrit_lock = threading.RLock()
 _aavrit_server_url: str | None = None
 _aavrit_mode: str | None = None
 DEFAULT_DRAND_HELPER_TIMEOUT_SECONDS = 30
+
+
+def _get_crypto_lock() -> asyncio.Lock:
+    """Return the archive-operation lock owned by the active RPC event loop."""
+    loop = asyncio.get_running_loop()
+    with _crypto_lock_guard:
+        lock = _crypto_locks.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _crypto_locks[loop] = lock
+        return lock
 
 
 def _set_active_decrypt_token(token: Any) -> None:
@@ -94,6 +119,33 @@ def _cancel_active_decrypt_operation() -> bool:
     for token in tokens:
         token.cancel()
     return True
+
+
+async def _run_crypto_worker(worker, *, cancellation_token=None):
+    """Run one archive worker without blocking or overlapping the event loop."""
+    from avikal_backend.archive.pipeline.progress import CancellationToken, bind_cancellation_token
+
+    token = cancellation_token or CancellationToken()
+
+    def run_bound_worker():
+        with bind_cancellation_token(token):
+            return worker()
+
+    try:
+        async with _get_crypto_lock():
+            worker_task = asyncio.create_task(asyncio.to_thread(run_bound_worker))
+            try:
+                return await asyncio.shield(worker_task)
+            except asyncio.CancelledError:
+                token.cancel()
+                try:
+                    await asyncio.shield(worker_task)
+                except Exception:
+                    pass
+                raise
+    except asyncio.CancelledError:
+        token.cancel()
+        raise
 
 
 class ServiceError(Exception):
@@ -118,6 +170,9 @@ _ERROR_PATTERNS = [
     (re.compile(r"plaintext archives do not need rekey", re.I), "This archive is not protected, so it does not need rekey."),
     (re.compile(r"time-capsule rekey is not supported", re.I), "Time-capsule rekey is not available yet. Decrypt and create a new archive instead."),
     (re.compile(r"pqc rekey is not supported|pqc keyfile rekey is not supported", re.I), "PQC rekey is not available yet. Decrypt and create a new archive instead."),
+    (re.compile(r"legacy unsigned archives must be decrypted and recreated before rekeying|created before rekey support", re.I), "This archive must be decoded and created again before Rekey can rotate its credentials."),
+    (re.compile(r"rekey requires the creator identity", re.I), "Rekey requires the creator signing identity that originally signed this archive."),
+    (re.compile(r"rekeyed archive failed post-build integrity verification|source archive payload does not match", re.I), "Rekey verification failed. The archive was not modified."),
     (re.compile(r"pqc keyfile not found|requires an external pqc keyfile|provide the \.avkkey|keyfile does not match this archive", re.I), "This archive requires the correct .avkkey file. Please provide the matching PQC keyfile."),
     (re.compile(r"\.avkkey requires its keyfile password|requires.*keyfile password", re.I), "This .avkkey requires its keyfile password."),
     (re.compile(r"incorrect \.avkkey password|corrupted keyfile", re.I), "Incorrect .avkkey password or corrupted keyfile."),
@@ -125,6 +180,7 @@ _ERROR_PATTERNS = [
     (re.compile(r"missing encrypted member|embedded pqc bundle does not match|failed to decrypt the embedded pqc bundle|invalid embedded pqc bundle|unexpected embedded pqc bundle", re.I), "The embedded PQC protection could not be unlocked. Check the password or keyphrase, or verify that the archive is not corrupted."),
     (re.compile(r"unsupported pqc storage mode|invalid pqc storage mode", re.I), "This archive uses an unsupported PQC storage mode."),
     (re.compile(r"openssl pqc provider is unavailable|avikal_pqc_provider_exec", re.I), "PQC requires the bundled OpenSSL 3.5+ provider runtime. Please use an Avikal build that includes the PQC provider."),
+    (re.compile(r"archive signature|signed commitment|merkle|authenticated content index|signature binding|timestamp statement|whole-payload", re.I), "Mandatory archive verification failed. The archive is corrupted, modified, or untrusted."),
     (re.compile(r"integrity check|file.*corrupt|corrupt.*file|checksum.*fail|hash.*mismatch", re.I), "File integrity check failed. The file may be corrupted."),
     (re.compile(r"system clock differs|system clock appears out of sync|clock skew", re.I), "Your system clock appears out of sync with trusted network time. Correct your Windows date and time settings, then try again."),
     (re.compile(r"ntp|time verification|time sync|time\.google\.com", re.I), "Time verification failed. Check your internet connection."),
@@ -187,6 +243,13 @@ def _validate_archive_password_policy(request: EncryptRequest) -> None:
         _raise(400, f"Password validation failed: {exc}")
 
 
+def _validate_sender_message_policy(request: EncryptRequest) -> None:
+    if request.sender_message and not (
+        request.password or request.keyphrase or request.use_timecapsule or request.pqc_enabled
+    ):
+        _raise(400, "Sender messages require password, keyphrase, TimeCapsule, or Quantum Protection.")
+
+
 def _validate_rekey_password_policy(request: RekeyRequest) -> None:
     password = request.new_password
     if not password:
@@ -232,32 +295,35 @@ def _ensure_runtime_dirs() -> tuple[Path, Path]:
 
 _log_dir, _preview_root = _ensure_runtime_dirs()
 _preview_sessions = PreviewSessionStore(_preview_root, log)
+_archive_sessions = ArchiveSessionStore()
+atexit.register(_archive_sessions.close_all)
 
 
 def _best_effort_scrub_model_secrets(model, *field_names: str) -> None:
+    def scrub(value) -> None:
+        if isinstance(value, str):
+            secure_zero(bytearray(value.encode("utf-8")))
+        elif isinstance(value, bytearray):
+            secure_zero(value)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                scrub(item)
+                value[index] = None
+        elif isinstance(value, dict):
+            for key in list(value):
+                scrub(value[key])
+                value[key] = None
+            value.clear()
+
     for field_name in field_names:
         value = getattr(model, field_name, None)
         if value is None:
             continue
-        if isinstance(value, str):
-            secure_zero(bytearray(value.encode("utf-8")))
-            try:
-                setattr(model, field_name, None)
-            except Exception:
-                pass
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                if isinstance(item, str):
-                    secure_zero(bytearray(item.encode("utf-8")))
-                    value[index] = ""
-            try:
-                setattr(model, field_name, None)
-            except Exception:
-                pass
-
-
-def _should_use_multi_file_archive(input_files: list[str]) -> bool:
-    return len(input_files) > 1 or any(os.path.isdir(path) for path in input_files)
+        scrub(value)
+        try:
+            setattr(model, field_name, None)
+        except Exception:
+            pass
 
 
 def _validate_avk_structure(avk_filepath: str) -> None:
@@ -280,6 +346,17 @@ def _get_pgn_created_time_ist(avk_filepath: str) -> str | None:
     except Exception as exc:
         log.debug("Failed to derive PGN created time for %s: %s", avk_filepath, exc)
         return None
+
+
+def _get_verified_created_time_ist(metadata: dict | None, avk_filepath: str) -> tuple[str | None, str]:
+    integrity = metadata.get("archive_integrity") if isinstance(metadata, dict) else None
+    timestamp = integrity.get("created_at_utc") if isinstance(integrity, dict) and integrity.get("verified") else None
+    if isinstance(timestamp, int) and timestamp > 0:
+        from datetime import timedelta
+
+        created_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        return created_utc.astimezone(timezone(timedelta(hours=5, minutes=30))).isoformat(), "signed_archive_manifest_ist"
+    return _get_pgn_created_time_ist(avk_filepath), "filesystem_mtime_ist"
 
 
 def _best_effort_log_archive_creation(
@@ -400,133 +477,28 @@ def _fetch_aavrit_capabilities(aavrit_url: str) -> dict:
     mode = payload.get("mode") if isinstance(payload, dict) else None
     if mode not in {"public", "private"}:
         _raise(502, "Aavrit server returned an invalid mode.")
-    return {"mode": mode}
-
-
-def _fetch_aavrit_public_key(aavrit_url: str, session_token: str | None = None) -> dict:
-    headers = {"Authorization": f"Bearer {session_token}"} if session_token else {}
-    response = requests.get(f"{_normalize_aavrit_server_url(aavrit_url)}/public-key", headers=headers, timeout=30)
-    if response.status_code == 401:
-        _raise(401, "Invalid or expired session")
-    if response.status_code != 200:
-        _raise(502, "Aavrit server public key fetch failed.")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise ServiceError("Aavrit server returned an invalid public key response.", code=502) from exc
-    if not isinstance(payload, dict) or not payload.get("success"):
-        _raise(502, "Aavrit server returned an invalid public key response.")
-    key_id = payload.get("key_id")
-    sig_alg = payload.get("sig_alg")
-    public_key_pem = payload.get("public_key_pem")
-    if not isinstance(key_id, str) or sig_alg != "Ed25519" or not isinstance(public_key_pem, str) or not public_key_pem.strip():
-        _raise(502, "Aavrit server public key response is invalid.")
-    return {"key_id": key_id, "sig_alg": sig_alg, "public_key_pem": public_key_pem}
-
-
-def _request_aavrit_commit(aavrit_url: str, *, data_hash: str, unlock_timestamp: int, session_token: str | None) -> dict:
-    headers = {"Content-Type": "application/json"}
-    if session_token:
-        headers["Authorization"] = f"Bearer {session_token}"
-    try:
-        response = requests.post(
-            f"{aavrit_url}/commit",
-            json={"data_hash": data_hash, "unlock_timestamp": unlock_timestamp},
-            headers=headers,
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise _request_error(exc, "Aavrit server") from exc
-    if response.status_code == 401:
-        _raise(401, "Invalid or expired session")
-    if response.status_code == 429:
-        _raise(429, "Aavrit rate limit exceeded. Please try again later.")
-    if response.status_code != 201:
-        _raise(502, response.text.strip() or "Aavrit commit failed.")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise ServiceError("Aavrit server returned an invalid commit response.", code=502) from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("payload"), dict) or not isinstance(payload.get("signature"), str):
-        _raise(502, "Aavrit server returned an invalid commit response.")
-    return payload
-
-
-def _request_aavrit_reveal(aavrit_url: str, *, commit_id: str, session_token: str | None) -> dict:
-    headers = {"Content-Type": "application/json"}
-    if session_token:
-        headers["Authorization"] = f"Bearer {session_token}"
-    try:
-        response = requests.post(f"{aavrit_url}/reveal", json={"commit_id": commit_id}, headers=headers, timeout=30)
-    except requests.RequestException as exc:
-        raise _request_error(exc, "Aavrit server") from exc
-    if response.status_code == 401:
-        _raise(401, "Invalid or expired session")
-    if response.status_code == 404:
-        _raise(404, "Aavrit commit not found.")
-    if response.status_code == 429:
-        _raise(429, "Aavrit rate limit exceeded. Please try again later.")
-    if response.status_code != 200:
-        _raise(502, response.text.strip() or "Aavrit reveal failed.")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise ServiceError("Aavrit server returned an invalid reveal response.", code=502) from exc
-    if not isinstance(payload, dict):
-        _raise(502, "Aavrit server returned an invalid reveal response.")
-    return payload
-
-
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(data: str) -> bytes:
-    return base64.urlsafe_b64decode((data + "=" * (-len(data) % 4)).encode("ascii"))
-
-
-def _canonical_json_bytes(payload: dict) -> bytes:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-
-def _build_aavrit_commit_hash(*, commit_id: str, data_hash: str, unlock_timestamp: int, reveal_value: str) -> str:
-    return _b64url_encode(hashlib.sha256(_canonical_json_bytes({
-        "version": 1,
-        "commit_id": commit_id,
-        "data_hash": data_hash,
-        "unlock_timestamp": unlock_timestamp,
-        "reveal_value": reveal_value,
-    })).digest())
-
-
-def _verify_aavrit_signature(payload: dict, signature: str, public_key_pem: str) -> None:
-    from cryptography.hazmat.primitives import serialization
-
-    try:
-        public_key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
-        public_key.verify(_b64url_decode(signature), _canonical_json_bytes(payload))
-    except Exception as exc:
-        raise ServiceError("Aavrit signature verification failed.", code=400) from exc
-
-
-def _derive_aavrit_time_key(commit_payload: dict, commit_signature: str) -> bytes:
-    return hashlib.sha256(_canonical_json_bytes({"payload": commit_payload, "signature": commit_signature})).digest()
-
-
-def _create_aavrit_data_hash() -> str:
-    import secrets
-
-    return _b64url_encode(secrets.token_bytes(32))
+    from avikal_backend.core.aavrit_client import (
+        AAVRIT_AUTHORITY_SUITE,
+        AAVRIT_PROTOCOL,
+        AAVRIT_SIGNATURE_SUITE,
+    )
+    if payload.get("protocol") != AAVRIT_PROTOCOL:
+        _raise(502, "Aavrit server does not implement the required final protocol.")
+    if payload.get("encryption_suite") != AAVRIT_AUTHORITY_SUITE or payload.get("signature_suite") != AAVRIT_SIGNATURE_SUITE:
+        _raise(502, "Aavrit server cryptographic suites are incompatible.")
+    return {"mode": mode, "protocol": AAVRIT_PROTOCOL}
 
 
 def _extract_aavrit_metadata(metadata: dict) -> dict:
+    from avikal_backend.core.aavrit_client import AAVRIT_PROTOCOL
+
     result = {
-        "commit_id": metadata.get("file_id"),
-        "server_url": metadata.get("server_url"),
-        "data_hash": metadata.get("aavrit_data_hash"),
-        "commit_hash": metadata.get("aavrit_commit_hash"),
-        "server_key_id": metadata.get("aavrit_server_key_id"),
-        "commit_signature": metadata.get("aavrit_commit_signature"),
+        "protocol": AAVRIT_PROTOCOL,
+        "escrow_id": metadata.get("file_id"),
+        "data_commitment": metadata.get("aavrit_data_hash"),
+        "release_key_commitment": metadata.get("aavrit_commit_hash"),
+        "authority_id": metadata.get("aavrit_server_key_id"),
+        "receipt_sha256": metadata.get("aavrit_commit_signature"),
     }
     for field_name, field_value in result.items():
         if not isinstance(field_value, str) or not field_value:
@@ -616,7 +588,7 @@ def _validate_public_route_inputs(request: DecryptRequest, route_hints: dict) ->
 def _validate_public_timecapsule_lock(route_hints: dict) -> None:
     provider = route_hints.get("provider")
     unlock_timestamp = route_hints.get("unlock_timestamp")
-    if provider not in {"drand", "aavrit"} or unlock_timestamp is None:
+    if provider != "drand" or unlock_timestamp is None:
         return
     from avikal_backend.archive.security.time_lock import format_unlock_time, get_trusted_now
 
@@ -755,19 +727,27 @@ def _run_drand_helper(payload: dict, *, timeout_seconds: int | None = None) -> d
     return helper_result
 
 
-def _read_avk_metadata_only(avk_filepath: str, password: str = None, keyphrase: list = None) -> dict:
-    from avikal_backend.archive.chess_metadata import decode_chess_to_metadata_enhanced
-    from avikal_backend.archive.format.header import parse_header_bytes, validate_metadata_against_header
+def _read_avk_metadata_only(
+    avk_filepath: str,
+    password: str = None,
+    keyphrase: list = None,
+    pqc_keyfile_path: str = None,
+    pqc_keyfile_password: str = None,
+    time_key: bytes | None = None,
+) -> dict:
+    from avikal_backend.archive.pipeline.keychain_security import read_archive_keychain_metadata
 
     try:
-        with open_avk_payload_stream(avk_filepath) as (header_bytes, keychain_pgn, _payload_stream, _embedded_pqc):
-            pass
-    except Exception as exc:
-        raise ValueError(f"Failed to open .avk file: {str(exc)}") from exc
-    try:
-        metadata = decode_chess_to_metadata_enhanced(keychain_pgn, password, keyphrase, skip_timelock=True, aad=header_bytes)
-        validate_metadata_against_header(parse_header_bytes(header_bytes), metadata)
-        return metadata
+        result = read_archive_keychain_metadata(
+            avk_filepath,
+            password=password,
+            keyphrase=keyphrase,
+            pqc_keyfile_path=pqc_keyfile_path,
+            pqc_keyfile_password=pqc_keyfile_password,
+            skip_timelock=True,
+            time_key=time_key,
+        )
+        return result.metadata
     except ValueError as exc:
         error_msg = str(exc)
         if "password protected" in error_msg.lower():
@@ -794,7 +774,12 @@ async def runtime_status(_params: dict[str, Any] | None = None) -> dict[str, Any
     return {
         "success": True,
         "runtime": {
-            "native_crypto": {"available": native.available, "import_error": native.import_error},
+            "native_crypto": {
+                "available": native.available,
+                "import_error": native.import_error,
+                "memory_lock_available": native.memory_lock_available,
+                "process_hardening_available": native.process_hardening_available,
+            },
             "pqc_provider": provider_status(),
             "version": __version__,
         },
@@ -849,7 +834,7 @@ async def auth_login(params: dict[str, Any]) -> dict[str, Any]:
         if response.status_code != 200:
             _raise(502, response.text.strip() or "Aavrit login failed.")
         payload = response.json()
-        session_token = payload.get("session_token") if isinstance(payload, dict) else None
+        session_token = payload.get("access_token") if isinstance(payload, dict) else None
         if not isinstance(session_token, str) or not session_token.strip():
             _raise(502, "Aavrit login returned an invalid session.")
         _set_current_aavrit_server_url(aavrit_url)
@@ -903,18 +888,19 @@ async def auth_profile(params: dict[str, Any]) -> dict[str, Any]:
 
 
 async def auth_aavrit_diagnostics(params: dict[str, Any]) -> dict[str, Any]:
+    from avikal_backend.core.aavrit_client import fetch_authority
+
     aavrit_url = _get_aavrit_server_url(params.get("aavrit_url"))
-    session_token = str(params.get("session_token") or "").strip() or None
     started_at = time.perf_counter()
     config = await asyncio.to_thread(_fetch_aavrit_capabilities, aavrit_url)
-    public_key = await asyncio.to_thread(_fetch_aavrit_public_key, aavrit_url, session_token)
+    authority = await asyncio.to_thread(fetch_authority, aavrit_url)
     health_status = "unknown"
     try:
-        health_response = await asyncio.to_thread(requests.get, f"{aavrit_url}/health", timeout=10)
+        health_response = await asyncio.to_thread(requests.get, f"{aavrit_url}/health/ready", timeout=10)
         health_status = "ok" if health_response.status_code == 200 else f"http_{health_response.status_code}"
     except requests.RequestException:
         health_status = "unreachable"
-    public_key_fingerprint = hashlib.sha256(public_key["public_key_pem"].encode("utf-8")).hexdigest()
+    public_bundle = authority["payload"]
     latency_ms = int((time.perf_counter() - started_at) * 1000)
     return {
         "success": True,
@@ -924,10 +910,12 @@ async def auth_aavrit_diagnostics(params: dict[str, Any]) -> dict[str, Any]:
             "status": "reachable",
             "health": health_status,
             "latency_ms": latency_ms,
-            "public_key": {
-                "key_id": public_key["key_id"],
-                "sig_alg": public_key["sig_alg"],
-                "fingerprint_sha256": public_key_fingerprint,
+            "protocol": config["protocol"],
+            "authority": {
+                "authority_id": public_bundle["authority_id"],
+                "encryption_suite": public_bundle["encryption_suite"],
+                "signature_suite": public_bundle["signature_suite"],
+                "key_ids": public_bundle["key_ids"],
             },
         },
     }
@@ -945,52 +933,61 @@ async def auth_logout(params: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "message": "Logged out successfully"}
 
 
+def _pqc_request_kwargs(request: EncryptRequest) -> dict[str, Any]:
+    if not request.pqc_enabled:
+        return {}
+    try:
+        custom_algorithms = request.pqc_custom_algorithms()
+    except ValueError as exc:
+        _raise(400, str(exc))
+    return {
+        "pqc_suite_id": request.pqc_suite_id,
+        "pqc_custom_algorithms": custom_algorithms,
+    }
+
+
 def _create_regular_encryption(request: EncryptRequest, unlock_dt: datetime | None) -> dict:
-    from avikal_backend.archive.pipeline.encoder import create_avk_file
     from avikal_backend.archive.pipeline.multi_file_encoder import create_multi_file_avk
     from avikal_backend.archive.pipeline.progress import ProgressTracker, bind_progress_tracker
 
-    tracker = ProgressTracker("encrypt", [("prepare", 0.10), ("payload", 0.60), ("metadata", 0.20), ("finalize", 0.10)])
+    pqc_kwargs = _pqc_request_kwargs(request)
+    tracker = ProgressTracker("encrypt", [
+        ("prepare", 0.03), ("identity", 0.12), ("pqc", 0.25), ("kdf", 0.08),
+        ("payload", 0.25), ("chess", 0.10), ("timestamp", 0.02),
+        ("signature", 0.10), ("keyfile", 0.03), ("finalize", 0.02),
+    ])
     with bind_progress_tracker(tracker):
-        if _should_use_multi_file_archive(request.input_files):
-            result = create_multi_file_avk(
-                input_filepaths=request.input_files,
-                output_filepath=request.output_file,
-                password=request.password,
-                keyphrase=request.keyphrase,
-                unlock_datetime=unlock_dt,
-                use_timecapsule=False,
-                pqc_enabled=request.pqc_enabled,
-                pqc_storage_mode=request.pqc_storage_mode,
-                pqc_keyfile_output=request.pqc_keyfile_output,
-                pqc_keyfile_protection_mode=request.pqc_keyfile_protection_mode,
-                pqc_keyfile_password=request.pqc_keyfile_password,
-                excluded_input_paths=request.excluded_input_paths,
-            )
-        else:
-            result = create_avk_file(
-                input_filepath=request.input_files[0],
-                output_filepath=request.output_file,
-                password=request.password,
-                keyphrase=request.keyphrase,
-                unlock_datetime=unlock_dt,
-                use_timecapsule=False,
-                pqc_enabled=request.pqc_enabled,
-                pqc_storage_mode=request.pqc_storage_mode,
-                pqc_keyfile_output=request.pqc_keyfile_output,
-                pqc_keyfile_protection_mode=request.pqc_keyfile_protection_mode,
-                pqc_keyfile_password=request.pqc_keyfile_password,
-            )
+        result = create_multi_file_avk(
+            input_filepaths=request.input_files,
+            output_filepath=request.output_file,
+            password=request.password,
+            keyphrase=request.keyphrase,
+            unlock_datetime=unlock_dt,
+            use_timecapsule=False,
+            pqc_enabled=request.pqc_enabled,
+            pqc_storage_mode=request.pqc_storage_mode,
+            pqc_keyfile_output=request.pqc_keyfile_output,
+            pqc_keyfile_protection_mode=request.pqc_keyfile_protection_mode,
+            pqc_keyfile_password=request.pqc_keyfile_password,
+            excluded_input_paths=request.excluded_input_paths,
+            sender_message=request.sender_message or "",
+            creator_signing_identity=request.creator_signing_identity,
+            **pqc_kwargs,
+        )
     return {"success": True, "message": "Files encrypted successfully", "output_file": request.output_file, "result": result}
 
 
 def _create_timecapsule_via_drand(request: EncryptRequest, unlock_dt: datetime) -> dict:
-    from avikal_backend.archive.pipeline.encoder import create_avk_file, generate_key_b
+    from avikal_backend.archive.pipeline.encoder import generate_key_b
     from avikal_backend.archive.pipeline.multi_file_encoder import create_multi_file_avk
     from avikal_backend.archive.pipeline.progress import ProgressTracker, bind_progress_tracker
 
     unlock_dt = _normalize_unlock_datetime_to_utc(unlock_dt)
-    tracker = ProgressTracker("timecapsule-encrypt", [("prepare", 0.15), ("provider", 0.15), ("payload", 0.45), ("metadata", 0.15), ("finalize", 0.10)])
+    tracker = ProgressTracker("timecapsule-encrypt", [
+        ("prepare", 0.03), ("provider", 0.10), ("identity", 0.10), ("pqc", 0.22),
+        ("kdf", 0.08), ("payload", 0.22), ("chess", 0.09), ("timestamp", 0.02),
+        ("signature", 0.09), ("keyfile", 0.03), ("finalize", 0.02),
+    ])
     tracker.update("prepare", "Validating unlock time", 0.2, force=True)
     _validate_unlock_datetime_against_ntp(unlock_dt)
     _enforce_system_clock_alignment("drand time-capsule creation")
@@ -1014,18 +1011,20 @@ def _create_timecapsule_via_drand(request: EncryptRequest, unlock_dt: datetime) 
             pqc_keyfile_output=request.pqc_keyfile_output,
             pqc_keyfile_protection_mode=request.pqc_keyfile_protection_mode,
             pqc_keyfile_password=request.pqc_keyfile_password,
+            sender_message=request.sender_message or "",
+            creator_signing_identity=request.creator_signing_identity,
+            **_pqc_request_kwargs(request),
         )
-        result = create_multi_file_avk(input_filepaths=request.input_files, output_filepath=request.output_file, excluded_input_paths=request.excluded_input_paths, **kwargs) if _should_use_multi_file_archive(request.input_files) else create_avk_file(input_filepath=request.input_files[0], output_filepath=request.output_file, **kwargs)
+        result = create_multi_file_avk(input_filepaths=request.input_files, output_filepath=request.output_file, excluded_input_paths=request.excluded_input_paths, **kwargs)
     return {"success": True, "message": "Time-capsule created successfully with drand timelock", "output_file": request.output_file, "result": result, "provider": "drand", "drand": {"round": helper_result.get("round"), "unlock_iso": helper_result.get("round_unlock_iso"), "chain_hash": helper_result.get("chain_hash"), "chain_url": helper_result.get("chain_url"), "beacon_id": helper_result.get("beacon_id")}}
 
 
 def _create_timecapsule_via_aavrit(request: EncryptRequest, session_token: str | None, unlock_dt: datetime) -> dict:
-    from avikal_backend.archive.pipeline.encoder import create_avk_file
     from avikal_backend.archive.pipeline.multi_file_encoder import create_multi_file_avk
     from avikal_backend.archive.pipeline.progress import ProgressTracker, bind_progress_tracker
+    from avikal_backend.core.aavrit_client import AavritClientError, create_escrow
 
     unlock_dt = _normalize_unlock_datetime_to_utc(unlock_dt)
-    _validate_unlock_datetime_against_ntp(unlock_dt)
     aavrit_url = _get_aavrit_server_url()
     config = _fetch_aavrit_capabilities(aavrit_url)
     _set_current_aavrit_mode(config["mode"])
@@ -1034,42 +1033,47 @@ def _create_timecapsule_via_aavrit(request: EncryptRequest, session_token: str |
             _raise(401, "Aavrit private mode requires authentication")
         _verify_aavrit_session_token(session_token, aavrit_url)
     unlock_timestamp = int(unlock_dt.timestamp())
-    data_hash = _create_aavrit_data_hash()
-    commit_response = _request_aavrit_commit(aavrit_url, data_hash=data_hash, unlock_timestamp=unlock_timestamp, session_token=session_token)
-    commit_payload = commit_response["payload"]
-    commit_signature = commit_response["signature"]
-    public_key_info = _fetch_aavrit_public_key(aavrit_url, session_token)
-    _verify_aavrit_signature(commit_payload, commit_signature, public_key_info["public_key_pem"])
-    if commit_payload.get("data_hash") != data_hash:
-        _raise(502, "Aavrit commit response data hash mismatch.")
-    if commit_payload.get("unlock_timestamp") != unlock_timestamp:
-        _raise(502, "Aavrit commit response unlock timestamp mismatch.")
-    if commit_payload.get("server_key_id") != public_key_info["key_id"]:
-        _raise(502, "Aavrit commit response key identifier mismatch.")
-    key_b = _derive_aavrit_time_key(commit_payload, commit_signature)
-    tracker = ProgressTracker("timecapsule-encrypt", [("prepare", 0.15), ("provider", 0.15), ("payload", 0.45), ("metadata", 0.15), ("finalize", 0.10)])
+    try:
+        escrow = create_escrow(
+            aavrit_url,
+            unlock_timestamp=unlock_timestamp,
+            session_token=session_token,
+        )
+    except AavritClientError as exc:
+        raise ServiceError(str(exc), code=exc.status_code) from exc
+    protected = escrow.protected_metadata
+    key_b = escrow.time_key
+    tracker = ProgressTracker("timecapsule-encrypt", [
+        ("prepare", 0.03), ("provider", 0.10), ("identity", 0.10), ("pqc", 0.22),
+        ("kdf", 0.08), ("payload", 0.22), ("chess", 0.09), ("timestamp", 0.02),
+        ("signature", 0.09), ("keyfile", 0.03), ("finalize", 0.02),
+    ])
     with bind_progress_tracker(tracker):
         kwargs = dict(
             password=request.password,
             keyphrase=request.keyphrase,
             unlock_datetime=unlock_dt,
             use_timecapsule=True,
-            file_id=commit_payload["commit_id"],
+            file_id=protected["escrow_id"],
             server_url=aavrit_url,
             time_key=key_b,
             timecapsule_provider="aavrit",
-            aavrit_data_hash=data_hash,
-            aavrit_commit_hash=commit_payload["commit_hash"],
-            aavrit_server_key_id=commit_payload["server_key_id"],
-            aavrit_commit_signature=commit_signature,
+            aavrit_data_hash=protected["data_commitment"],
+            aavrit_commit_hash=protected["release_key_commitment"],
+            aavrit_server_key_id=protected["authority_id"],
+            aavrit_commit_signature=protected["receipt_sha256"],
+            aavrit_route=escrow.public_route,
             pqc_enabled=request.pqc_enabled,
             pqc_storage_mode=request.pqc_storage_mode,
             pqc_keyfile_output=request.pqc_keyfile_output,
             pqc_keyfile_protection_mode=request.pqc_keyfile_protection_mode,
             pqc_keyfile_password=request.pqc_keyfile_password,
+            sender_message=request.sender_message or "",
+            creator_signing_identity=request.creator_signing_identity,
+            **_pqc_request_kwargs(request),
         )
-        result = create_multi_file_avk(input_filepaths=request.input_files, output_filepath=request.output_file, excluded_input_paths=request.excluded_input_paths, **kwargs) if _should_use_multi_file_archive(request.input_files) else create_avk_file(input_filepath=request.input_files[0], output_filepath=request.output_file, **kwargs)
-    return {"success": True, "message": "Time-capsule created successfully with Aavrit verification", "output_file": request.output_file, "result": result, "provider": "aavrit", "aavrit": {"mode": config["mode"], "server_url": aavrit_url, "commit_id": commit_payload["commit_id"], "commit_hash": commit_payload["commit_hash"], "server_key_id": commit_payload["server_key_id"]}}
+        result = create_multi_file_avk(input_filepaths=request.input_files, output_filepath=request.output_file, excluded_input_paths=request.excluded_input_paths, **kwargs)
+    return {"success": True, "message": "Time-capsule created with Aavrit hybrid escrow", "output_file": request.output_file, "result": result, "provider": "aavrit", "aavrit": {"protocol": config["protocol"], "mode": config["mode"], "server_url": aavrit_url, "escrow_id": protected["escrow_id"], "authority_id": protected["authority_id"]}}
 
 
 async def archive_encrypt(params: dict[str, Any]) -> dict[str, Any]:
@@ -1081,16 +1085,24 @@ async def archive_encrypt(params: dict[str, Any]) -> dict[str, Any]:
     try:
         _validate_archive_password_policy(request)
         _validate_pqc_keyfile_password_policy(request)
+        _validate_sender_message_policy(request)
         unlock_dt = _normalize_unlock_datetime_to_utc(request.unlock_datetime) if request.unlock_datetime else None
         if request.use_timecapsule:
             if unlock_dt is None:
                 _raise(400, "Time-capsule unlock date is required.")
             provider = _resolve_timecapsule_provider(request)
-            with _crypto_lock:
-                response_payload = await asyncio.to_thread(_create_timecapsule_via_aavrit if provider == "aavrit" else _create_timecapsule_via_drand, request, session_token, unlock_dt) if provider == "aavrit" else await asyncio.to_thread(_create_timecapsule_via_drand, request, unlock_dt)
+            if provider == "aavrit":
+                response_payload = await _run_crypto_worker(
+                    lambda: _create_timecapsule_via_aavrit(request, session_token, unlock_dt)
+                )
+            else:
+                response_payload = await _run_crypto_worker(
+                    lambda: _create_timecapsule_via_drand(request, unlock_dt)
+                )
         else:
-            with _crypto_lock:
-                response_payload = await asyncio.to_thread(_create_regular_encryption, request, unlock_dt)
+            response_payload = await _run_crypto_worker(
+                lambda: _create_regular_encryption(request, unlock_dt)
+            )
         _best_effort_log_archive_creation(request, started_at=started_at, unlock_dt=unlock_dt, response_payload=response_payload, provider=provider)
         return response_payload
     except ServiceError as exc:
@@ -1105,7 +1117,14 @@ async def archive_encrypt(params: dict[str, Any]) -> dict[str, Any]:
         _best_effort_log_archive_creation(request, started_at=started_at, unlock_dt=unlock_dt, error_message=user_message, provider=provider)
         raise ServiceError(user_message, code=500) from exc
     finally:
-        _best_effort_scrub_model_secrets(request, "password", "keyphrase", "pqc_keyfile_password")
+        _best_effort_scrub_model_secrets(
+            request,
+            "password",
+            "keyphrase",
+            "pqc_keyfile_password",
+            "creator_signing_identity",
+            "sender_message",
+        )
 
 
 def _decrypt_timecapsule_with_key(request: DecryptRequest, metadata: dict, key_b: bytes, method_label: str) -> dict:
@@ -1132,7 +1151,7 @@ def _decrypt_timecapsule_with_key(request: DecryptRequest, metadata: dict, key_b
                 metadata_override=metadata,
             )
         else:
-            output_path = extract_avk_file(
+            extracted = extract_avk_file(
                 request.input_file,
                 preview_dir,
                 password=request.password,
@@ -1141,61 +1160,60 @@ def _decrypt_timecapsule_with_key(request: DecryptRequest, metadata: dict, key_b
                 pqc_keyfile_path=request.pqc_keyfile,
                 pqc_keyfile_password=request.pqc_keyfile_password,
                 metadata_override=metadata,
+                return_details=True,
             )
+            output_path = extracted["output_path"]
             result = {"file_count": 1, "filename": os.path.basename(output_path), "output_file": output_path, "path": output_path, "size": os.path.getsize(output_path), "files": [{"filename": os.path.basename(output_path), "path": output_path, "output_file": output_path, "size": os.path.getsize(output_path)}]}
-        return {"success": True, "message": f"Time-capsule preview ready via {method_label}", "output_dir": preview_dir, "preview_session_id": preview_session_id, "result": result, "pgn_created_at_ist": _get_pgn_created_time_ist(request.input_file), "pgn_source": "filesystem_mtime_ist"}
+        created_at_ist, created_source = _get_verified_created_time_ist(metadata, request.input_file)
+        return {"success": True, "message": f"Time-capsule preview ready via {method_label}", "output_dir": preview_dir, "preview_session_id": preview_session_id, "result": result, "pgn_created_at_ist": created_at_ist, "pgn_source": created_source, "archive_integrity": metadata.get("archive_integrity"), "sender_message": metadata.get("sender_message")}
     except Exception:
         _preview_sessions.cleanup(preview_session_id)
         raise
 
 
 def _decrypt_timecapsule_via_aavrit(request: DecryptRequest, session_token: str | None, metadata: dict | None = None) -> dict:
-    metadata = metadata or _read_avk_metadata_only(request.input_file, request.password, request.keyphrase)
-    aavrit_meta = _extract_aavrit_metadata(metadata)
-    aavrit_url = _normalize_aavrit_server_url(aavrit_meta["server_url"])
-    config = _fetch_aavrit_capabilities(aavrit_url)
-    _set_current_aavrit_mode(config["mode"])
-    if config["mode"] == "private":
-        if not session_token:
-            _raise(401, "Aavrit private mode requires authentication")
-        _verify_aavrit_session_token(session_token, aavrit_url)
-    public_key_info = _fetch_aavrit_public_key(aavrit_url, session_token)
-    commit_payload = {"version": 1, "commit_id": aavrit_meta["commit_id"], "data_hash": aavrit_meta["data_hash"], "unlock_timestamp": metadata.get("unlock_timestamp"), "commit_hash": aavrit_meta["commit_hash"], "hash_alg": "SHA-256", "sig_alg": "Ed25519", "server_key_id": aavrit_meta["server_key_id"]}
-    _verify_aavrit_signature(commit_payload, aavrit_meta["commit_signature"], public_key_info["public_key_pem"])
-    if public_key_info["key_id"] != aavrit_meta["server_key_id"]:
-        _raise(400, "Aavrit server key mismatch.")
-    response_data = _request_aavrit_reveal(aavrit_url, commit_id=aavrit_meta["commit_id"], session_token=session_token)
-    if response_data.get("success") is False and response_data.get("status") == "locked":
-        _raise(403, "Time-capsule locked. Unlock time not reached yet.")
-    if response_data.get("success") is not True:
-        _raise(502, "Aavrit reveal failed.")
-    reveal_payload = response_data.get("payload")
-    reveal_signature = response_data.get("signature")
-    if not isinstance(reveal_payload, dict) or not isinstance(reveal_signature, str):
-        _raise(502, "Aavrit server returned an invalid reveal response.")
-    _verify_aavrit_signature(reveal_payload, reveal_signature, public_key_info["public_key_pem"])
-    if reveal_payload.get("commit_id") != aavrit_meta["commit_id"]:
-        _raise(400, "Aavrit reveal commit mismatch.")
-    if reveal_payload.get("data_hash") != aavrit_meta["data_hash"]:
-        _raise(400, "Aavrit reveal data hash mismatch.")
-    if reveal_payload.get("commit_hash") != aavrit_meta["commit_hash"]:
-        _raise(400, "Aavrit reveal commit hash mismatch.")
-    if reveal_payload.get("unlock_timestamp") != metadata.get("unlock_timestamp"):
-        _raise(400, "Aavrit reveal unlock timestamp mismatch.")
-    if reveal_payload.get("server_key_id") != aavrit_meta["server_key_id"]:
-        _raise(400, "Aavrit reveal key identifier mismatch.")
-    recomputed_commit_hash = _build_aavrit_commit_hash(commit_id=reveal_payload["commit_id"], data_hash=reveal_payload["data_hash"], unlock_timestamp=reveal_payload["unlock_timestamp"], reveal_value=reveal_payload["reveal_value"])
-    if recomputed_commit_hash != aavrit_meta["commit_hash"]:
-        _raise(400, "Aavrit reveal integrity verification failed.")
-    key_b = _derive_aavrit_time_key(commit_payload, aavrit_meta["commit_signature"])
-    return _decrypt_timecapsule_with_key(request, metadata, key_b, "aavrit")
+    del session_token  # Capability release is archive-bound; login tokens are never sent to archive-directed origins.
+    from avikal_backend.core.aavrit_client import (
+        AavritClientError,
+        release_escrow,
+        verify_protected_receipt,
+    )
+
+    _header, route_hints = _read_avk_public_route(request.input_file)
+    public_route = route_hints.get("aavrit_route")
+    if not route_hints.get("time_key_gated") or not isinstance(public_route, dict):
+        _raise(400, "This archive does not contain a valid Aavrit release route.")
+    try:
+        key_b, release = release_escrow(
+            public_route,
+            expected_unlock_timestamp=route_hints.get("unlock_timestamp"),
+        )
+        metadata = _read_avk_metadata_only(
+            request.input_file,
+            request.password,
+            request.keyphrase,
+            request.pqc_keyfile,
+            request.pqc_keyfile_password,
+            time_key=key_b,
+        )
+        protected = _extract_aavrit_metadata(metadata)
+        verify_protected_receipt(protected, public_route, release)
+        return _decrypt_timecapsule_with_key(request, metadata, key_b, "Aavrit")
+    except AavritClientError as exc:
+        raise ServiceError(str(exc), code=exc.status_code) from exc
 
 
 def _decrypt_timecapsule_via_drand(request: DecryptRequest, metadata: dict | None = None) -> dict:
     from avikal_backend.archive.pipeline.progress import get_progress_tracker
 
     tracker = get_progress_tracker()
-    metadata = metadata or _read_avk_metadata_only(request.input_file, request.password, request.keyphrase)
+    metadata = metadata or _read_avk_metadata_only(
+        request.input_file,
+        request.password,
+        request.keyphrase,
+        request.pqc_keyfile,
+        request.pqc_keyfile_password,
+    )
     if _detect_timecapsule_provider(metadata) != "drand":
         _raise(400, "This file is not a drand-backed time-capsule.")
     drand_ciphertext = metadata.get("drand_ciphertext")
@@ -1280,15 +1298,27 @@ async def archive_decrypt(params: dict[str, Any]) -> dict[str, Any]:
 
             tracker = ProgressTracker("decrypt", [("metadata", 0.22), ("provider", 0.18), ("payload", 0.45), ("finalize", 0.15)])
 
-            def read_timecapsule_metadata() -> dict:
+            def read_timecapsule_metadata() -> dict | None:
                 with bind_cancellation_token(cancel_token), bind_progress_tracker(tracker):
+                    if timecapsule_provider == "aavrit":
+                        tracker.update("metadata", "Aavrit route authenticated; awaiting release", 1.0, force=True)
+                        return None
                     tracker.update("metadata", "Reading time-capsule metadata", 0.05, force=True)
-                    loaded = _read_avk_metadata_only(request.input_file, request.password, request.keyphrase)
+                    loaded = _read_avk_metadata_only(
+                        request.input_file,
+                        request.password,
+                        request.keyphrase,
+                        request.pqc_keyfile,
+                        request.pqc_keyfile_password,
+                    )
                     tracker.update("metadata", "Time-capsule metadata verified", 1.0, force=True)
                     return loaded
 
             try:
-                metadata = await asyncio.to_thread(read_timecapsule_metadata)
+                metadata = await _run_crypto_worker(
+                    read_timecapsule_metadata,
+                    cancellation_token=cancel_token,
+                )
             except OperationCancelled:
                 raise
             except Exception as meta_err:
@@ -1300,10 +1330,12 @@ async def archive_decrypt(params: dict[str, Any]) -> dict[str, Any]:
                     if timecapsule_provider == "drand":
                         return _decrypt_timecapsule_via_drand(request, metadata)
                     _raise(400, "Unsupported time-capsule provider.")
-            with _crypto_lock:
-                response_payload = await asyncio.to_thread(decrypt_timecapsule_with_progress)
-                log_decrypt_event("success", response_payload=response_payload)
-                return response_payload
+            response_payload = await _run_crypto_worker(
+                decrypt_timecapsule_with_progress,
+                cancellation_token=cancel_token,
+            )
+            log_decrypt_event("success", response_payload=response_payload)
+            return response_payload
 
         def decrypt_regular_with_cancel() -> dict:
             with bind_cancellation_token(cancel_token):
@@ -1313,10 +1345,12 @@ async def archive_decrypt(params: dict[str, Any]) -> dict[str, Any]:
                     return _decrypt_timecapsule_via_drand(request, metadata)
                 return _decrypt_regular_preview(request, header_info.get("archive_mode") == ARCHIVE_MODE_MULTI)
 
-        with _crypto_lock:
-            response_payload = await asyncio.to_thread(decrypt_regular_with_cancel)
-            log_decrypt_event("success", response_payload=response_payload)
-            return response_payload
+        response_payload = await _run_crypto_worker(
+            decrypt_regular_with_cancel,
+            cancellation_token=cancel_token,
+        )
+        log_decrypt_event("success", response_payload=response_payload)
+        return response_payload
     except OperationCancelled as exc:
         log_decrypt_event("cancelled", error_message="Decryption cancelled by user.")
         raise ServiceError("Decryption cancelled by user.", code=499) from exc
@@ -1341,19 +1375,534 @@ def _decrypt_regular_preview(request: DecryptRequest, is_multi_file_archive: boo
     tracker = ProgressTracker("decrypt", [("metadata", 0.20), ("payload", 0.55), ("finalize", 0.25)])
     tracker.update("metadata", "Opening archive", 0.02, force=True)
     preview_session_id, preview_dir = _preview_sessions.create()
+    started_at = time.perf_counter()
     try:
         with bind_progress_tracker(tracker):
             if is_multi_file_archive:
                 result = extract_multi_file_avk(request.input_file, preview_dir, password=request.password, keyphrase=request.keyphrase, pqc_keyfile_path=request.pqc_keyfile, pqc_keyfile_password=request.pqc_keyfile_password)
             else:
-                output_path = extract_avk_file(request.input_file, preview_dir, password=request.password, keyphrase=request.keyphrase, pqc_keyfile_path=request.pqc_keyfile, pqc_keyfile_password=request.pqc_keyfile_password)
+                extracted = extract_avk_file(request.input_file, preview_dir, password=request.password, keyphrase=request.keyphrase, pqc_keyfile_path=request.pqc_keyfile, pqc_keyfile_password=request.pqc_keyfile_password, return_details=True)
+                output_path = extracted["output_path"]
+                metadata = extracted["metadata"]
                 output_name = os.path.basename(output_path)
                 output_size = os.path.getsize(output_path)
                 result = {"file_count": 1, "filename": output_name, "output_file": output_path, "path": output_path, "size": output_size, "files": [{"filename": output_name, "path": output_path, "output_file": output_path, "size": output_size}]}
-        return {"success": True, "message": f"Multi-file preview ready - {result['file_count']} files decrypted" if is_multi_file_archive else "Single-file preview ready", "output_dir": preview_dir, "preview_session_id": preview_session_id, "result": result, "pgn_created_at_ist": _get_pgn_created_time_ist(request.input_file), "pgn_source": "filesystem_mtime_ist"}
+            if is_multi_file_archive:
+                metadata = {
+                    "archive_integrity": result.get("archive_integrity"),
+                    "sender_message": result.get("sender_message"),
+                    "created_with_version": result.get("created_with_version"),
+                    "minimum_reader_version": result.get("minimum_reader_version"),
+                    "update_recommended": result.get("update_recommended"),
+                }
+        created_at_ist, created_source = _get_verified_created_time_ist(metadata, request.input_file)
+        report = _build_complete_legacy_path_report(
+            metadata,
+            result,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        public_integrity = _public_integrity(metadata, selected_content_verified=True, whole_payload_verified=True)
+        return {"success": True, "message": f"Multi-file preview ready - {result['file_count']} files decrypted" if is_multi_file_archive else "Single-file preview ready", "output_dir": preview_dir, "preview_session_id": preview_session_id, "result": result, "pgn_created_at_ist": created_at_ist, "pgn_source": created_source, "archive_integrity": public_integrity, "sender_message": metadata.get("sender_message"), "compatibility": {"created_with_version": metadata.get("created_with_version"), "minimum_reader_version": metadata.get("minimum_reader_version"), "update_recommended": bool(metadata.get("update_recommended"))}, "report": report}
     except Exception:
         _preview_sessions.cleanup(preview_session_id)
         raise
+
+
+def _resolve_session_time_key(request: ArchiveOpenSessionRequest, session_token: str | None, route_hints: dict[str, Any]) -> bytes | None:
+    provider = route_hints.get("provider")
+    if not provider:
+        return None
+    if provider == "aavrit":
+        del session_token
+        from avikal_backend.core.aavrit_client import AavritClientError, release_escrow
+
+        public_route = route_hints.get("aavrit_route")
+        if not route_hints.get("time_key_gated") or not isinstance(public_route, dict):
+            _raise(400, "This archive does not contain a valid Aavrit release route.")
+        try:
+            time_key, _release = release_escrow(
+                public_route,
+                expected_unlock_timestamp=route_hints.get("unlock_timestamp"),
+            )
+            return time_key
+        except AavritClientError as exc:
+            raise ServiceError(str(exc), code=exc.status_code) from exc
+    metadata = _read_avk_metadata_only(
+        request.input_file,
+        request.password,
+        request.keyphrase,
+        request.pqc_keyfile,
+        request.pqc_keyfile_password,
+    )
+    if provider == "drand":
+        _enforce_system_clock_alignment("drand time-capsule browsing")
+        helper_result = _run_drand_helper({
+            "action": "open",
+            "ciphertext": metadata.get("drand_ciphertext"),
+            "round": metadata.get("drand_round"),
+            "expected_chain_hash": metadata.get("drand_chain_hash"),
+            "expected_chain_url": metadata.get("drand_chain_url"),
+            "expected_beacon_id": metadata.get("drand_beacon_id"),
+        })
+        encoded = helper_result.get("key_b_base64")
+        if not encoded:
+            _raise(500, "drand helper did not return the unlock shard.")
+        return base64.b64decode(encoded)
+    _raise(400, "Unsupported time-capsule provider.")
+
+
+def _build_session_report(
+    session,
+    *,
+    integrity_overrides: dict[str, Any] | None = None,
+    operation: dict[str, Any] | None = None,
+    verified_files: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    metadata = session.metadata
+    try:
+        _header_info, route_hints = _read_avk_public_route(session.archive_path)
+    except Exception:
+        route_hints = {}
+    integrity = dict(metadata.get("archive_integrity") or {})
+    signature_evidence = integrity.pop("verification_evidence", None)
+    integrity.update({
+        "index_verified": True,
+        "whole_payload_verified": False,
+        "selected_content_verified": False,
+        "pqc_mode": metadata.get("pqc_storage_mode") if metadata.get("pqc_required") else "not_enabled",
+        "timecapsule_result": "release_verified" if metadata.get("timecapsule_provider") else "not_applicable",
+    })
+    if integrity_overrides:
+        integrity.update(integrity_overrides)
+    compatibility = {
+        "created_with_version": metadata.get("created_with_version"),
+        "minimum_reader_version": metadata.get("minimum_reader_version"),
+        "current_version": __version__,
+        "update_recommended": bool(metadata.get("update_recommended")),
+        "required_features": metadata.get("required_features"),
+    }
+    report = {
+        "compatibility": compatibility,
+        "archive": {
+            "archive_id": integrity.get("archive_id"),
+            "created_with_version": metadata.get("created_with_version"),
+            "created_at_utc": integrity.get("created_at_utc"),
+            "file_count": session.index["file_count"],
+            "folder_count": session.index["folder_count"],
+            "total_original_size": session.index["total_original_size"],
+            "sender_message": metadata.get("sender_message"),
+            "output_archive_size": os.path.getsize(session.archive_path),
+        },
+        "protection": {
+            "encryption_method": metadata.get("encryption_method"),
+            "password_protection_enabled": route_hints.get("requires_password"),
+            "keyphrase_protection_enabled": route_hints.get("requires_keyphrase", bool(metadata.get("keyphrase_protected"))),
+            "pqc": bool(metadata.get("pqc_required")),
+            "pqc_suite": metadata.get("pqc_algorithm"),
+            "pqc_suite_details": metadata.get("_report_pqc_suite"),
+            "pqc_storage_mode": metadata.get("pqc_storage_mode"),
+            "timecapsule_provider": metadata.get("timecapsule_provider"),
+            "archive_signature": integrity.get("scheme"),
+            "signature_algorithms": integrity.get("algorithms"),
+            "signing_identity_id": integrity.get("identity_id"),
+            "signing_identity_kind": integrity.get("identity_kind"),
+            "timestamp_status": integrity.get("timestamp_status"),
+        },
+        "assurance": integrity,
+        "payload": {
+            "format": "AVI1",
+            "payload_sha256": integrity.get("payload_sha256"),
+            "chunk_count": session.index_meta["chunk_count"],
+            "index_bytes": session.index_meta.get("index_bytes"),
+            "original_bytes": session.index["total_original_size"],
+            "stored_payload_bytes": session.index_meta.get("payload_size"),
+            "index_sha256": session.index_meta["index_hash"].hex(),
+            "manifest_sha256": session.index_meta["manifest_hash"].hex(),
+            "merkle_root_sha256": session.index_meta["merkle_root"].hex(),
+        },
+        "chess": dict(session.telemetry.get("chess") or {}),
+        "timings": {
+            key: value
+            for key, value in session.telemetry.items()
+            if key != "chess"
+        },
+        "operation": operation or {"mode": "authenticated_index_open"},
+        "verified_files": verified_files or [],
+    }
+    return finalize_assurance_report(
+        report,
+        report_type="archive_assurance",
+        signature_evidence=signature_evidence,
+    )
+
+
+def _session_response(session) -> dict[str, Any]:
+    metadata = session.metadata
+    entries = [
+        {"id": item["id"], "path": item["path"], "type": "directory", "size": 0}
+        for item in session.index["directories"]
+    ]
+    entries.extend(
+        {"id": item["id"], "path": item["path"], "type": "file", "size": item["size"]}
+        for item in session.index["files"]
+    )
+    report = _build_session_report(session)
+    return {
+        "success": True,
+        "session_id": session.session_id,
+        "archive": report["archive"],
+        "entries": entries,
+        "sender_message": metadata.get("sender_message"),
+        "report": report,
+    }
+
+
+def _enforce_creator_trust_policy(session, policy: dict[str, str] | None) -> None:
+    """Apply the OS-protected local trust decision before exposing archive contents."""
+    integrity = session.metadata.get("archive_integrity")
+    if not isinstance(integrity, dict):
+        return
+    identity_id = integrity.get("identity_id")
+    identity_kind = integrity.get("identity_kind")
+    if identity_kind == "archive" or not isinstance(identity_id, str):
+        integrity["identity_trust"] = "archive_scoped"
+        return
+    status = (policy or {}).get(identity_id)
+    if status == "revoked":
+        raise ValueError("This archive was signed by a locally revoked creator identity")
+    integrity["identity_trust"] = "trusted" if status == "trusted" else "valid_untrusted"
+
+
+def _public_integrity(metadata: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    integrity = dict(metadata.get("archive_integrity") or {})
+    integrity.pop("verification_evidence", None)
+    integrity.update(overrides)
+    return integrity
+
+
+def _build_complete_legacy_path_report(
+    metadata: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    elapsed_ms: float,
+) -> dict[str, Any] | None:
+    integrity = dict(metadata.get("archive_integrity") or {})
+    evidence = integrity.pop("verification_evidence", None)
+    if not isinstance(evidence, dict):
+        return None
+    files = result.get("files") if isinstance(result.get("files"), list) else []
+    total_bytes = sum(int(item.get("size") or 0) for item in files if isinstance(item, dict) and item.get("type") != "directory")
+    integrity.update({
+        "index_verified": False,
+        "selected_content_verified": True,
+        "whole_payload_verified": True,
+        "pqc_mode": metadata.get("pqc_storage_mode") if metadata.get("pqc_required") else "not_enabled",
+        "timecapsule_result": "release_verified" if metadata.get("timecapsule_provider") else "not_applicable",
+    })
+    report = {
+        "compatibility": {
+            "created_with_version": metadata.get("created_with_version"),
+            "minimum_reader_version": metadata.get("minimum_reader_version"),
+            "current_version": __version__,
+            "update_recommended": bool(metadata.get("update_recommended")),
+            "required_features": metadata.get("required_features"),
+        },
+        "archive": {
+            "archive_id": integrity.get("archive_id"),
+            "created_with_version": metadata.get("created_with_version"),
+            "created_at_utc": integrity.get("created_at_utc"),
+            "file_count": int(result.get("file_count") or len(files) or 1),
+            "folder_count": int(result.get("folder_count") or 0),
+            "total_original_size": total_bytes,
+            "sender_message": metadata.get("sender_message"),
+        },
+        "protection": {
+            "encryption_method": metadata.get("encryption_method"),
+            "keyphrase_protection_enabled": bool(metadata.get("keyphrase_protected")),
+            "pqc": bool(metadata.get("pqc_required")),
+            "pqc_suite": metadata.get("pqc_algorithm"),
+            "pqc_storage_mode": metadata.get("pqc_storage_mode"),
+            "timecapsule_provider": metadata.get("timecapsule_provider"),
+            "archive_signature": integrity.get("scheme"),
+            "signature_algorithms": integrity.get("algorithms"),
+            "signing_identity_id": integrity.get("identity_id"),
+            "signing_identity_kind": integrity.get("identity_kind"),
+            "timestamp_status": integrity.get("timestamp_status"),
+        },
+        "assurance": integrity,
+        "payload": {
+            "format": metadata.get("payload_format") or "legacy_complete_stream",
+            "payload_sha256": integrity.get("payload_sha256"),
+            "index_sha256": integrity.get("content_index_sha256"),
+            "manifest_sha256": integrity.get("canonical_manifest_sha256"),
+            "merkle_root_sha256": integrity.get("payload_merkle_root"),
+        },
+        "chess": dict(metadata.get("_report_chess") or {}),
+        "timings": {"complete_decryption_ms": elapsed_ms},
+        "operation": {
+            "mode": "complete_legacy_path_extraction",
+            "verified_bytes": total_bytes,
+            "elapsed_ms": elapsed_ms,
+            "throughput_mib_s": round((total_bytes / (1024 * 1024)) / (elapsed_ms / 1000), 2) if elapsed_ms else None,
+        },
+        "verified_files": [],
+    }
+    return finalize_assurance_report(report, report_type="archive_assurance", signature_evidence=evidence)
+
+
+def _verified_file_report(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "entry_id": item.get("id"),
+            "relative_path": item.get("filename"),
+            "type": item.get("type", "file"),
+            "size": int(item.get("size") or 0),
+            "sha256": item.get("sha256"),
+            "chunks_verified": int(item.get("chunks_verified") or 0),
+            "verification": item.get("verification"),
+        }
+        for item in entries
+    ]
+
+
+async def archive_open_session(params: dict[str, Any]) -> dict[str, Any]:
+    from avikal_backend.archive.pipeline.progress import CancellationToken, OperationCancelled
+
+    request = ArchiveOpenSessionRequest(**{key: value for key, value in params.items() if key != "session_token"})
+    session_token = str(params.get("session_token") or "").strip() or None
+    cancel_token = CancellationToken()
+    _set_active_decrypt_token(cancel_token)
+    if not os.path.exists(request.input_file):
+        _raise(400, "Input archive was not found.")
+    _header, route_hints = await asyncio.to_thread(_read_avk_public_route, request.input_file)
+    _validate_public_route_inputs(request, route_hints)
+    _validate_public_timecapsule_lock(route_hints)
+
+    def open_session():
+        time_key = _resolve_session_time_key(request, session_token, route_hints)
+        try:
+            session = _archive_sessions.open(
+                request.input_file,
+                password=request.password,
+                keyphrase=request.keyphrase,
+                time_key=time_key,
+                pqc_keyfile_path=request.pqc_keyfile,
+                pqc_keyfile_password=request.pqc_keyfile_password,
+            )
+            try:
+                _enforce_creator_trust_policy(session, request.creator_trust_policy)
+            except Exception:
+                _archive_sessions.close(session.session_id)
+                raise
+            return session
+        finally:
+            if time_key:
+                secure_zero(time_key)
+
+    try:
+        session = await _run_crypto_worker(open_session, cancellation_token=cancel_token)
+        return _session_response(session)
+    except OperationCancelled as exc:
+        raise ServiceError("Archive opening was cancelled by the user.", code=499) from exc
+    except ValueError as exc:
+        raise ServiceError(friendly_error(str(exc)), code=400) from exc
+    finally:
+        _clear_active_decrypt_token(cancel_token)
+        _best_effort_scrub_model_secrets(request, "password", "keyphrase", "pqc_keyfile_password")
+
+
+async def archive_extract_selection(params: dict[str, Any]) -> dict[str, Any]:
+    from avikal_backend.archive.pipeline.progress import CancellationToken, OperationCancelled
+
+    request = ArchiveSelectionRequest(**params)
+    session = _archive_sessions.get(request.session_id)
+    cancel_token = CancellationToken()
+    _set_active_decrypt_token(cancel_token)
+    preview_session_id, preview_dir = _preview_sessions.create()
+    started_at = time.perf_counter()
+    try:
+        files = await _run_crypto_worker(
+            lambda: _archive_sessions.extract(request.session_id, request.entry_ids, preview_dir),
+            cancellation_token=cancel_token,
+        )
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        total_bytes = sum(int(item.get("size") or 0) for item in files if item.get("type") != "directory")
+        operation = {
+            "mode": "selective_extraction",
+            "entry_count": len(request.entry_ids),
+            "verified_bytes": total_bytes,
+            "elapsed_ms": elapsed_ms,
+            "throughput_mib_s": round((total_bytes / (1024 * 1024)) / (elapsed_ms / 1000), 2) if elapsed_ms else None,
+        }
+        report = _build_session_report(
+            session,
+            integrity_overrides={"selected_content_verified": True, "whole_payload_verified": False},
+            operation=operation,
+            verified_files=_verified_file_report(files),
+        )
+        return {
+            "success": True,
+            "preview_session_id": preview_session_id,
+            "output_dir": preview_dir,
+            "result": _extraction_summary(files),
+            "verification": {"selected_content_verified": True, "whole_payload_verified": False},
+            "archive_integrity": report["assurance"],
+            "sender_message": session.metadata.get("sender_message"),
+            "compatibility": {
+                "created_with_version": session.metadata.get("created_with_version"),
+                "minimum_reader_version": session.metadata.get("minimum_reader_version"),
+                "update_recommended": bool(session.metadata.get("update_recommended")),
+            },
+            "report": report,
+        }
+    except OperationCancelled as exc:
+        _preview_sessions.cleanup(preview_session_id)
+        raise ServiceError("Archive extraction was cancelled by the user.", code=499) from exc
+    except ValueError as exc:
+        _preview_sessions.cleanup(preview_session_id)
+        raise ServiceError(friendly_error(str(exc)), code=400) from exc
+    finally:
+        _clear_active_decrypt_token(cancel_token)
+
+
+def _complete_session_selection(session) -> list[str]:
+    """Select each top-level entry once so directory expansion stays unambiguous."""
+    directory_ids = [item["id"] for item in session.index["directories"] if "/" not in item["path"]]
+    file_ids = [item["id"] for item in session.index["files"] if "/" not in item["path"]]
+    return directory_ids + file_ids
+
+
+def _extraction_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    file_entries = [item for item in entries if item.get("type") != "directory"]
+    directory_entries = [item for item in entries if item.get("type") == "directory"]
+    return {
+        "files": entries,
+        "file_count": len(file_entries),
+        "folder_count": len(directory_entries),
+        "total_size": sum(int(item.get("size") or 0) for item in file_entries),
+    }
+
+
+async def archive_extract_all(params: dict[str, Any]) -> dict[str, Any]:
+    from avikal_backend.archive.pipeline.progress import CancellationToken, OperationCancelled
+
+    request = ArchiveSessionRequest(**params)
+    session = _archive_sessions.get(request.session_id)
+    entry_ids = _complete_session_selection(session)
+    cancel_token = CancellationToken()
+    _set_active_decrypt_token(cancel_token)
+    preview_session_id, preview_dir = _preview_sessions.create()
+    started_at = time.perf_counter()
+    try:
+        files = await _run_crypto_worker(
+            lambda: _archive_sessions.extract(request.session_id, entry_ids, preview_dir),
+            cancellation_token=cancel_token,
+        )
+        commitment = await _run_crypto_worker(
+            lambda: _archive_sessions.verify_payload_commitment(request.session_id),
+            cancellation_token=cancel_token,
+        )
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        total_bytes = sum(int(item.get("size") or 0) for item in files if item.get("type") != "directory")
+        report = _build_session_report(
+            session,
+            integrity_overrides={"selected_content_verified": True, "whole_payload_verified": True},
+            operation={
+                "mode": "complete_extraction",
+                "verified_bytes": total_bytes,
+                "elapsed_ms": elapsed_ms,
+                "throughput_mib_s": round((total_bytes / (1024 * 1024)) / (elapsed_ms / 1000), 2) if elapsed_ms else None,
+            },
+            verified_files=_verified_file_report(files),
+        )
+        return {
+            "success": True,
+            "preview_session_id": preview_session_id,
+            "output_dir": preview_dir,
+            "result": _extraction_summary(files),
+            "verification": {
+                "selected_content_verified": True,
+                "whole_payload_verified": True,
+                **commitment,
+            },
+            "archive_integrity": report["assurance"],
+            "sender_message": session.metadata.get("sender_message"),
+            "compatibility": {
+                "created_with_version": session.metadata.get("created_with_version"),
+                "minimum_reader_version": session.metadata.get("minimum_reader_version"),
+                "update_recommended": bool(session.metadata.get("update_recommended")),
+            },
+            "report": report,
+        }
+    except OperationCancelled as exc:
+        _preview_sessions.cleanup(preview_session_id)
+        raise ServiceError("Archive extraction was cancelled by the user.", code=499) from exc
+    except ValueError as exc:
+        _preview_sessions.cleanup(preview_session_id)
+        raise ServiceError(friendly_error(str(exc)), code=400) from exc
+    finally:
+        _clear_active_decrypt_token(cancel_token)
+
+
+async def archive_verify_all(params: dict[str, Any]) -> dict[str, Any]:
+    from avikal_backend.archive.pipeline.progress import CancellationToken, OperationCancelled
+
+    request = ArchiveSessionRequest(**params)
+    session = _archive_sessions.get(request.session_id)
+    entry_ids = _complete_session_selection(session)
+    cancel_token = CancellationToken()
+    _set_active_decrypt_token(cancel_token)
+    temporary_id, temporary_root = _preview_sessions.create()
+    started_at = time.perf_counter()
+    try:
+        files = await _run_crypto_worker(
+            lambda: _archive_sessions.extract(
+                request.session_id,
+                entry_ids,
+                temporary_root,
+                verify_only=True,
+            ),
+            cancellation_token=cancel_token,
+        )
+        commitment = await _run_crypto_worker(
+            lambda: _archive_sessions.verify_payload_commitment(request.session_id),
+            cancellation_token=cancel_token,
+        )
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        total_bytes = int(session.index.get("total_original_size") or 0)
+        report = _build_session_report(
+            session,
+            integrity_overrides={"selected_content_verified": True, "whole_payload_verified": True},
+            operation={
+                "mode": "complete_verification_without_extraction",
+                "verified_bytes": total_bytes,
+                "elapsed_ms": elapsed_ms,
+                "throughput_mib_s": round((total_bytes / (1024 * 1024)) / (elapsed_ms / 1000), 2) if elapsed_ms else None,
+            },
+            verified_files=_verified_file_report(files),
+        )
+        return {
+            "success": True,
+            "verification": {
+                "selected_content_verified": True,
+                "whole_payload_verified": True,
+                **commitment,
+            },
+            "report": report,
+        }
+    except OperationCancelled as exc:
+        raise ServiceError("Archive verification was cancelled by the user.", code=499) from exc
+    except ValueError as exc:
+        raise ServiceError(friendly_error(str(exc)), code=400) from exc
+    finally:
+        _clear_active_decrypt_token(cancel_token)
+        _preview_sessions.cleanup(temporary_id)
+
+
+async def archive_close_session(params: dict[str, Any]) -> dict[str, Any]:
+    request = ArchiveSessionRequest(**params)
+    closed = await asyncio.to_thread(_archive_sessions.close, request.session_id)
+    return {"success": True, "closed": closed}
 
 
 async def archive_inspect(params: dict[str, Any]) -> dict[str, Any]:
@@ -1361,6 +1910,43 @@ async def archive_inspect(params: dict[str, Any]) -> dict[str, Any]:
     _validate_avk_structure(request.input_file)
     _header_info, route_hints = await asyncio.to_thread(_read_avk_public_route, request.input_file)
     return {"success": True, "archive": {"provider": route_hints.get("provider"), "archive_type": route_hints.get("archive_type"), "metadata_accessible": bool(route_hints.get("available")), "metadata_requires_secret": False, "password_hint": route_hints.get("requires_password"), "keyphrase_hint": route_hints.get("requires_keyphrase"), "pqc_required": route_hints.get("requires_pqc"), "pqc_storage_mode": route_hints.get("pqc_storage_mode"), "unlock_timestamp": route_hints.get("unlock_timestamp"), "drand_round": route_hints.get("drand_round"), "keyphrase_wordlist_id": route_hints.get("keyphrase_wordlist_id")}}
+
+
+async def archive_split_volumes(params: dict[str, Any]) -> dict[str, Any]:
+    request = ArchiveSplitVolumesRequest(**params)
+    from avikal_backend.archive.format.multipart import split_archive_to_volumes
+
+    try:
+        result = await _run_crypto_worker(
+            lambda: split_archive_to_volumes(
+                request.input_file,
+                output_dir=request.output_dir,
+                volume_size=request.volume_size_bytes,
+            )
+        )
+        return {"success": True, **result}
+    except ValueError as exc:
+        raise ServiceError(str(exc), code=400) from exc
+    except OSError as exc:
+        raise ServiceError(str(exc), code=507) from exc
+
+
+async def archive_join_volumes(params: dict[str, Any]) -> dict[str, Any]:
+    request = ArchiveJoinVolumesRequest(**params)
+    from avikal_backend.archive.format.multipart import join_archive_volumes
+
+    try:
+        result = await _run_crypto_worker(
+            lambda: join_archive_volumes(
+                request.volume_set_dir,
+                output_archive=request.output_file,
+            )
+        )
+        return {"success": True, **result}
+    except ValueError as exc:
+        raise ServiceError(str(exc), code=400) from exc
+    except OSError as exc:
+        raise ServiceError(str(exc), code=507) from exc
 
 
 async def pqc_keyfile_inspect(params: dict[str, Any]) -> dict[str, Any]:
@@ -1406,9 +1992,8 @@ async def archive_rekey(params: dict[str, Any]) -> dict[str, Any]:
             _raise(400, "Plaintext archives do not need rekey.")
         from avikal_backend.archive.pipeline.rekey import rekey_avk_archive
 
-        with _crypto_lock:
-            response_payload = await asyncio.to_thread(
-                rekey_avk_archive,
+        response_payload = await _run_crypto_worker(
+            lambda: rekey_avk_archive(
                 request.input_file,
                 old_password=request.old_password,
                 old_keyphrase=list(request.old_keyphrase) if request.old_keyphrase else None,
@@ -1416,16 +2001,18 @@ async def archive_rekey(params: dict[str, Any]) -> dict[str, Any]:
                 new_keyphrase=list(request.new_keyphrase) if request.new_keyphrase else None,
                 output_filepath=request.output_file,
                 force=request.force,
+                creator_signing_identity=request.creator_signing_identity,
             )
-            _best_effort_log_activity_event(
-                action="archive_rekey",
-                status="success",
-                started_at=started_at,
-                secret_mode=activity_audit._derive_secret_mode(request.new_password, request.new_keyphrase),
-                pqc_enabled=False,
-                details={"archive_mode": "regular"},
-            )
-            return response_payload
+        )
+        _best_effort_log_activity_event(
+            action="archive_rekey",
+            status="success",
+            started_at=started_at,
+            secret_mode=activity_audit._derive_secret_mode(request.new_password, request.new_keyphrase),
+            pqc_enabled=False,
+            details={"archive_mode": "regular"},
+        )
+        return response_payload
     except ServiceError as exc:
         _best_effort_log_activity_event(
             action="archive_rekey",
@@ -1446,7 +2033,14 @@ async def archive_rekey(params: dict[str, Any]) -> dict[str, Any]:
         )
         raise ServiceError(message, code=400) from exc
     finally:
-        _best_effort_scrub_model_secrets(request, "old_password", "old_keyphrase", "new_password", "new_keyphrase")
+        _best_effort_scrub_model_secrets(
+            request,
+            "old_password",
+            "old_keyphrase",
+            "new_password",
+            "new_keyphrase",
+            "creator_signing_identity",
+        )
 
 
 async def preview_cleanup_session(params: dict[str, Any]) -> dict[str, Any]:
@@ -1503,7 +2097,12 @@ async def security_settings(_params: dict[str, Any] | None = None) -> dict[str, 
             "activity_log": activity_audit.get_summary(),
             "preferences": load_user_preferences(),
             "runtime": {
-                "native_crypto": {"available": native.available, "import_error": native.import_error},
+                "native_crypto": {
+                    "available": native.available,
+                    "import_error": native.import_error,
+                    "memory_lock_available": native.memory_lock_available,
+                    "process_hardening_available": native.process_hardening_available,
+                },
                 "pqc_provider": provider_status(),
                 "version": __version__,
                 "preview_root": str(_preview_root),
@@ -1534,6 +2133,20 @@ async def security_activity_log_clear(_params: dict[str, Any] | None = None) -> 
     return {"success": True, "removed": activity_audit.clear()}
 
 
+async def identity_generate(params: dict[str, Any]) -> dict[str, Any]:
+    label = str(params.get("label") or "Creator identity").strip()
+    if not label or len(label.encode("utf-8")) > 128:
+        _raise(400, "Creator identity label must be between 1 and 128 UTF-8 bytes.")
+    identity = await asyncio.to_thread(create_archive_signing_identity, label=label, persistent=True)
+    return {"success": True, **identity}
+
+
+async def identity_validate(params: dict[str, Any]) -> dict[str, Any]:
+    require_private = bool(params.get("require_private", True))
+    identity = validate_archive_signing_identity(params.get("identity"), require_private=require_private)
+    return {"success": True, "identity_id": identity["identity_id"], "public_bundle": identity["public_bundle"]}
+
+
 METHODS = {
     "runtime.status": runtime_status,
     "runtime.verify": verify_runtime,
@@ -1547,6 +2160,13 @@ METHODS = {
     "archive.encrypt": archive_encrypt,
     "archive.decrypt": archive_decrypt,
     "archive.inspect": archive_inspect,
+    "archive.splitVolumes": archive_split_volumes,
+    "archive.joinVolumes": archive_join_volumes,
+    "archive.openSession": archive_open_session,
+    "archive.extractSelection": archive_extract_selection,
+    "archive.extractAll": archive_extract_all,
+    "archive.verifyAll": archive_verify_all,
+    "archive.closeSession": archive_close_session,
     "archive.rekey": archive_rekey,
     "pqc.keyfileInspect": pqc_keyfile_inspect,
     "preview.cleanupSession": preview_cleanup_session,
@@ -1558,6 +2178,8 @@ METHODS = {
     "security.preferencesUpdate": security_preferences_update,
     "security.activityLogExport": security_activity_log_export,
     "security.activityLogClear": security_activity_log_clear,
+    "identity.generate": identity_generate,
+    "identity.validate": identity_validate,
 }
 
 

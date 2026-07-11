@@ -60,7 +60,6 @@ module.exports = async function afterPack(context) {
     'activate.fish',
     'Activate.ps1',
     'deactivate.bat',
-    'fastapi.exe',
     'hypothesis.exe',
     'normalizer.exe',
     'pip.exe',
@@ -71,7 +70,6 @@ module.exports = async function afterPack(context) {
     'pylupdate6.exe',
     'pytest.exe',
     'pyuic6.exe',
-    'uvicorn.exe',
   ].map((name) => path.join(scriptRoot, name));
 
   const removableSitePackagePaths = [

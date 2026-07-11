@@ -1,4 +1,4 @@
-import { AlertCircle, PlugZap } from 'lucide-react'
+﻿import { AlertCircle, PlugZap } from 'lucide-react'
 import { cn } from '../lib/utils'
 import type { BackendRuntimeView } from '../hooks/useBackendRuntime'
 
@@ -13,7 +13,7 @@ export default function BackendStartupNotice({ backend, compact = false }: Backe
   return (
     <div
       className={cn(
-        'rounded-2xl border backdrop-blur-xl transition-colors',
+        'rounded-2xl border transition-colors',
         compact ? 'p-3' : 'p-4',
         backend.isUnavailable
           ? 'border-red-500/25 bg-red-500/10 text-red-500'

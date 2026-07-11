@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent, FormEvent, KeyboardEvent } from 'react'
 import { Check, FileText, Trash2, X } from 'lucide-react'
 import type { KeyphraseWordPair } from '../lib/api'
@@ -292,7 +292,7 @@ export default function KeyphraseAssistInput({
 
   return (
     <div
-      className="overflow-hidden rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] transition-all duration-300 backdrop-blur-md focus-within:border-purple-500/45 focus-within:ring-1 focus-within:ring-purple-500/25"
+      className="overflow-hidden rounded-xl bg-container-bg border border-av-border/30 shadow-[inset_0_4px_15px_var(--container-bg)] transition-all duration-300 focus-within:border-purple-500/45 focus-within:ring-1 focus-within:ring-purple-500/25"
       onClick={() => inputRef.current?.focus()}
     >
       <div className="flex flex-wrap gap-2 p-3 min-h-[100px] content-start">

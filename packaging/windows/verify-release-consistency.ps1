@@ -52,8 +52,8 @@ if ($ReleaseTag) {
 }
 
 $distRoot = Join-Path $projectRoot "dist"
-$guiInstaller = Join-Path $distRoot "RookDuel Avikal.exe"
-$cliInstaller = Join-Path $distRoot "RookDuel Avikal CLI.exe"
+$guiInstaller = Join-Path $distRoot "RookDuel-Avikal.exe"
+$cliInstaller = Join-Path $distRoot "RookDuel-Avikal-CLI.exe"
 $releaseMetadataPath = Join-Path $distRoot "avikal-release-metadata.json"
 $cliMetadataPath = Join-Path $distRoot "avikal-cli-release-metadata.json"
 

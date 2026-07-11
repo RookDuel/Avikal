@@ -1,6 +1,6 @@
 {
   "name": "avikal-desktop",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "RookDuel Avikal - Quantum-Resistant File Encryption",
   "main": "electron/main.js",
   "author": "RookDuel",
@@ -8,35 +8,37 @@
   "homepage": "https://avikal.rookduel.tech",
   "private": true,
   "scripts": {
-    "dev": "npm run dev:beta",
+    "dev": "npm run dev:production",
     "dev:beta": "npm run dev:reset && concurrently \"npm run dev:frontend:beta\" \"npm run dev:electron\"",
     "dev:production": "npm run dev:reset && concurrently \"npm run dev:frontend:production\" \"npm run dev:electron\"",
-    "dev:frontend": "npm run dev:frontend:beta",
+    "dev:frontend": "npm run dev:frontend:production",
     "dev:frontend:beta": "node scripts\\run_frontend_with_channel.js beta dev",
     "dev:frontend:production": "node scripts\\run_frontend_with_channel.js production dev",
     "dev:electron": "npm run build:native:quick && wait-on http://localhost:5173 && node scripts\\devElectron.js source",
     "dev:electron:source": "npm run dev:electron",
-    "dev:electron:packaged": "npm run build:runtime && electron-builder --win --dir --publish never && wait-on http://localhost:5173 && node scripts\\devElectron.js packaged",
+    "dev:electron:packaged": "npm run build:frontend:production && npm run build:runtime && npm run sign:runtime && electron-builder --win --dir --publish never && node scripts\\devElectron.js packaged",
     "dev:reset": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\cleanup-dev-processes.ps1",
     "build:native:quick": "backend\\venv\\Scripts\\python.exe backend\\scripts\\build_native_extension.py",
-    "build": "npm run build:beta",
+    "build": "npm run build:production",
     "build:beta": "npm run build:frontend:beta && npm run build:electron",
     "build:production": "npm run build:frontend:production && npm run build:electron",
-    "build:frontend": "npm run build:frontend:beta",
+    "build:frontend": "npm run build:frontend:production",
     "build:frontend:beta": "node scripts\\run_frontend_with_channel.js beta build",
     "build:frontend:production": "node scripts\\run_frontend_with_channel.js production build",
     "build:openssl": "powershell -ExecutionPolicy Bypass -File scripts\\build_openssl_runtime.ps1",
     "install:pqc-runtime": "powershell -ExecutionPolicy Bypass -File scripts\\install_pqc_runtime.ps1",
-    "build:native": "backend\\venv\\Scripts\\python.exe -m pip install -r backend\\requirements-build.txt && backend\\venv\\Scripts\\python.exe backend\\scripts\\build_native_extension.py",
-    "build:runtime": "backend\\venv\\Scripts\\python.exe -m pip install -r backend\\requirements-build.txt && backend\\venv\\Scripts\\python.exe scripts\\prepare_backend_runtime.py",
-    "build:electron": "npm run build:runtime && electron-builder",
+    "build:native": "backend\\venv\\Scripts\\python.exe -m pip install --require-hashes -r backend\\requirements-lock-windows.txt && backend\\venv\\Scripts\\python.exe backend\\scripts\\build_native_extension.py",
+    "build:runtime": "backend\\venv\\Scripts\\python.exe -m pip install --require-hashes -r backend\\requirements-lock-windows.txt && backend\\venv\\Scripts\\python.exe scripts\\prepare_backend_runtime.py",
+    "sign:runtime": "node scripts\\create_signed_runtime_manifest.js",
+    "build:electron": "npm run build:runtime && npm run sign:runtime && electron-builder",
     "start": "electron .",
-    "package": "npm run package:beta",
-    "package:beta": "npm run build:frontend:beta && npm run build:runtime && electron-builder --win --publish never",
-    "package:production": "npm run build:frontend:production && npm run build:runtime && electron-builder --win --publish never",
+    "package": "npm run package:production",
+    "package:beta": "npm run build:frontend:beta && npm run build:runtime && npm run sign:runtime && electron-builder --win --publish never",
+    "package:production": "npm run build:frontend:production && npm run build:runtime && npm run sign:runtime && electron-builder --win --publish never",
     "package:windows": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\build-desktop.ps1",
     "package:windows:beta": "powershell -ExecutionPolicy Bypass -Command \"$env:VITE_AVIKAL_RELEASE_CHANNEL='beta'; & 'packaging\\windows\\build-desktop.ps1'\"",
     "package:windows:production": "powershell -ExecutionPolicy Bypass -Command \"$env:VITE_AVIKAL_RELEASE_CHANNEL='production'; & 'packaging\\windows\\build-desktop.ps1'\"",
+    "package:windows:store": "npm run build:frontend:production && npm run build:runtime && npm run sign:runtime && powershell -ExecutionPolicy Bypass -File packaging\\windows\\build-store-msix.ps1",
     "package:windows:core": "npm run build:runtime && powershell -ExecutionPolicy Bypass -File packaging\\windows\\install-shared-core.ps1",
     "package:windows:gui": "npm run package:windows",
     "verify:windows:core": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\verify-shared-core.ps1",
@@ -55,9 +57,9 @@
   },
   "build": {
     "appId": "tech.rookduel.avikal",
-    "productName": "RookDuel Avikal",
-    "executableName": "RookDuel Avikal",
-    "artifactName": "RookDuel Avikal.${ext}",
+    "productName": "RookDuel-Avikal",
+    "executableName": "RookDuel-Avikal",
+    "artifactName": "RookDuel-Avikal.${ext}",
     "afterPack": "./scripts/afterPack.js",
     "artifactBuildCompleted": "./scripts/artifactBuildCompleted.js",
     "copyright": "Copyright (c) 2026 RookDuel",
@@ -78,6 +80,14 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": ".app-build/THIRD_PARTY_NOTICES.generated.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "security-policy.json",
+        "to": "security-policy.json"
       },
       {
         "from": ".app-build/backend",
@@ -119,7 +129,6 @@
         "nsis"
       ],
       "icon": "assets/icon.ico",
-      "verifyUpdateCodeSignature": false,
       "signAndEditExecutable": false
     },
     "nsis": {
@@ -128,8 +137,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "include": "build/windows-context-menu.nsh",
-      "shortcutName": "RookDuel Avikal",
-      "uninstallDisplayName": "RookDuel Avikal",
+      "shortcutName": "RookDuel-Avikal",
+      "uninstallDisplayName": "RookDuel-Avikal",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",

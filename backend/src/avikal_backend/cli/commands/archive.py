@@ -15,11 +15,11 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+from ...core.secure_delete import secure_remove_file, secure_remove_tree
 from ...archive.format.container import read_avk_header_and_keychain
 from ...archive.format.header import extract_public_route_tags_from_keychain_pgn, parse_header_bytes
 from ...archive.path_safety import resolve_safe_relative_output_path
 from ...archive.pipeline.decoder import extract_avk_file
-from ...archive.pipeline.encoder import create_avk_file
 from ...archive.pipeline.multi_file_decoder import extract_multi_file_avk
 from ...archive.pipeline.multi_file_encoder import create_multi_file_avk
 from ..formatters import human_size, summarize_metadata
@@ -98,10 +98,7 @@ def _commit_core_preview_to_output(core_result: dict[str, Any], output_dir: Path
             committed_files.append({"filename": relative_name.replace("/", os.sep), "path": str(final_path), "size": size})
     except Exception:
         for file_info in committed_files:
-            try:
-                Path(file_info["path"]).unlink(missing_ok=True)
-            except OSError:
-                pass
+            secure_remove_file(file_info["path"])
         raise
     finally:
         from ...core import services
@@ -109,9 +106,9 @@ def _commit_core_preview_to_output(core_result: dict[str, Any], output_dir: Path
         try:
             asyncio.run(services.preview_cleanup_session({"session_id": preview_session_id}))
         except Exception:
-            shutil.rmtree(preview_dir, ignore_errors=True)
+            secure_remove_tree(preview_dir)
         else:
-            shutil.rmtree(preview_dir, ignore_errors=True)
+            secure_remove_tree(preview_dir)
 
     total_size = sum(file_info["size"] for file_info in committed_files)
     return {
@@ -191,40 +188,22 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
             "drand": core_result.get("drand"),
         }
 
-    if len(input_paths) == 1 and Path(input_paths[0]).is_file():
-        engine_result = create_avk_file(
-            input_filepath=input_paths[0],
-            output_filepath=output_path,
-            unlock_datetime=unlock_dt,
-            password=password,
-            keyphrase=keyphrase,
-            username=args.username,
-            variations_per_round=args.variations,
-            use_timecapsule=args.timecapsule,
-            pqc_enabled=args.pqc,
-            pqc_keyfile_output=args.pqc_keyfile_output,
-            pqc_keyfile_protection_mode="dual_password" if pqc_keyfile_password else "archive_secret",
-            pqc_keyfile_password=pqc_keyfile_password,
-        )
-        archive_kind = "single_file"
-        selected_input_count = 1
-    else:
-        engine_result = create_multi_file_avk(
-            input_filepaths=input_paths,
-            output_filepath=output_path,
-            unlock_datetime=unlock_dt,
-            password=password,
-            keyphrase=keyphrase,
-            username=args.username,
-            variations_per_round=args.variations,
-            use_timecapsule=args.timecapsule,
-            pqc_enabled=args.pqc,
-            pqc_keyfile_output=args.pqc_keyfile_output,
-            pqc_keyfile_protection_mode="dual_password" if pqc_keyfile_password else "archive_secret",
-            pqc_keyfile_password=pqc_keyfile_password,
-        )
-        archive_kind = "multi_file"
-        selected_input_count = len(input_paths)
+    engine_result = create_multi_file_avk(
+        input_filepaths=input_paths,
+        output_filepath=output_path,
+        unlock_datetime=unlock_dt,
+        password=password,
+        keyphrase=keyphrase,
+        username=args.username,
+        variations_per_round=args.variations,
+        use_timecapsule=args.timecapsule,
+        pqc_enabled=args.pqc,
+        pqc_keyfile_output=args.pqc_keyfile_output,
+        pqc_keyfile_protection_mode="dual_password" if pqc_keyfile_password else "archive_secret",
+        pqc_keyfile_password=pqc_keyfile_password,
+    )
+    archive_kind = "single_file_indexed" if len(input_paths) == 1 and Path(input_paths[0]).is_file() else "multi_file"
+    selected_input_count = len(input_paths)
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -247,6 +226,8 @@ def encode_archive(args: argparse.Namespace) -> dict[str, Any]:
         payload["total_size_human"] = human_size(engine_result["total_size"])
     if engine_result.get("telemetry"):
         payload["telemetry"] = engine_result["telemetry"]
+    if engine_result.get("creation_report"):
+        payload["report"] = engine_result["creation_report"]
     if args.timecapsule:
         payload["timecapsule_provider"] = provider
 
@@ -303,6 +284,8 @@ def decode_archive(args: argparse.Namespace) -> dict[str, Any]:
         # (single vs. multi-file). The time-lock is enforced inside the pipeline
         # decoders that follow. Using False crashes the CLI on any locked archive.
         skip_timelock=True,
+        pqc_keyfile_path=args.pqc_keyfile,
+        pqc_keyfile_password=pqc_keyfile_password,
     )
 
     if archive_kind == "multi_file":

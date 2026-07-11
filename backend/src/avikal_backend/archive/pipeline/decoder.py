@@ -15,10 +15,11 @@ from ..security.crypto import (
 )
 from ..format.header import parse_header_bytes, validate_metadata_against_header
 from ..format.container import open_avk_payload_stream
-from ..chess_metadata import decode_chess_to_metadata_enhanced
+from ..format.indexed_payload import is_indexed_payload
 from ..path_safety import resolve_safe_output_path
 from .payload_streaming import stream_payload_to_file
 from .progress import get_progress_tracker
+from .keychain_security import unlock_archive_keychain
 from ..security.pqc_keyfile import (
     PQC_STORAGE_MODE_EMBEDDED,
     PQC_STORAGE_MODE_EXTERNAL,
@@ -39,14 +40,39 @@ def extract_avk_file_enhanced(
     pqc_keyfile_password: str = None,
     time_key: bytes = None,
     metadata_override: dict | None = None,
-) -> str:
+    return_details: bool = False,
+) -> str | dict:
     """Extract and decrypt a single-file .avk archive."""
+    with open_avk_payload_stream(avk_filepath) as (_header, _keychain, payload_stream, _embedded):
+        indexed_payload = is_indexed_payload(payload_stream)
+    if indexed_payload:
+        from .multi_file_decoder import extract_multi_file_avk
+
+        indexed_result = extract_multi_file_avk(
+            avk_filepath=avk_filepath,
+            output_directory=output_directory,
+            password=password,
+            keyphrase=keyphrase,
+            time_key=time_key,
+            pqc_keyfile_path=pqc_keyfile_path,
+            pqc_keyfile_password=pqc_keyfile_password,
+            metadata_override=metadata_override,
+        )
+        files = [item for item in indexed_result.get("files", []) if item.get("type") != "directory"]
+        if len(files) != 1:
+            raise ValueError("Single-file extraction expected exactly one indexed file")
+        output_path = files[0]["path"]
+        if return_details:
+            return {"output_path": output_path, "metadata": indexed_result.get("metadata") or {}}
+        return output_path
+
     master_key = None
     payload_key = None
     payload_decryption_key = None
     pqc_shared_secret = None
     pqc_private_bundle = None
     salt = None
+    keychain_result = None
 
     try:
         tracker = get_progress_tracker()
@@ -58,7 +84,21 @@ def extract_avk_file_enhanced(
                     tracker.update("metadata", "Reading archive metadata", 0.05, force=True)
 
                 if metadata_override is not None:
-                    metadata = metadata_override
+                    keychain_result = unlock_archive_keychain(
+                        keychain_pgn=keychain_pgn,
+                        header_bytes=header_bytes,
+                        password=password,
+                        keyphrase=keyphrase,
+                        embedded_pqc_blob=embedded_pqc_blob,
+                        pqc_keyfile_path=pqc_keyfile_path,
+                        pqc_keyfile_password=pqc_keyfile_password,
+                        skip_timelock=True,
+                        progress_tracker=tracker,
+                        time_key=time_key,
+                    )
+                    metadata = keychain_result.metadata
+                    if metadata != metadata_override:
+                        raise ValueError("Verified keychain metadata changed during the unlock flow")
                     validate_metadata_against_header(header_info, metadata)
                     chess_decoding_time = 0.0
                     if tracker:
@@ -67,14 +107,19 @@ def extract_avk_file_enhanced(
                     print("Decoding chess PGN...")
                     try:
                         start_chess = time.time()
-                        metadata = decode_chess_to_metadata_enhanced(
-                            keychain_pgn,
-                            password,
-                            keyphrase,
+                        keychain_result = unlock_archive_keychain(
+                            keychain_pgn=keychain_pgn,
+                            header_bytes=header_bytes,
+                            password=password,
+                            keyphrase=keyphrase,
+                            embedded_pqc_blob=embedded_pqc_blob,
+                            pqc_keyfile_path=pqc_keyfile_path,
+                            pqc_keyfile_password=pqc_keyfile_password,
                             skip_timelock=False,
-                            aad=header_bytes,
                             progress_tracker=tracker,
+                            time_key=time_key,
                         )
+                        metadata = keychain_result.metadata
                         validate_metadata_against_header(header_info, metadata)
                         chess_decoding_time = time.time() - start_chess
                         if tracker:
@@ -150,7 +195,10 @@ def extract_avk_file_enhanced(
                         keyphrase = normalize_mnemonic_words(keyphrase)
 
                     if pqc_required:
-                        if pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
+                        if keychain_result is not None and keychain_result.pqc_resolved:
+                            pqc_shared_secret = keychain_result.pqc_shared_secret
+                            pqc_private_bundle = keychain_result.pqc_private_bundle
+                        elif pqc_storage_mode == PQC_STORAGE_MODE_EMBEDDED:
                             if tracker:
                                 tracker.update("payload", "Unlocking embedded PQC", 0.05)
                             print("Unlocking embedded PQC bundle...")
@@ -176,15 +224,16 @@ def extract_avk_file_enhanced(
                                 expected_algorithm=pqc_algorithm,
                                 pqc_keyfile_password=pqc_keyfile_password,
                             )
-                        pqc_private_bundle = pqc_key_bundle["private_bundle"]
-                        if tracker:
-                            tracker.update("payload", "Verifying PQC bundle signatures", 0.10)
-                        pqc_shared_secret = decapsulate_pqc_archive_material(
-                            private_bundle=pqc_private_bundle,
-                            public_bundle=pqc_key_bundle["public_bundle"],
-                            pqc_ciphertext=pqc_ciphertext,
-                            expected_key_id=pqc_key_id,
-                        )
+                        if not (keychain_result is not None and keychain_result.pqc_resolved):
+                            pqc_private_bundle = pqc_key_bundle["private_bundle"]
+                            if tracker:
+                                tracker.update("payload", "Verifying PQC bundle signatures", 0.10)
+                            pqc_shared_secret = decapsulate_pqc_archive_material(
+                                private_bundle=pqc_private_bundle,
+                                public_bundle=pqc_key_bundle["public_bundle"],
+                                pqc_ciphertext=pqc_ciphertext,
+                                expected_key_id=pqc_key_id,
+                            )
                         if tracker:
                             tracker.update("payload", "Mixing PQC shared secret into payload key", 0.16)
                         payload_key = derive_pqc_hybrid_payload_key(payload_key, pqc_shared_secret, salt)
@@ -207,6 +256,15 @@ def extract_avk_file_enhanced(
                         payload_decryption_key = payload_key
 
                     output_filepath = resolve_safe_output_path(output_directory, original_filename)
+                    expected_payload_sha256 = (
+                        keychain_result.expected_payload_sha256
+                        if keychain_result is not None and keychain_result.archive_signature_verified
+                        else None
+                    )
+                    if keychain_result is not None and keychain_result.signed_payload_size is not None:
+                        actual_payload_size = getattr(payload_stream, "avikal_file_size", None)
+                        if actual_payload_size != keychain_result.signed_payload_size:
+                            raise ValueError("Archive signature payload size binding failed")
                     print("Streaming payload decode...")
                     if tracker:
                         tracker.update("payload", "Preparing payload stream", 0.24)
@@ -226,7 +284,10 @@ def extract_avk_file_enhanced(
                             ))
                             if tracker else None
                         ),
+                        expected_ciphertext_sha256=expected_payload_sha256,
                     )
+                    metadata.setdefault("archive_integrity", {})["whole_payload_verified"] = True
+                    metadata["archive_integrity"]["selected_content_verified"] = True
                     decrypt_time = time.time() - start_decrypt
                     if tracker:
                         tracker.update("finalize", "Finalizing preview file", 1.0)
@@ -266,6 +327,8 @@ def extract_avk_file_enhanced(
         print(f"  Security: {', '.join(security_features)}")
         if tracker:
             tracker.complete("Preview ready")
+        if return_details:
+            return {"output_path": output_filepath, "metadata": metadata}
         return output_filepath
     finally:
         if master_key:
@@ -291,7 +354,8 @@ def extract_avk_file(
     pqc_keyfile_password: str = None,
     time_key: bytes = None,
     metadata_override: dict | None = None,
-) -> str:
+    return_details: bool = False,
+) -> str | dict:
     """Extract a single-file .avk archive."""
     return extract_avk_file_enhanced(
         avk_filepath,
@@ -302,4 +366,5 @@ def extract_avk_file(
         pqc_keyfile_password,
         time_key=time_key,
         metadata_override=metadata_override,
+        return_details=return_details,
     )
