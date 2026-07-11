@@ -11,15 +11,21 @@ if (-not $Version) {
     $Version = [string]$packageJson.version
 }
 
-& (Join-Path $PSScriptRoot "verify-shared-core.ps1") -Version $Version
-if ($LASTEXITCODE -ne 0) {
-    throw "Install or verify the shared Avikal core before creating the CLI launcher."
-}
-
 $coreRoot = Join-Path $env:LOCALAPPDATA "RookDuel\Avikal\Core\$Version"
+$manifestPath = Join-Path $coreRoot "core.json"
 $backendExe = Join-Path $coreRoot "backend\avikal-backend.exe"
+if (-not (Test-Path $manifestPath)) {
+    throw "Missing shared Avikal core manifest: $manifestPath"
+}
 if (-not (Test-Path $backendExe)) {
     throw "Missing shared Avikal core executable: $backendExe"
+}
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ([string]$manifest.version -ne $Version) {
+    throw "Shared Avikal core version mismatch. Expected $Version, got $($manifest.version)."
+}
+if ([string]$manifest.executablePath -ne $backendExe) {
+    throw "Shared Avikal core executable path mismatch."
 }
 
 $launcherRoot = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal CLI"
