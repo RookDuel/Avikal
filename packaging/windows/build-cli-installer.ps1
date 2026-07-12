@@ -71,11 +71,6 @@ function Resolve-Makensis {
     throw "NSIS makensis.exe was not found. Install NSIS before building the CLI installer."
 }
 
-function ConvertTo-NsisString {
-    param([string]$Value)
-    return ($Value -replace '"', '$\"')
-}
-
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $Version = Get-ProjectVersion -ProjectRoot $projectRoot -ExplicitVersion $Version
 
@@ -83,6 +78,13 @@ Push-Location $projectRoot
 try {
     if (-not $SkipRuntimeBuild) {
         npm run build:runtime
+        if ($LASTEXITCODE -ne 0) {
+            throw "Runtime build failed."
+        }
+        npm run sign:runtime
+        if ($LASTEXITCODE -ne 0) {
+            throw "Runtime signing failed."
+        }
     }
 
     $backendBundle = Join-Path $projectRoot ".app-build\backend"
@@ -98,7 +100,7 @@ try {
     $workRoot = Join-Path $projectRoot ".tmp_build\windows-cli-installer"
     $payloadRoot = Join-Path $workRoot "payload"
     $installerPath = Join-Path $distRoot "RookDuel-Avikal-CLI.exe"
-    $nsiPath = Join-Path $workRoot "avikal-cli-installer.nsi"
+    $nsiPath = Join-Path $projectRoot "packaging\windows\avikal-cli-installer.nsi"
 
     if (Test-Path -LiteralPath $workRoot) {
         Remove-Item -LiteralPath $workRoot -Recurse -Force
@@ -108,86 +110,18 @@ try {
 
     Copy-RequiredDirectory -Source $backendBundle -Destination (Join-Path $payloadRoot "backend")
     Copy-RequiredDirectory -Source $backendRuntime -Destination (Join-Path $payloadRoot "backend-runtime")
-    Copy-RequiredDirectory -Source (Join-Path $projectRoot "packaging\windows") -Destination (Join-Path $payloadRoot "packaging\windows")
-    Copy-Item -LiteralPath (Join-Path $projectRoot "package.json") -Destination (Join-Path $payloadRoot "package.json") -Force
 
     if (Test-Path -LiteralPath $installerPath) {
         Remove-Item -LiteralPath $installerPath -Force
     }
 
-    $payloadRootForNsis = ConvertTo-NsisString -Value $payloadRoot
-    $installerPathForNsis = ConvertTo-NsisString -Value $installerPath
-    $versionForNsis = ConvertTo-NsisString -Value $Version
-    $nsisScript = @"
-Unicode true
-RequestExecutionLevel user
-Name "RookDuel-Avikal CLI"
-OutFile "$installerPathForNsis"
-InstallDir "`$LOCALAPPDATA\Programs\RookDuel-Avikal-CLI"
-BrandingText "RookDuel-Avikal CLI"
-SetCompressor /SOLID lzma
-
-!include "MUI2.nsh"
-!include "LogicLib.nsh"
-
-!define MUI_ABORTWARNING
-!insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_DIRECTORY
-!insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_PAGE_FINISH
-!insertmacro MUI_UNPAGE_CONFIRM
-!insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_LANGUAGE "English"
-
-Section "Install"
-  StrCpy `$1 "`$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-  IfFileExists "`$1" +2 0
-  StrCpy `$1 "`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
-
-  SetOutPath "`$INSTDIR\payload"
-  File /r "$payloadRootForNsis\*.*"
-
-  DetailPrint "Installing shared Avikal core..."
-  ExecWait '"`$1" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-shared-core.ps1" -SourceRoot "`$INSTDIR\payload" -Version "$versionForNsis"' `$0
-  `${If} `$0 != "0"
-    DetailPrint "Shared Avikal core installation failed."
-    IfSilent +2 0
-    MessageBox MB_ICONSTOP "Shared Avikal core installation failed."
-    Abort
-  `${EndIf}
-
-  DetailPrint "Installing Avikal CLI launcher..."
-  ExecWait '"`$1" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-cli-launcher.ps1" -Version "$versionForNsis"' `$0
-  `${If} `$0 != "0"
-    DetailPrint "Avikal CLI launcher installation failed."
-    IfSilent +2 0
-    MessageBox MB_ICONSTOP "Avikal CLI launcher installation failed."
-    Abort
-  `${EndIf}
-
-  WriteUninstaller "`$INSTDIR\Uninstall.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "DisplayName" "RookDuel-Avikal CLI"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "DisplayVersion" "$versionForNsis"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "Publisher" "RookDuel"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "InstallLocation" "`$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "DisplayIcon" "`$INSTDIR\payload\backend\avikal-backend.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "UninstallString" '"`$INSTDIR\Uninstall.exe"'
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "NoModify" 1
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI" "NoRepair" 1
-SectionEnd
-
-Section "Uninstall"
-  Delete "`$INSTDIR\avikal.cmd"
-  Delete "`$INSTDIR\Uninstall.exe"
-  RMDir /r "`$INSTDIR\payload"
-  RMDir "`$INSTDIR"
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RookDuel-Avikal CLI"
-SectionEnd
-"@
-
-    $nsisScript | Set-Content -LiteralPath $nsiPath -Encoding UTF8
     $makensis = Resolve-Makensis
-    & $makensis "/V2" $nsiPath
+    & $makensis `
+        "/V2" `
+        "/DOUTPUT_FILE=$installerPath" `
+        "/DPAYLOAD_ROOT=$payloadRoot" `
+        "/DAPP_VERSION=$Version" `
+        $nsiPath
     if ($LASTEXITCODE -ne 0) {
         throw "NSIS CLI installer build failed."
     }
@@ -203,7 +137,8 @@ SectionEnd
         installer_name = [System.IO.Path]::GetFileName($installerPath)
         installer_sha256 = $hash
         payload_format = "nsis-local-installer"
-        installs_shared_core = $true
+        install_layout = "direct-cli-runtime"
+        installs_shared_core = $false
         installs_cli_launcher = $true
     }
     $metadata | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $distRoot "avikal-cli-release-metadata.json")

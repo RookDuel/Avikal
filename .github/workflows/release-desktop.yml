@@ -176,23 +176,22 @@ jobs:
       - name: Build self-contained Windows CLI installer
         run: npm run package:windows:cli
 
-      - name: Validate CLI payload install scripts
+      - name: Validate CLI installer staging
         timeout-minutes: 5
         shell: pwsh
         run: |
-          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $payloadRoot = Resolve-Path ".tmp_build\windows-cli-installer\payload"
-          $validationLocalAppData = Join-Path $env:RUNNER_TEMP "avikal-cli-payload-validation"
-          Remove-Item -LiteralPath $validationLocalAppData -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $validationLocalAppData -Force | Out-Null
-          $originalLocalAppData = $env:LOCALAPPDATA
-          try {
-            $env:LOCALAPPDATA = $validationLocalAppData
-            powershell -NoProfile -ExecutionPolicy Bypass -File "packaging\windows\install-shared-core.ps1" -SourceRoot $payloadRoot -Version $packageVersion
-            powershell -NoProfile -ExecutionPolicy Bypass -File "packaging\windows\install-cli-launcher.ps1" -Version $packageVersion
-          }
-          finally {
-            $env:LOCALAPPDATA = $originalLocalAppData
+          $required = @(
+            "backend\avikal-backend.exe",
+            "backend-runtime\pqc\bin\openssl.exe",
+            "backend-runtime\avikal-runtime-integrity.json",
+            "backend-runtime\avikal-runtime-integrity.json.sig"
+          )
+          foreach ($relativePath in $required) {
+            $candidate = Join-Path $payloadRoot $relativePath
+            if (-not (Test-Path -LiteralPath $candidate)) {
+              throw "CLI installer staging is missing $relativePath"
+            }
           }
 
       - name: Build unsigned Microsoft Store MSIX
@@ -333,7 +332,7 @@ jobs:
             cli_installer_sha256 = $cliInstallerHash
             openssl_runtime_version = $env:AVIKAL_OPENSSL_VERSION
             openssl_runtime_version_text = $packagedVersion
-            packaging_model = "bundled-gui-and-bundled-cli-with-shared-core-reuse"
+            packaging_model = "bundled-gui-and-direct-bundled-cli"
           }
           $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json -Encoding utf8NoBOM
 

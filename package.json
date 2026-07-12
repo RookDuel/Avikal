@@ -43,7 +43,7 @@
     "package:windows:gui": "npm run package:windows",
     "verify:windows:core": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\verify-shared-core.ps1",
     "verify:windows:gui": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\verify-shared-core.ps1",
-    "package:windows:cli": "npm run build:runtime && npm run sign:runtime && powershell -ExecutionPolicy Bypass -File packaging\\windows\\build-cli-installer.ps1 -SkipRuntimeBuild",
+    "package:windows:cli": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\build-cli-installer.ps1 -SkipRuntimeBuild",
     "verify:windows:cli": "powershell -ExecutionPolicy Bypass -File packaging\\windows\\verify-shared-core.ps1",
     "package:cli": "powershell -ExecutionPolicy Bypass -File packaging\\cli\\build-wheel.ps1",
     "verify:cli": "powershell -ExecutionPolicy Bypass -File packaging\\cli\\verify-wheel.ps1"
