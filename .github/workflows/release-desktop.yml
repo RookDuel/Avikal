@@ -265,7 +265,7 @@ jobs:
           }
 
           $cliInstallerExe = (Resolve-Path "dist\RookDuel-Avikal-CLI.exe").Path
-          $cliInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal CLI"
+          $cliInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal-CLI"
           Remove-Item -LiteralPath $cliInstallDir -Recurse -Force -ErrorAction SilentlyContinue
           $installerExitCode = Invoke-ProcessWithTimeout -FilePath $cliInstallerExe -ArgumentList @("/S") -TimeoutSeconds 300 -Label "CLI installer"
           Write-Host "CLI installer exit code: $installerExitCode"

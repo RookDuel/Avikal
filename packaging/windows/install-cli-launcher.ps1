@@ -28,7 +28,7 @@ if ([string]$manifest.executablePath -ne $backendExe) {
     throw "Shared Avikal core executable path mismatch."
 }
 
-$launcherRoot = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal CLI"
+$launcherRoot = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal-CLI"
 New-Item -ItemType Directory -Path $launcherRoot -Force | Out-Null
 $launcherPath = Join-Path $launcherRoot "avikal.cmd"
 @"

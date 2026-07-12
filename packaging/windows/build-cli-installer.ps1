@@ -123,7 +123,7 @@ Unicode true
 RequestExecutionLevel user
 Name "RookDuel-Avikal CLI"
 OutFile "$installerPathForNsis"
-InstallDir "`$LOCALAPPDATA\Programs\RookDuel-Avikal CLI"
+InstallDir "`$LOCALAPPDATA\Programs\RookDuel-Avikal-CLI"
 BrandingText "RookDuel-Avikal CLI"
 SetCompressor /SOLID lzma
 
