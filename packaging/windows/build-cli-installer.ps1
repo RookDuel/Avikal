@@ -140,11 +140,15 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+  StrCpy `$1 "`$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists "`$1" +2 0
+  StrCpy `$1 "`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+
   SetOutPath "`$INSTDIR\payload"
   File /r "$payloadRootForNsis\*.*"
 
   DetailPrint "Installing shared Avikal core..."
-  ExecWait '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-shared-core.ps1" -SourceRoot "`$INSTDIR\payload" -Version "$versionForNsis"' `$0
+  ExecWait '"`$1" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-shared-core.ps1" -SourceRoot "`$INSTDIR\payload" -Version "$versionForNsis"' `$0
   `${If} `$0 != "0"
     DetailPrint "Shared Avikal core installation failed."
     IfSilent +2 0
@@ -153,7 +157,7 @@ Section "Install"
   `${EndIf}
 
   DetailPrint "Installing Avikal CLI launcher..."
-  ExecWait '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-cli-launcher.ps1" -Version "$versionForNsis"' `$0
+  ExecWait '"`$1" -NoProfile -ExecutionPolicy Bypass -File "`$INSTDIR\payload\packaging\windows\install-cli-launcher.ps1" -Version "$versionForNsis"' `$0
   `${If} `$0 != "0"
     DetailPrint "Avikal CLI launcher installation failed."
     IfSilent +2 0
