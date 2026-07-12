@@ -212,9 +212,18 @@ jobs:
               [Parameter(Mandatory = $true)][string]$FilePath,
               [string[]]$ArgumentList = @(),
               [int]$TimeoutSeconds = 300,
-              [string]$Label = "process"
+              [string]$Label = "process",
+              [switch]$Hidden
             )
-            $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru
+            $startProcessArgs = @{
+              FilePath = $FilePath
+              ArgumentList = $ArgumentList
+              PassThru = $true
+            }
+            if ($Hidden) {
+              $startProcessArgs.WindowStyle = 'Hidden'
+            }
+            $process = Start-Process @startProcessArgs
             if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
               Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
               throw "$Label timed out after $TimeoutSeconds seconds."
@@ -226,6 +235,10 @@ jobs:
           $guiInstallDir = Join-Path $env:LOCALAPPDATA "Programs\RookDuel-Avikal"
           Remove-Item -LiteralPath $guiInstallDir -Recurse -Force -ErrorAction SilentlyContinue
           $installerExitCode = Invoke-ProcessWithTimeout -FilePath $guiInstallerExe -ArgumentList @("/S") -TimeoutSeconds 300 -Label "GUI installer"
+          Write-Host "GUI installer exit code: $installerExitCode"
+          if (Test-Path -LiteralPath $guiInstallDir) {
+            Get-ChildItem -LiteralPath $guiInstallDir -Force -Recurse -ErrorAction SilentlyContinue | Select-Object -First 80 FullName,Length | Format-Table -AutoSize
+          }
           if ($installerExitCode -ne 0) {
             throw "GUI installer failed during smoke test with exit code $installerExitCode."
           }
@@ -253,9 +266,18 @@ jobs:
               [Parameter(Mandatory = $true)][string]$FilePath,
               [string[]]$ArgumentList = @(),
               [int]$TimeoutSeconds = 300,
-              [string]$Label = "process"
+              [string]$Label = "process",
+              [switch]$Hidden
             )
-            $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru
+            $startProcessArgs = @{
+              FilePath = $FilePath
+              ArgumentList = $ArgumentList
+              PassThru = $true
+            }
+            if ($Hidden) {
+              $startProcessArgs.WindowStyle = 'Hidden'
+            }
+            $process = Start-Process @startProcessArgs
             if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
               Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
               throw "$Label timed out after $TimeoutSeconds seconds."
