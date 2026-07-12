@@ -356,7 +356,7 @@ jobs:
             openssl_runtime_version_text = $packagedVersion
             packaging_model = "bundled-gui-and-direct-bundled-cli"
           }
-          $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json -Encoding utf8NoBOM
+          $metadata | ConvertTo-Json | Set-Content -LiteralPath dist\avikal-release-metadata.json -Encoding UTF8
 
       - name: Sign release metadata
         run: node scripts/sign_release_metadata.js dist/avikal-release-metadata.json
