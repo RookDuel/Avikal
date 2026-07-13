@@ -25,9 +25,16 @@ from avikal_backend.archive.pipeline.decoder import extract_avk_file_enhanced
 from avikal_backend.archive.pipeline.encoder import create_avk_file_enhanced
 from avikal_backend.archive.path_safety import resolve_safe_output_path, resolve_safe_relative_output_path
 from avikal_backend.archive.pipeline.multi_file_encoder import _collect_entries
+from avikal_backend.archive.security.pqc_provider import provider_status
 
 
 PASSWORD = "AvikalStrongPass!9Zeta"
+
+
+def _require_archive_signing_runtime() -> None:
+    status = provider_status()
+    if not status["available"]:
+        pytest.skip(status["reason"])
 
 
 @contextmanager
@@ -89,6 +96,7 @@ def test_multi_file_manifest_rejects_windows_unsafe_names(arcname: str, message:
 
 
 def test_tampered_protected_archive_header_is_rejected_before_write():
+    _require_archive_signing_runtime()
     with _workspace_tempdir() as temp_dir:
         payload = temp_dir / "payload.txt"
         archive = temp_dir / "protected.avk"
@@ -121,6 +129,7 @@ def test_tampered_protected_archive_header_is_rejected_before_write():
 
 
 def test_tampered_protected_payload_fails_authentication_before_write():
+    _require_archive_signing_runtime()
     with _workspace_tempdir() as temp_dir:
         payload = temp_dir / "payload.txt"
         archive = temp_dir / "protected.avk"
@@ -153,6 +162,7 @@ def test_tampered_protected_payload_fails_authentication_before_write():
 
 
 def test_plaintext_archive_tampered_filename_cannot_escape_output_directory():
+    _require_archive_signing_runtime()
     with _workspace_tempdir() as temp_dir:
         payload = temp_dir / "safe_name.bin"
         archive = temp_dir / "plain.avk"
