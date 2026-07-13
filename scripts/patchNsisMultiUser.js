@@ -18,9 +18,9 @@ function patchMultiUserTemplate(templatePath = resolveMultiUserTemplate()) {
 
   const startOccurrences = source.split(BLOCK_START).length - 1;
   const endOccurrences = source.split(BLOCK_END).length - 1;
-  if (startOccurrences !== 1 || endOccurrences !== 1) {
+  if (startOccurrences !== 1 || endOccurrences < 1) {
     throw new Error(
-      `Expected one NSIS per-user folder block in ${templatePath}; found ${startOccurrences} starts and ${endOccurrences} ends`,
+      `Expected one NSIS per-user folder start and a later block end in ${templatePath}; found ${startOccurrences} starts and ${endOccurrences} ends`,
     );
   }
 
