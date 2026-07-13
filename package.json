@@ -60,6 +60,7 @@
     "productName": "RookDuel-Avikal",
     "executableName": "RookDuel-Avikal",
     "artifactName": "RookDuel-Avikal.${ext}",
+    "beforePack": "./scripts/patchNsisMultiUser.js",
     "afterPack": "./scripts/afterPack.js",
     "artifactBuildCompleted": "./scripts/artifactBuildCompleted.js",
     "copyright": "Copyright (c) 2026 RookDuel",
