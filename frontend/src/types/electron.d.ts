@@ -135,6 +135,8 @@ declare global {
     getAppInfo?: () => Promise<AppInfo>
     checkForUpdates?: () => Promise<UpdateCheckResult>
     openLatestRelease?: () => Promise<boolean>
+    recordDiagnosticEvent?: (event: Record<string, unknown>) => Promise<boolean>
+    exportDiagnostics?: () => Promise<string | null>
     invokeCore?: <T = unknown>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
     onBackendStatus?: (callback: (status: BackendRuntimeStatus) => void) => () => void
     minimizeWindow: () => Promise<void>
@@ -157,6 +159,7 @@ declare global {
       create: (label: string) => Promise<Record<string, unknown>>
       list: () => Promise<{ identities: Record<string, unknown>[]; trusted: Record<string, unknown>[]; secureStorageAvailable: boolean }>
       delete: (identityId: string) => Promise<boolean>
+      deleteTrusted: (identityId: string) => Promise<boolean>
       exportPublic: (identityId: string) => Promise<string | null>
       importTrusted: () => Promise<Record<string, unknown> | null>
       setTrust: (identityId: string, status: 'trusted' | 'revoked') => Promise<Record<string, unknown>>

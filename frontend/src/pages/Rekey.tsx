@@ -62,6 +62,7 @@ export default function Rekey() {
 
   const [archivePath, setArchivePath] = useState('')
   const [archiveHints, setArchiveHints] = useState<ArchiveInspectHints | null>(null)
+  const [archiveInspectError, setArchiveInspectError] = useState<string | null>(null)
   const [inspectLoading, setInspectLoading] = useState(false)
 
   const [oldPassword, setOldPassword] = useState('')
@@ -79,6 +80,7 @@ export default function Rekey() {
   const [showCurrentCredentialsPanel, setShowCurrentCredentialsPanel] = useState(false)
   const [showNewCredentialsPanel, setShowNewCredentialsPanel] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [choosingOutput, setChoosingOutput] = useState(false)
   const [rekeyResult, setRekeyResult] = useState<RekeyResult | null>(null)
   const [keyphraseWordPairs, setKeyphraseWordPairs] = useState<KeyphraseWordPair[]>([])
   const [isCopied, setIsCopied] = useState(false)
@@ -135,21 +137,26 @@ export default function Rekey() {
   useEffect(() => {
     if (!archivePath) {
       setArchiveHints(null)
+      setArchiveInspectError(null)
       return
     }
 
     let cancelled = false
     setInspectLoading(true)
+    setArchiveInspectError(null)
     api.inspectArchive({ input_file: archivePath })
       .then((response) => {
         if (!cancelled) {
           setArchiveHints(response.archive || null)
+          setArchiveInspectError(null)
         }
       })
       .catch((error) => {
         if (!cancelled) {
           setArchiveHints(null)
-          toast.error(getErrorMessage(error, 'Failed to inspect archive'))
+          const message = getErrorMessage(error, 'Failed to inspect archive')
+          setArchiveInspectError(message)
+          toast.error(message)
         }
       })
       .finally(() => {
@@ -160,6 +167,28 @@ export default function Rekey() {
       cancelled = true
     }
   }, [archivePath])
+
+  const selectOutputFile = async (defaultPath: string) => {
+    if (!window.electron?.saveFile) {
+      toast.error('Output file picker is unavailable')
+      return null
+    }
+
+    try {
+      setChoosingOutput(true)
+      const selected = await window.electron.saveFile({
+        defaultPath,
+        filters: [{ name: 'RookDuel Avikal File', extensions: ['avk'] }],
+      })
+      return selected || null
+    } catch (error) {
+      console.error('Output file selection failed:', error)
+      toast.error('Failed to choose output path')
+      return null
+    } finally {
+      setChoosingOutput(false)
+    }
+  }
 
   const handleBrowseArchive = async () => {
     try {
@@ -184,18 +213,8 @@ export default function Rekey() {
   }
 
   const handleChooseOutput = async () => {
-    try {
-      const selected = await window.electron?.saveFile({
-        defaultPath: outputFilePath || deriveDefaultRekeyPath(archivePath),
-        filters: [{ name: 'RookDuel Avikal File', extensions: ['avk'] }],
-      })
-      if (selected) {
-        setOutputFilePath(selected)
-      }
-    } catch (error) {
-      console.error('Output file selection failed:', error)
-      toast.error('Failed to choose output path')
-    }
+    const selected = await selectOutputFile(outputFilePath || deriveDefaultRekeyPath(archivePath))
+    if (selected) setOutputFilePath(selected)
   }
 
   const handleGenerateKeyphrase = async () => {
@@ -295,8 +314,9 @@ export default function Rekey() {
 
   const canRekey = backendRuntime.isReady
     && !!archivePath
-    && !!outputFilePath
+    && !!archiveHints
     && !loading
+    && !choosingOutput
     && !inspectLoading
     && !unsupportedReason
     && hasCurrentSecret
@@ -306,15 +326,25 @@ export default function Rekey() {
     && (newPasswordEnabled || newKeyphraseEnabled)
 
   const handleRekey = async () => {
-    if (!canRekey) return
+    if (!canRekey) {
+      if (archiveInspectError) toast.error(archiveInspectError)
+      else if (!archiveHints && archivePath) toast.error('Archive inspection must finish before rekey can start.')
+      else if (unsupportedReason) toast.error(unsupportedReason)
+      return
+    }
+
+    const selectedOutputFile = await selectOutputFile(outputFilePath || deriveDefaultRekeyPath(archivePath))
+    if (!selectedOutputFile) return
 
     try {
+      setOutputFilePath(selectedOutputFile)
       setLoading(true)
       setRekeyResult(null)
 
       const result = await api.rekeyArchive({
         input_file: archivePath,
-        output_file: outputFilePath,
+        output_file: selectedOutputFile,
+        force: true,
         old_password: oldPassword || undefined,
         old_keyphrase: splitKeyphraseWords(oldKeyphrase).length > 0 ? splitKeyphraseWords(oldKeyphrase) : undefined,
         new_password: newPasswordEnabled ? newPassword || undefined : undefined,
@@ -452,6 +482,19 @@ export default function Rekey() {
                             </div>
                           </div>
                         )}
+                        {archiveInspectError && (
+                          <div className="mt-3 rounded-2xl border border-red-500/25 bg-red-500/5 p-3">
+                            <div className="flex items-start gap-2.5">
+                              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-red-500/10 text-red-500">
+                                <ShieldAlert className="h-4 w-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-sm font-semibold text-av-main">Archive inspection failed</p>
+                                <p className="mt-1 text-[12px] leading-relaxed text-av-muted">{archiveInspectError}</p>
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3">
@@ -517,17 +560,19 @@ export default function Rekey() {
                   <p className="text-[10px] font-semibold text-av-muted uppercase tracking-[0.18em]">Destination</p>
                   <button
                     onClick={handleChooseOutput}
-                    disabled={!archivePath}
+                    disabled={!archivePath || choosingOutput}
                     className={`rounded-lg px-3 py-1.5 text-[11px] font-semibold transition-colors ${
-                      archivePath
+                      archivePath && !choosingOutput
                         ? 'bg-av-main text-av-surface hover:opacity-90'
                         : 'bg-av-border/20 text-av-muted cursor-not-allowed'
                     }`}
                   >
-                    {outputFilePath ? 'Change' : 'Choose'}
+                    {choosingOutput ? 'Choosing...' : outputFilePath ? 'Change' : 'Choose'}
                   </button>
                 </div>
-                <p className="line-clamp-2 break-all text-sm text-av-main">{outputFilePath || 'No output selected.'}</p>
+                <p className="line-clamp-2 break-all text-sm text-av-main">
+                  {outputFilePath || (archivePath ? 'Choose now or confirm the file name when rotating starts.' : 'No archive selected.')}
+                </p>
               </div>
               {creatorIdentities.length > 0 && (
                 <label className="mt-3 block text-[11px] font-medium text-av-muted">
@@ -700,14 +745,14 @@ export default function Rekey() {
               }`}
             >
               <RotateCw className="w-5 h-5" />
-              {loading ? 'Rekeying Archive...' : !backendRuntime.isReady ? 'Starting Secure Engine...' : 'Rotate Credentials'}
+              {loading ? 'Rekeying Archive...' : choosingOutput ? 'Choosing Output...' : !backendRuntime.isReady ? 'Starting Secure Engine...' : 'Rotate Credentials'}
             </button>
             <p className="text-center text-[11px] text-av-muted mt-1 font-light">
               {!backendRuntime.isReady
                 ? backendRuntime.detail
                 : unsupportedReason
                   ? unsupportedReason
-                  : 'Rekey keeps payload.enc unchanged and rebuilds the archive around the exact new protection set shown above.'}
+                  : 'You will choose the output file name and folder before Rekey starts.'}
             </p>
           </div>
         </div>

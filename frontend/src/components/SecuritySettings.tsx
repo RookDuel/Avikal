@@ -58,6 +58,13 @@ interface SettingsPayload {
     retention_days?: number
     chain_status?: string
   }
+  diagnostic_log?: {
+    entry_count: number
+    storage_path: string
+    last_event_at?: string | null
+    export_format?: string
+    max_file_size_bytes?: number
+  }
   preferences?: UserPreferences
   runtime?: {
     version?: string
@@ -134,7 +141,7 @@ const VISUAL_MODE_OPTIONS: Array<{ id: VisualEffectsMode; label: string; desc: s
 const TABS: Array<{ id: TabType; label: string; icon: LucideIcon }> = [
   { id: 'appearance', label: 'Appearance', icon: Sun },
   { id: 'aavrit', label: 'Aavrit', icon: Server },
-  { id: 'identities', label: 'Signing Identities', icon: UserRoundCheck },
+  { id: 'identities', label: 'Signing Keys', icon: UserRoundCheck },
   { id: 'privacy', label: 'Privacy', icon: ShieldCheck },
   { id: 'defaults', label: 'Archive Defaults', icon: SlidersHorizontal },
   { id: 'runtime', label: 'Runtime', icon: Server },
@@ -190,6 +197,7 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [exportingAuditLog, setExportingAuditLog] = useState(false)
+  const [exportingDiagnosticLog, setExportingDiagnosticLog] = useState(false)
   const [clearingAuditLog, setClearingAuditLog] = useState(false)
   const [cleaningPreviews, setCleaningPreviews] = useState(false)
   const [appInfo, setAppInfo] = useState<AppInfoPayload | null>(null)
@@ -219,7 +227,7 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
   const refreshCreatorIdentities = async () => {
     try {
       const bridge = window.electron?.creatorIdentity
-      if (!bridge) throw new Error('Signing identity service is unavailable')
+      if (!bridge) throw new Error('Signing key service is unavailable')
       const result = await bridge.list()
       setCreatorIdentities((result?.identities || []) as unknown as CreatorIdentityView[])
       setTrustedIdentities((result?.trusted || []) as unknown as CreatorIdentityView[])
@@ -240,11 +248,11 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
     try {
       setIdentityBusy(true)
       const bridge = window.electron?.creatorIdentity
-      if (!bridge) throw new Error('Signing identity service is unavailable')
+      if (!bridge) throw new Error('Signing key service is unavailable')
       await bridge.create(normalizedLabel)
       setIdentityLabel('')
       await refreshCreatorIdentities()
-      toast.success('Signing identity created')
+      toast.success('Signing key created')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Identity creation failed')
     } finally {
@@ -256,11 +264,11 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
     try {
       setIdentityBusy(true)
       const bridge = window.electron?.creatorIdentity
-      if (!bridge) throw new Error('Signing identity service is unavailable')
+      if (!bridge) throw new Error('Signing key service is unavailable')
       const removed = await bridge.delete(identityId)
-      if (!removed) throw new Error('Signing identity was not found')
+      if (!removed) throw new Error('Signing key was not found')
       await refreshCreatorIdentities()
-      toast.success('Signing identity deleted')
+      toast.success('Signing key deleted')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Identity deletion failed')
     } finally {
@@ -272,11 +280,11 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
     try {
       setIdentityBusy(true)
       const bridge = window.electron?.creatorIdentity
-      if (!bridge) throw new Error('Signing identity service is unavailable')
+      if (!bridge) throw new Error('Signing key service is unavailable')
       const result = await bridge.importTrusted()
       if (result) {
         await refreshCreatorIdentities()
-        toast.success('Creator fingerprint trusted')
+        toast.success('Author fingerprint trusted')
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Public identity import failed')
@@ -289,9 +297,9 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
     try {
       setIdentityBusy(true)
       const bridge = window.electron?.creatorIdentity
-      if (!bridge) throw new Error('Signing identity service is unavailable')
+      if (!bridge) throw new Error('Signing key service is unavailable')
       const outputPath = await bridge.exportPublic(identityId)
-      if (outputPath) toast.success('Public identity card exported')
+      if (outputPath) toast.success('Public author card exported')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Public identity export failed')
     } finally {
@@ -303,12 +311,33 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
     try {
       setIdentityBusy(true)
       const bridge = window.electron?.creatorIdentity
-      if (!bridge) throw new Error('Signing identity service is unavailable')
+      if (!bridge) throw new Error('Signing key service is unavailable')
       await bridge.setTrust(identityId, status)
       await refreshCreatorIdentities()
-      toast.success(status === 'revoked' ? 'Creator fingerprint revoked' : 'Creator fingerprint trusted')
+      toast.success(status === 'revoked' ? 'Author fingerprint revoked' : 'Author fingerprint trusted')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Trust update failed')
+    } finally {
+      setIdentityBusy(false)
+    }
+  }
+
+  const deleteTrustedIdentity = async (identityId: string) => {
+    const shouldDelete = window.confirm(
+      'Remove this trusted author card from this device? Future archives from this author will no longer use your saved trust decision.',
+    )
+    if (!shouldDelete) return
+
+    try {
+      setIdentityBusy(true)
+      const bridge = window.electron?.creatorIdentity
+      if (!bridge?.deleteTrusted) throw new Error('Trusted author removal is unavailable')
+      const removed = await bridge.deleteTrusted(identityId)
+      if (!removed) throw new Error('Trusted author card was not found')
+      await refreshCreatorIdentities()
+      toast.success('Trusted author removed')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Trusted author removal failed')
     } finally {
       setIdentityBusy(false)
     }
@@ -323,7 +352,15 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
 
       if (data.success) {
         const nextSettings = data.settings as SettingsPayload
-        const nextPreferences = sanitizeUserPreferences(nextSettings.preferences ?? loadUserPreferences())
+        const cachedPreferences = loadUserPreferences()
+        const nextPreferences = sanitizeUserPreferences(nextSettings.preferences ?? cachedPreferences)
+        if (
+          cachedPreferences.appearance.visual_effects_mode !== 'auto'
+          && nextPreferences.appearance.visual_effects_mode === 'auto'
+        ) {
+          nextPreferences.appearance.visual_effects_mode = cachedPreferences.appearance.visual_effects_mode
+        }
+        nextSettings.preferences = nextPreferences
         setSettings(nextSettings)
         if (preferenceSaveSequence === saveSequenceAtStart) {
           setPreferences(nextPreferences)
@@ -338,26 +375,63 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
     }
   }
 
+  const applyVisualPreference = async (mode: VisualEffectsMode) => {
+    if (!window.electron?.setVisualMode) return
+    if (mode === 'effects' || mode === 'normal') {
+      await window.electron.setVisualMode(mode)
+      return
+    }
+    const status = await window.electron.getVisualMode?.()
+    const automaticMode = status?.automaticMode === 'effects' ? 'effects' : 'normal'
+    await window.electron.setVisualMode(automaticMode)
+  }
+
   const savePreferences = async (nextPreferences: UserPreferences) => {
     const saveSequence = preferenceSaveSequence + 1
     preferenceSaveSequence = saveSequence
     const sanitized = sanitizeUserPreferences(nextPreferences)
     setPreferences(sanitized)
     saveUserPreferences(sanitized)
+    void applyVisualPreference(sanitized.appearance.visual_effects_mode)
     setSaving(true)
     try {
-      const response = await callCoreResponse('security.preferencesUpdate', {
-        method: 'POST',
-        body: JSON.stringify({ preferences: sanitized }),
-      })
-      const data = await response.json()
-      if (!response.ok || !data.success) {
-        throw new Error(data.detail || data.message || 'Failed to save preferences')
+      const persistOnce = async () => {
+        const response = await callCoreResponse('security.preferencesUpdate', {
+          method: 'POST',
+          body: JSON.stringify({ preferences: sanitized }),
+        })
+        const data = await response.json()
+        if (!response.ok || !data.success) {
+          throw new Error(data.detail || data.message || 'Failed to save preferences')
+        }
+        return sanitizeUserPreferences(data.preferences)
       }
-      const persisted = sanitizeUserPreferences(data.preferences)
+
+      let persisted = await persistOnce()
+      if (persisted.appearance.visual_effects_mode !== sanitized.appearance.visual_effects_mode) {
+        await window.electron?.recordDiagnosticEvent?.({
+          event: 'preference_persist_mismatch',
+          status: 'retrying',
+          level: 'warning',
+          requested_visual_mode: sanitized.appearance.visual_effects_mode,
+          persisted_visual_mode: persisted.appearance.visual_effects_mode,
+        }).catch(() => false)
+        persisted = await persistOnce()
+      }
+      if (persisted.appearance.visual_effects_mode !== sanitized.appearance.visual_effects_mode) {
+        await window.electron?.recordDiagnosticEvent?.({
+          event: 'preference_persist_mismatch',
+          status: 'using_local_cache',
+          level: 'error',
+          requested_visual_mode: sanitized.appearance.visual_effects_mode,
+          persisted_visual_mode: persisted.appearance.visual_effects_mode,
+        }).catch(() => false)
+        persisted = sanitized
+      }
       if (preferenceSaveSequence === saveSequence) {
         setPreferences(persisted)
         saveUserPreferences(persisted)
+        void applyVisualPreference(persisted.appearance.visual_effects_mode)
         setSettings((current) => current ? { ...current, preferences: persisted } : current)
       }
       toast.success('Preferences saved')
@@ -412,6 +486,45 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
       toast.error(message)
     } finally {
       setExportingAuditLog(false)
+    }
+  }
+
+  const exportDiagnosticLog = async () => {
+    try {
+      setExportingDiagnosticLog(true)
+      if (window.electron?.exportDiagnostics) {
+        const selectedPath = await window.electron.exportDiagnostics()
+        if (selectedPath) toast.success('Support diagnostics exported')
+        return
+      }
+
+      const response = await callCoreResponse('security.diagnosticsExport')
+      const data = await response.json()
+      if (!response.ok || !data.success || !data.markdown) {
+        throw new Error(data.detail || data.message || 'Failed to export support diagnostics')
+      }
+      const filename = data.filename || 'avikal-diagnostics.md'
+      if (window.electron?.saveTextFile) {
+        const selectedPath = await window.electron.saveTextFile({
+          defaultPath: filename,
+          filters: [{ name: 'Markdown Files', extensions: ['md'] }],
+          content: data.markdown,
+        })
+        if (selectedPath) toast.success('Support diagnostics exported')
+        return
+      }
+      const blob = new Blob([data.markdown], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      link.click()
+      URL.revokeObjectURL(url)
+      toast.success('Support diagnostics exported')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to export support diagnostics')
+    } finally {
+      setExportingDiagnosticLog(false)
     }
   }
 
@@ -722,6 +835,7 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
                         exportIdentity={exportCreatorIdentity}
                         importTrusted={importTrustedIdentity}
                         setTrust={updateCreatorTrust}
+                        deleteTrusted={deleteTrustedIdentity}
                       />
                     )}
 
@@ -773,7 +887,9 @@ export default function SecuritySettings({ isOpen, onClose, initialTab = 'appear
                       <DiagnosticsTab
                         settings={settings}
                         exportingAuditLog={exportingAuditLog}
+                        exportingDiagnosticLog={exportingDiagnosticLog}
                         exportActivityLog={exportActivityLog}
+                        exportDiagnosticLog={exportDiagnosticLog}
                       />
                     )}
                   </motion.div>
@@ -972,7 +1088,7 @@ function AppearanceTab({
   )
 }
 
-function SigningIdentitiesTab({ identities, trusted, secureStorageAvailable, busy, identityLabel, setIdentityLabel, createIdentity, deleteIdentity, exportIdentity, importTrusted, setTrust }: {
+function SigningIdentitiesTab({ identities, trusted, secureStorageAvailable, busy, identityLabel, setIdentityLabel, createIdentity, deleteIdentity, exportIdentity, importTrusted, setTrust, deleteTrusted }: {
   identities: CreatorIdentityView[]
   trusted: CreatorIdentityView[]
   secureStorageAvailable: boolean
@@ -984,30 +1100,58 @@ function SigningIdentitiesTab({ identities, trusted, secureStorageAvailable, bus
   exportIdentity: (identityId: string) => void
   importTrusted: () => void
   setTrust: (identityId: string, status: 'trusted' | 'revoked') => void
+  deleteTrusted: (identityId: string) => void
 }) {
-  return (
-    <div className="space-y-7">
-      <SectionHeader title="Signing Identities" description="Manage creator fingerprints used to prove archive origin." />
+  const revokedCount = trusted.filter((identity) => identity.status === 'revoked').length
+  const trustedCount = trusted.length - revokedCount
 
-      <div className="grid gap-3 md:grid-cols-3">
-        <StatusCard title="Private-key storage" ready={secureStorageAvailable} detail={secureStorageAvailable ? 'Protected by OS secure storage' : 'Identity creation unavailable'} />
-        <Stat label="Your identities" value={identities.length} />
-        <Stat label="Trusted creators" value={trusted.length} />
+  return (
+    <div className="space-y-6">
+      <SectionHeader title="Signing Keys" description="Control which author fingerprints this device creates, trusts, blocks, or forgets." />
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <StatusCard title="Private storage" ready={secureStorageAvailable} detail={secureStorageAvailable ? 'OS-protected key storage is available' : 'Private signing keys cannot be created on this device'} />
+        <Stat label="Private keys" value={identities.length} />
+        <Stat label="Trusted authors" value={trustedCount} />
+        <Stat label="Revoked authors" value={revokedCount} />
       </div>
 
-      <Card className="space-y-5">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
-          <label className="min-w-0 flex-1">
-            <span className="mb-2 block text-sm font-semibold text-av-main">New signing identity</span>
+      <Card className="overflow-hidden p-0">
+        <div className="border-b border-av-border/55 bg-gradient-to-br from-av-border/12 via-av-surface to-av-surface p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-av-muted">Trust model</p>
+              <h3 className="mt-2 text-xl font-bold tracking-tight text-av-main">Author identity stays local and explicit</h3>
+              <p className="mt-2 text-sm leading-6 text-av-muted">
+                Private signing keys identify archives you create. Trusted author cards identify public fingerprints you have imported from someone else.
+              </p>
+            </div>
+            <div className="grid min-w-[260px] gap-2 text-sm">
+              <div className="flex items-start gap-2 rounded-2xl border border-emerald-500/20 bg-emerald-500/8 p-3 text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>Revoke keeps a blocked fingerprint on record.</span>
+              </div>
+              <div className="flex items-start gap-2 rounded-2xl border border-av-border/55 bg-av-surface/75 p-3 text-av-muted">
+                <Trash2 className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>Remove forgets an imported author card from this device.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+          <label className="min-w-0">
+            <span className="mb-2 block text-sm font-semibold text-av-main">Create private signing key</span>
             <input
               value={identityLabel}
               onChange={(event) => setIdentityLabel(event.target.value)}
               onKeyDown={(event) => { if (event.key === 'Enter') createIdentity(identityLabel) }}
               maxLength={128}
-              placeholder="Example: Atharva primary creator key"
+              placeholder="Example: Product release signing key"
               disabled={busy || !secureStorageAvailable}
               className="w-full rounded-xl border border-av-border/80 bg-av-surface px-4 py-3 text-sm text-av-main outline-none transition focus:border-av-accent focus:ring-4 focus:ring-av-accent/10 disabled:cursor-not-allowed disabled:opacity-50"
             />
+            <p className="mt-2 text-xs leading-5 text-av-muted">Use a label you will recognize later. The private material stays outside the renderer.</p>
           </label>
           <button
             disabled={busy || !secureStorageAvailable || !identityLabel.trim()}
@@ -1016,36 +1160,48 @@ function SigningIdentitiesTab({ identities, trusted, secureStorageAvailable, bus
             type="button"
           >
             <UserRoundCheck className="h-4 w-4" />
-            Create identity
+            Create key
           </button>
         </div>
-        <p className="rounded-2xl border border-av-border/55 bg-av-border/5 p-4 text-sm leading-6 text-av-muted">
-          Persistent identities let recipients recognize the same creator across multiple archives. Private key material stays outside the renderer.
-        </p>
       </Card>
 
       <div className="grid gap-5 xl:grid-cols-2">
         <Card className="space-y-4">
-          <div>
-            <h3 className="font-bold text-av-main">Your private identities</h3>
-            <p className="mt-1 text-sm leading-6 text-av-muted">Export public cards for recipients. Delete only when you no longer need that creator fingerprint.</p>
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-av-border/60 bg-av-border/10 text-av-main">
+              <KeyRound className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-av-main">Your private signing keys</h3>
+              <p className="mt-1 text-sm leading-6 text-av-muted">Export public author cards for recipients. Delete a private key only when you no longer need to sign or rekey archives with it.</p>
+            </div>
           </div>
+
           <div className="space-y-3">
             {identities.length === 0 ? (
-              <p className="rounded-2xl border border-dashed border-av-border p-5 text-sm leading-6 text-av-muted">No persistent creator identity exists. New archives can still use archive-scoped signatures.</p>
+              <div className="rounded-2xl border border-dashed border-av-border p-5">
+                <p className="font-semibold text-av-main">No private signing key yet</p>
+                <p className="mt-1 text-sm leading-6 text-av-muted">Archives can still use archive-scoped signatures, but recipients will not see a reusable author fingerprint.</p>
+              </div>
             ) : identities.map((identity) => (
-              <div key={identity.identity_id} className="rounded-2xl border border-av-border/70 bg-av-border/5 p-4">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div key={identity.identity_id} className="rounded-2xl border border-av-border/70 bg-av-border/5 p-4 transition-colors hover:bg-av-border/8">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0">
-                    <p className="font-bold text-av-main">{identity.label || 'Unnamed identity'}</p>
+                    <p className="font-bold text-av-main">{identity.label || 'Private signing key'}</p>
                     {identity.created_at && <p className="mt-1 text-xs text-av-muted">Created {new Date(identity.created_at).toLocaleString()}</p>}
                   </div>
-                  <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">Private</span>
+                  <span className="w-fit rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">Private</span>
                 </div>
                 <p className="mt-3 break-all rounded-xl border border-av-border/50 bg-av-surface/70 p-3 font-mono text-[11px] leading-5 text-av-muted">{identity.identity_id}</p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button disabled={busy} onClick={() => exportIdentity(identity.identity_id)} className="rounded-lg border border-av-border px-3 py-1.5 text-xs font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">Export public card</button>
-                  <button disabled={busy} onClick={() => deleteIdentity(identity.identity_id)} className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-xs font-bold text-red-700 transition-colors hover:bg-red-500/10 disabled:opacity-40 dark:text-red-300" type="button">Delete private identity</button>
+                  <button disabled={busy} onClick={() => exportIdentity(identity.identity_id)} className="inline-flex items-center gap-1.5 rounded-lg border border-av-border px-3 py-1.5 text-xs font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">
+                    <Download className="h-3.5 w-3.5" />
+                    Export public card
+                  </button>
+                  <button disabled={busy} onClick={() => deleteIdentity(identity.identity_id)} className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-xs font-bold text-red-700 transition-colors hover:bg-red-500/10 disabled:opacity-40 dark:text-red-300" type="button">
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete key
+                  </button>
                 </div>
               </div>
             ))}
@@ -1054,27 +1210,72 @@ function SigningIdentitiesTab({ identities, trusted, secureStorageAvailable, bus
 
         <Card className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <h3 className="font-bold text-av-main">Trusted creator cards</h3>
-              <p className="mt-1 text-sm leading-6 text-av-muted">Import public fingerprints only after comparing them through a separate trusted channel.</p>
+            <div className="flex items-start gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-av-border/60 bg-av-border/10 text-av-main">
+                <ShieldCheck className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-av-main">Trusted authors</h3>
+                <p className="mt-1 text-sm leading-6 text-av-muted">Import public author cards only after checking the fingerprint through a separate trusted channel.</p>
+              </div>
             </div>
-            <button disabled={busy} onClick={importTrusted} className="shrink-0 rounded-xl border border-av-border px-4 py-2.5 text-sm font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">Import card</button>
+            <button disabled={busy} onClick={importTrusted} className="shrink-0 rounded-xl border border-av-border px-4 py-2.5 text-sm font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">Import author card</button>
           </div>
+
           <div className="space-y-3">
             {trusted.length === 0 ? (
-              <p className="rounded-2xl border border-dashed border-av-border p-5 text-sm leading-6 text-av-muted">No external creator fingerprints are trusted on this device.</p>
-            ) : trusted.map((identity) => (
-              <div key={identity.identity_id} className="rounded-2xl border border-av-border/70 bg-av-border/5 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="font-bold text-av-main">{identity.label || 'Trusted creator'}</p>
-                    <p className="mt-1 break-all font-mono text-[11px] leading-5 text-av-muted">{identity.identity_id}</p>
-                  </div>
-                  <span className={cn('shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em]', identity.status === 'revoked' ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300')}>{identity.status || 'trusted'}</span>
-                </div>
-                <button disabled={busy} onClick={() => setTrust(identity.identity_id, identity.status === 'revoked' ? 'trusted' : 'revoked')} className="mt-3 rounded-lg border border-av-border px-3 py-1.5 text-xs font-bold text-av-main transition-colors hover:bg-av-border/10 disabled:opacity-40" type="button">{identity.status === 'revoked' ? 'Restore trust' : 'Mark as revoked'}</button>
+              <div className="rounded-2xl border border-dashed border-av-border p-5">
+                <p className="font-semibold text-av-main">No trusted authors saved</p>
+                <p className="mt-1 text-sm leading-6 text-av-muted">Imported author cards will appear here with trust, revoke, and remove controls.</p>
               </div>
-            ))}
+            ) : trusted.map((identity) => {
+              const revoked = identity.status === 'revoked'
+              return (
+                <div key={identity.identity_id} className={cn(
+                  'rounded-2xl border p-4 transition-colors',
+                  revoked ? 'border-red-500/25 bg-red-500/5' : 'border-av-border/70 bg-av-border/5 hover:bg-av-border/8',
+                )}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-bold text-av-main">{identity.label || 'Trusted author'}</p>
+                      <p className="mt-1 break-all font-mono text-[11px] leading-5 text-av-muted">{identity.identity_id}</p>
+                    </div>
+                    <span className={cn(
+                      'shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em]',
+                      revoked
+                        ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300'
+                        : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300',
+                    )}>
+                      {revoked ? 'Revoked' : 'Trusted'}
+                    </span>
+                  </div>
+                  <p className="mt-3 rounded-xl border border-av-border/45 bg-av-surface/65 p-3 text-xs leading-5 text-av-muted">
+                    {revoked
+                      ? 'Archives from this author are blocked until trust is restored or the card is removed.'
+                      : 'Archives from this author can use your saved trust decision during open and verification.'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      disabled={busy}
+                      onClick={() => setTrust(identity.identity_id, revoked ? 'trusted' : 'revoked')}
+                      className={cn(
+                        'rounded-lg border px-3 py-1.5 text-xs font-bold transition-colors disabled:opacity-40',
+                        revoked
+                          ? 'border-emerald-500/30 bg-emerald-500/8 text-emerald-700 hover:bg-emerald-500/12 dark:text-emerald-300'
+                          : 'border-av-border text-av-main hover:bg-av-border/10',
+                      )}
+                      type="button"
+                    >
+                      {revoked ? 'Restore trust' : 'Revoke'}
+                    </button>
+                    <button disabled={busy} onClick={() => deleteTrusted(identity.identity_id)} className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-xs font-bold text-red-700 transition-colors hover:bg-red-500/10 disabled:opacity-40 dark:text-red-300" type="button">
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         </Card>
       </div>
@@ -1651,11 +1852,15 @@ function HelpLegalTab({ openExternalUrl }: { openExternalUrl: (url: string) => P
 function DiagnosticsTab({
   settings,
   exportingAuditLog,
+  exportingDiagnosticLog,
   exportActivityLog,
+  exportDiagnosticLog,
 }: {
   settings: SettingsPayload | null
   exportingAuditLog: boolean
+  exportingDiagnosticLog: boolean
   exportActivityLog: () => void
+  exportDiagnosticLog: () => void
 }) {
   return (
     <div className="space-y-7">
@@ -1668,17 +1873,32 @@ function DiagnosticsTab({
         </div>
         <Stat label="Audit chain" value={settings?.activity_log?.chain_status || 'empty'} />
         <PathBlock label="Raw activity log" value={settings?.activity_log?.storage_path || 'Unavailable'} />
+        <PathBlock label="Support diagnostics log" value={settings?.diagnostic_log?.storage_path || 'Unavailable'} />
         <PathBlock label="Preview root" value={settings?.runtime?.preview_root || 'Unavailable'} />
         <PathBlock label="Log directory" value={settings?.runtime?.log_dir || 'Unavailable'} />
-        <button
-          onClick={exportActivityLog}
-          disabled={exportingAuditLog}
-          className="inline-flex items-center gap-2 rounded-xl bg-av-main px-5 py-3 text-sm font-bold text-av-surface shadow-sm transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-          type="button"
-        >
-          <Download className="h-4 w-4" />
-          {exportingAuditLog ? 'Exporting...' : 'Export Activity Markdown'}
-        </button>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <button
+            onClick={exportActivityLog}
+            disabled={exportingAuditLog}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-av-border bg-av-surface px-5 py-3 text-sm font-bold text-av-main shadow-sm transition-colors hover:bg-av-border/12 disabled:cursor-not-allowed disabled:opacity-60"
+            type="button"
+          >
+            <Download className="h-4 w-4" />
+            {exportingAuditLog ? 'Exporting...' : 'Export Activity Audit'}
+          </button>
+          <button
+            onClick={exportDiagnosticLog}
+            disabled={exportingDiagnosticLog}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-av-main px-5 py-3 text-sm font-bold text-av-surface shadow-sm transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            type="button"
+          >
+            <Download className="h-4 w-4" />
+            {exportingDiagnosticLog ? 'Exporting...' : 'Export Support Diagnostics'}
+          </button>
+        </div>
+        <p className="text-xs leading-6 text-av-muted">
+          Activity audit is user-facing history. Support diagnostics is for debugging production errors and includes redacted IPC/backend failure evidence with correlation IDs.
+        </p>
       </Card>
     </div>
   )

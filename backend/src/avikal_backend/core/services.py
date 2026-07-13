@@ -45,6 +45,7 @@ from avikal_backend.archive.security.pqc_provider import (
     validate_archive_signing_identity,
 )
 from avikal_backend.core.private_workspace import ensure_private_dir
+from avikal_backend.core.diagnostics import diagnostic_log
 from avikal_backend.core.preview_sessions import PreviewSessionStore
 from avikal_backend.core.archive_sessions import ArchiveSessionStore
 from avikal_backend.core.redaction import redact_text
@@ -173,6 +174,7 @@ _ERROR_PATTERNS = [
     (re.compile(r"legacy unsigned archives must be decrypted and recreated before rekeying|created before rekey support", re.I), "This archive must be decoded and created again before Rekey can rotate its credentials."),
     (re.compile(r"rekey requires the creator identity", re.I), "Rekey requires the creator signing identity that originally signed this archive."),
     (re.compile(r"rekeyed archive failed post-build integrity verification|source archive payload does not match", re.I), "Rekey verification failed. The archive was not modified."),
+    (re.compile(r"output file already exists|refusing to overwrite an existing archive|use --force to overwrite", re.I), "An archive already exists at that output path. Choose a different file name or location, then try again."),
     (re.compile(r"pqc keyfile not found|requires an external pqc keyfile|provide the \.avkkey|keyfile does not match this archive", re.I), "This archive requires the correct .avkkey file. Please provide the matching PQC keyfile."),
     (re.compile(r"\.avkkey requires its keyfile password|requires.*keyfile password", re.I), "This .avkkey requires its keyfile password."),
     (re.compile(r"incorrect \.avkkey password|corrupted keyfile", re.I), "Incorrect .avkkey password or corrupted keyfile."),
@@ -2095,6 +2097,7 @@ async def security_settings(_params: dict[str, Any] | None = None) -> dict[str, 
         "success": True,
         "settings": {
             "activity_log": activity_audit.get_summary(),
+            "diagnostic_log": diagnostic_log.get_summary(),
             "preferences": load_user_preferences(),
             "runtime": {
                 "native_crypto": {
@@ -2131,6 +2134,16 @@ async def security_activity_log_export(_params: dict[str, Any] | None = None) ->
 
 async def security_activity_log_clear(_params: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"success": True, "removed": activity_audit.clear()}
+
+
+async def security_diagnostics_export(_params: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = diagnostic_log.build_markdown_export()
+    _best_effort_log_activity_event(
+        action="diagnostics_export",
+        status="success",
+        details={"expanded_entry_count": payload.get("entry_count")},
+    )
+    return payload
 
 
 async def identity_generate(params: dict[str, Any]) -> dict[str, Any]:
@@ -2178,6 +2191,7 @@ METHODS = {
     "security.preferencesUpdate": security_preferences_update,
     "security.activityLogExport": security_activity_log_export,
     "security.activityLogClear": security_activity_log_clear,
+    "security.diagnosticsExport": security_diagnostics_export,
     "identity.generate": identity_generate,
     "identity.validate": identity_validate,
 }
@@ -2187,7 +2201,8 @@ async def dispatch(method: str, params: dict[str, Any] | None = None) -> Any:
     handler = METHODS.get(method)
     if handler is None:
         raise ServiceError(f"Unknown core method: {method}", code=404)
-    payload = params if isinstance(params, dict) else {}
+    payload = dict(params) if isinstance(params, dict) else {}
+    payload.pop("__diagnostic_context", None)
     try:
         return await handler(payload)
     except ServiceError:

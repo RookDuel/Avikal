@@ -48,6 +48,7 @@ const electronBridge = Object.freeze({
     create: (label) => ipcRenderer.invoke('identity:create', label),
     list: () => ipcRenderer.invoke('identity:list'),
     delete: (identityId) => ipcRenderer.invoke('identity:delete', identityId),
+    deleteTrusted: (identityId) => ipcRenderer.invoke('identity:deleteTrusted', identityId),
     exportPublic: (identityId) => ipcRenderer.invoke('identity:exportPublic', identityId),
     importTrusted: () => ipcRenderer.invoke('identity:importTrusted'),
     setTrust: (identityId, status) => ipcRenderer.invoke('identity:setTrust', identityId, status),
@@ -67,6 +68,8 @@ const electronBridge = Object.freeze({
   getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   openLatestRelease: () => ipcRenderer.invoke('updates:openLatest'),
+  recordDiagnosticEvent: (event) => ipcRenderer.invoke('diagnostics:recordRenderer', event),
+  exportDiagnostics: () => ipcRenderer.invoke('diagnostics:exportSupportLog'),
   invokeCore: (method, params, timeoutMs) => ipcRenderer.invoke('core:invoke', method, params, timeoutMs),
   onBackendStatus: (callback) => {
     const listener = (event, data) => callback(data);
