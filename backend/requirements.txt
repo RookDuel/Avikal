@@ -1,5 +1,5 @@
 requests==2.33.1
 pydantic==2.12.5
-cryptography==48.0.1
+cryptography==50.0.0
 brotli==1.2.0
 psutil==7.2.2
